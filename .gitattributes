@@ -1,0 +1,23 @@
+# 统一行尾：仓库内与检出后均为 LF（跨平台用于 Linux 审计机，避免 CRLF 污染脚本）
+* text=auto eol=lf
+
+# 明确文本类型，确保 diff 可读
+*.md    text
+*.json  text
+*.py    text
+*.yml   text
+*.yaml  text
+*.sh    text
+
+# 二进制资源不做行尾转换
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.zip   binary
+*.gz    binary
+*.xz    binary
+*.bin   binary
+*.img   binary

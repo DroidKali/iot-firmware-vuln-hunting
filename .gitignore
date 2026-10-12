@@ -1,0 +1,56 @@
+# ---- 审计产物（在用户工作目录生成，不应入库）----
+fw-audit/
+*-metrics.json
+*-tiering.json
+*-findings-*.jsonl
+
+# ---- 敏感信息：提取到的凭据完整值，永不入库 ----
+50-secrets.local
+*.secrets.local
+secrets.local
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+known_hosts
+
+# ---- 固件镜像与提取产物（大文件）----
+*.bin
+*.img
+*.trx
+*.chk
+*.ubi
+*.ubifs
+*.sqsh
+*.squashfs
+*.jffs2
+*.cramfs
+01-extract/
+_extract/
+squashfs-root/
+_*.extracted/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.uv/
+uv.lock
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# ---- 工具缓存 ----
+.cache/
+.afl/
+AFLplusplus/
+affinity_*/
+out/

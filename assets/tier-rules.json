@@ -1,0 +1,123 @@
+{
+  "version": "1.0",
+  "description": "Tier 分层规则。按 rules 数组顺序匹配，命中即停（R1 为后置动态提升，不在顺序匹配中）。",
+  "weights": {
+    "T1": 1.0,
+    "T2": 0.5,
+    "T3": 0.1,
+    "SKIP": 0.0
+  },
+  "default_budget_per_agent": 800,
+  "agent_budget_hint": {
+    "32k_context": 300,
+    "128k_context": 800,
+    "200k_context": 1500
+  },
+  "text_line_to_kb": 40,
+  "rules": [
+    {
+      "id": "R0",
+      "tier": "SKIP",
+      "reason": "文档 / 本地化 / 字体 / 静态图片 / 包管理元数据，仅做关键字扫描",
+      "path_regex": [
+        "(^|/)(doc|docs|man|info|licenses|fonts|terminfo)s?(/|$)",
+        "(^|/)share/locale/",
+        "(^|/)(locale|zoneinfo)(/|$)",
+        "^var/lib/(dpkg|opkg|apk)/",
+        "\\.(png|jpg|jpeg|gif|bmp|svg|ico|woff2?|ttf|eot|otf|pdf|gz\\.txt)$"
+      ]
+    },
+    {
+      "id": "R2",
+      "tier": "T1",
+      "reason": "外部输入入口：Web/CGI/监听服务/协议解析器",
+      "path_regex": [
+        "(^|/)cgi-bin/",
+        "\\.cgi$",
+        "(^|/)www/cgi/"
+      ],
+      "name_regex": [
+        "^(httpd|lighttpd|uhttpd|boa|goahead|webs|webserver|mini_httpd|thttpd|miniupnpd|upnpd|wscd|hnapd|telnetd|utelnetd|sshd|dropbear|dnsmasq|dhcpd|udhcpd|smbd|nmbd|ftpd|vsftpd|pure-ftpd|mosquitto|snmpd|tftpd|cwmp|tr069|acsd|l2tpd|pppd|openvpn|hostapd|wpa_supplicant|ntpd|ntpclient|ubusd|netifd)$"
+      ],
+      "symbol_any": ["listen", "accept", "recvfrom", "recv", "bind", "socketpair"],
+      "content_regex": ["/cgi-bin/", "/goform/", "SOAPAction", "/hnap"]
+    },
+    {
+      "id": "R3",
+      "tier": "T1",
+      "reason": "启动链与配置：以 root 运行、决定服务是否出厂开启、常含未加引号的变量展开",
+      "path_regex": [
+        "(^|/)etc/init\\.d/",
+        "(^|/)etc/rc\\.d/",
+        "(^|/)etc/rc[0-9]\\.d/",
+        "(^|/)(rcS|rc\\.local|inittab|init\\.d/rcS)$",
+        "(^|/)hotplug",
+        "(^|/)etc/config/",
+        "\\.(sh|cfg|conf|ini)$",
+        "(^|/)nvram",
+        "(^|/)default.*\\.cfg$",
+        "(^|/)etc/(passwd|shadow|group|sudoers|hosts\\.(allow|deny))$",
+        "(^|/)(hostapd|wpa_supplicant)\\.conf$"
+      ]
+    },
+    {
+      "id": "R4",
+      "tier": "T2",
+      "reason": "共享库 / 内核模块 / libexec",
+      "path_regex": [
+        "\\.so(\\.[0-9.]+)*$",
+        "\\.ko$",
+        "(^|/)usr/libexec/",
+        "(^|/)lib/",
+        "(^|/)usr/lib/"
+      ]
+    },
+    {
+      "id": "R5",
+      "tier": "T2",
+      "reason": "保守兜底：未匹配任何规则的文件默认 T2，宁可多花预算不降深度。评估顺序永远最后。",
+      "fallback": true
+    },
+    {
+      "id": "R6",
+      "tier": "T3",
+      "reason": "静态资源与纯数据",
+      "path_regex": [
+        "(^|/)www/",
+        "(^|/)htdocs/",
+        "\\.(html?|css|map)$",
+        "(^|/)usr/share/(?!locale|man|doc|fonts|terminfo)"
+      ]
+    }
+  ],
+  "promotion_rules": [
+    {
+      "id": "R1",
+      "from": ["SKIP", "T2", "T3"],
+      "to": "T1",
+      "condition": "layer1_hit_priority in ['P0','P1']",
+      "note": "Layer 1 命中 P0/P1 即动态提升为 T1；记录到 tiering.promotions"
+    },
+    {
+      "id": "R1b",
+      "from": ["T2"],
+      "to": "T1",
+      "condition": "dynamic_escalation_by_auditor == true",
+      "note": "审计过程中发现 T2 文件封装了危险操作（system/exec 包装函数），就地按 T1 分析"
+    },
+    {
+      "id": "R1c",
+      "from": ["T3"],
+      "to": "T2",
+      "condition": "dynamic_escalation_by_auditor == true",
+      "note": "T3 文件里发现非纯数据的业务逻辑/脚本执行"
+    },
+    {
+      "id": "R7",
+      "from": ["T3", "SKIP"],
+      "to": "T3",
+      "condition": "layer1_hit_priority in ['P2','P3']",
+      "note": "保持 T3/SKIP 但标 review_flag=true，进入快速复核队列"
+    }
+  ]
+}
