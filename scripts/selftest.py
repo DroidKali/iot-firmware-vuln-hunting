@@ -210,7 +210,7 @@ def main() -> int:
         with open(p, "w", encoding="utf-8", newline="\n") as f:
             f.write(txt)
 
-    print("\n[1/10] fw_triage.py — 度量 / 加固画像 / 分层")
+    print("\n[1/11] fw_triage.py — 度量 / 加固画像 / 分层")
     r = run([os.path.join(HERE, "fw_triage.py"), img, "--rootfs", root, "--tier",
              "--budget", "800", "--out", metrics, "--plan", plan, "--pretty"])
     check("fw_triage 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
@@ -238,7 +238,7 @@ def main() -> int:
     check("T3 含 www/index.html", "www/index.html" in set(t["t3_list"]))
     check("EALB > 0", t["ealoc_total"] > 0, str(t["ealoc_total"]))
 
-    print("\n[2/10] sink_scan.py — Layer 1 危险模式扫描")
+    print("\n[2/11] sink_scan.py — Layer 1 危险模式扫描")
     r = run([os.path.join(HERE, "sink_scan.py"), root, "--json", sinks])
     check("sink_scan 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
     if r.returncode != 0:
@@ -252,19 +252,19 @@ def main() -> int:
     check("etc/passwd 不再误报 P1-S-020", ("P1-S-020", "etc/passwd") not in key)
     check("文档目录被跳过", not any(f["file"].startswith("usr/share/doc") for f in sd["findings"]))
 
-    print("\n[3/10] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
+    print("\n[3/11] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vpart, "--tiering", tiering])
     check("不完整输入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
 
-    print("\n[4/10] coverage_gate.py — 覆盖率门禁（完整应通过）")
+    print("\n[4/11] coverage_gate.py — 覆盖率门禁（完整应通过）")
     out = os.path.join(base, "40-coverage.md")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vfull, "--tiering", tiering, "--out", out])
     check("完整输入 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("门禁报告已生成", os.path.isfile(out))
 
-    print("\n[5/10] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
+    print("\n[5/11] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
     bad_rep = os.path.join(base, "report-bad.md")
     with open(bad_rep, "w", encoding="utf-8") as fh:
         fh.write(
@@ -341,7 +341,7 @@ def main() -> int:
     check("⑥ 保留指针行（移动语义）→ 退出码 0", r.returncode == 0,
           r.stdout.strip()[-200:])
 
-    print("\n[6/10] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
+    print("\n[6/11] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
     review_bad = os.path.join(base, "25-review-list.md")
     with open(review_bad, "w", encoding="utf-8") as fh:
         fh.write("- [x] `www/cgi-bin/ping.cgi`\n"     # 有结论 → OK
@@ -373,7 +373,7 @@ def main() -> int:
     check("审阅清单一致 → 退出码 0", r.returncode == 0,
           r.stdout.strip()[-160:])
 
-    print("\n[7/10] coverage_gate.py — 报告 9 必填字段校验")
+    print("\n[7/11] coverage_gate.py — 报告 9 必填字段校验")
     f_bad = os.path.join(base, "report-fields-bad.md")
     with open(f_bad, "w", encoding="utf-8") as fh:
         fh.write(
@@ -409,7 +409,7 @@ def main() -> int:
     check("9 字段齐全 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("报告模板字段不误报", _template_fields_clean())
 
-    print("\n[8/10] coverage_gate.py — G4 入口级覆盖（文件级 100% ≠ 入口级 100%）")
+    print("\n[8/11] coverage_gate.py — G4 入口级覆盖（文件级 100% ≠ 入口级 100%）")
     tj_g4 = os.path.join(base, "02-tiering-g4.json")
     with open(tj_g4, "w", encoding="utf-8") as fh:
         json.dump({"rootfs_analysis": {"tiering": {"shards": [{"items": [
@@ -451,7 +451,7 @@ def main() -> int:
              "--entrypoints", ep_ok, "--out", os.path.join(base, "40-g4c.md")])
     check("入口枚举 + 全部处置 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
 
-    print("\n[9/10] coverage_gate.py — G5 绕过矩阵（「有防护」≠「防护有效」）")
+    print("\n[9/11] coverage_gate.py — G5 绕过矩阵（「有防护」≠「防护有效」）")
     vp_bad = os.path.join(base, "30-claim-bad.md")
     with open(vp_bad, "w", encoding="utf-8") as fh:
         fh.write("# 结论\n\n## F-001 · x\n\n- 影响: 已鉴权，不可利用\n")
@@ -481,7 +481,42 @@ def main() -> int:
     check("G5 端到端接入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
     check("检出绕过矩阵缺失", "绕过矩阵完备（G5）" in open(out_g5, encoding="utf-8").read())
 
-    print("\n[10/10] coverage_gate.py — G1/G2/G3 自动修复 + 类型→Base 命中")
+    print("\n[10/11] coverage_gate.py — G6 跨请求污点溯源（持久化来源须声明写入面）")
+    _F = ("- **类型**：命令注入\n- **位置**：`usr/sbin/httpd:0x1`\n- **优先级**：P1\n"
+          "- **置信度**：CONFIRMED\n- **CVSS 3.1**：`AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H` = 9.8\n"
+          "{src}- **Sink**：system()\n- **完整调用链**：1. a @0x1\n- **证据**：`[E1]` disasm\n")
+    xr_bad = os.path.join(base, "report-xreq-bad.md")
+    with open(xr_bad, "w", encoding="utf-8") as fh:
+        fh.write("## 4. 漏洞详情\n\n### F-001 · nvram 值拼入 shell\n\n"
+                 + _F.format(src="- **Source**：nvram `wan_ifname`\n"))
+    xr_good = os.path.join(base, "report-xreq-good.md")
+    with open(xr_good, "w", encoding="utf-8") as fh:
+        fh.write("## 4. 漏洞详情\n\n### F-001 · nvram 值拼入 shell\n\n"
+                 + _F.format(src="- **Source**：nvram `wan_ifname`（唯一写入面为恢复配置导入）\n"))
+    xr_static = os.path.join(base, "report-xreq-static.md")
+    with open(xr_static, "w", encoding="utf-8") as fh:
+        fh.write("## 4. 漏洞详情\n\n### F-002 · 静态配置 HTTP 源\n\n"
+                 + _F.format(src="- **Source**：`updater.conf` 中的 update_server\n"))
+    check("持久化来源缺写入面 → 检出",
+          len(_cg.check_cross_request(xr_bad)["violations"]) == 1)
+    check("声明写入面 → 不报",
+          not _cg.check_cross_request(xr_good)["violations"])
+    check("静态配置（.conf）不误报",
+          _cg.check_cross_request(xr_static)["findings"] == 0)
+    out_g6 = os.path.join(base, "40-g6.md")
+    r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
+             "--verified", vfull, "--tiering", tiering,
+             "--report", xr_bad, "--cross-request", "--out", out_g6])
+    g6_txt = open(out_g6, encoding="utf-8").read()
+    check("G6 端到端接入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
+    check("检出跨请求污点溯源缺失", "跨请求污点溯源（G6）" in g6_txt)
+    r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
+             "--verified", vfull, "--tiering", tiering,
+             "--report", xr_good, "--cross-request", "--out",
+             os.path.join(base, "40-g6b.md")])
+    check("声明写入面端到端 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
+
+    print("\n[11/11] coverage_gate.py — G1/G2/G3 自动修复 + 类型→Base 命中")
     out_rec = os.path.join(base, "40-recover.md")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vpart, "--tiering", tiering,

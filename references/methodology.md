@@ -12,7 +12,8 @@
 | Tier 分层：Controller / Service / Entity | T1 外部输入入口 / T2 业务与库 / T3 静态数据 | 分层依据从「架构角色」换成「是否可达外部输入」 |
 | EALOC = T1×1.0 + T2×0.5 + T3×0.1 | EALB = Σ tier_weight × text_KB | 单位从「行」换成「代码段 KB」，因为固件里二进制占主体 |
 | Layer 1：ripgrep + Semgrep 全量预扫描 | `fw_triage.py` + `sink_scan.py` 多语言规则扫描 + mithril 内容扫描 | 固件没有源码语义分析，只能靠字符串/符号/配置模式 |
-| Layer 2：双轨审计（Sink-driven / Control-driven） | 完全保留，且固件场景 Track B 权重更高 | 固件的认证绕过、无验签 OTA 占比高于 Java 的 SQL 注入类 |
+| Layer 2：双轨审计（Sink-driven / Control-driven） | 扩展为**三轨**：Track A/B 完全保留（固件场景 Track B 权重更高），**新增 Track C 跨请求污点** | 固件认证绕过、无验签 OTA 占比高；且污点常经 NVRAM/IPC/文件**跨请求**传递，单请求视角会系统性漏报高阶漏洞 |
+| （Bridge, IEEE S&P'26）高阶污点漏洞检测：BDG + ADG + 跨请求污点 | Track C + `sink-rules.json` 的 `cross-request` 规则 + G6 门禁 | 原方法面向全自动静态分析；本 skill 取其「写-读配对 + 反向溯源」思想，落为可被门禁机械校验的最小集 |
 | Layer 3：LSP 语义追踪 | **MCP 反编译（IDA `ida-mcp` / `pyghidra-mcp`）→ Ghidra 无头 → radare2 交叉引用 + 字符串锚点回溯** | 固件没有 LSP；MCP 让「字符串→引用点→调用者」三跳变成一条 xref 查询 |
 | Phase 4：Semgrep 规则沉淀 | YARA / grep / sink-rules 增量沉淀 | 二进制场景 YARA 更合适 |
 | 覆盖率门禁 100% | 保留，T1 必须 100%，并新增「审阅清单三方对齐」（计划 ↔ 声明 ↔ 结论） | 唯一能对抗「随机游走」与「声称 100% 实际 70-85%」的硬约束 |
@@ -204,6 +205,45 @@ B9: 可绕过 → finding F-013 (wan_ifname 未过滤即拼 system)
 upgraded_findings: [F-012, F-013]
 ```
 
+### 3.2 跨请求污点（高阶漏洞）与 Track C
+
+> 方法来源：**Bridge: High-Order Taint Vulnerabilities Detection in Linux-based IoT Firmware**（IEEE S&P 2026；Peng / Liu / Cheng 等，中科院信工所 + 国科大 + 蚂蚁 + 清华；artifact 见 Zenodo `10.5281/zenodo.17232400`，Docker `pjqwudi123/bridge:1.0`）。本 skill 取其中「**写-读配对 + 反向溯源**」的最小可用子集，落为规则 + 门禁。
+
+**问题**：`sink-rules.json` 与 Track A 追的都是**单个请求内**的 source→sink。但固件里最高频的一类是**跨请求污点漏洞（high-order taint vulnerability）**——污点在请求 A 写入持久化存储，在请求 B 才被读出并触发 sink。写面与读面常常：
+
+- 分处不同**请求**（不同动作关键字 / 不同 URL）；
+- 分处不同**进程**（前端 `prog.cgi` 写，后端 `rc` / 守护进程读）；
+- 经由**持久化存储**中转（NVRAM、`/tmp` 文件、IPC 控制消息）。
+
+只审单请求会得出「该值在本进程内没有写入点 → 不可控」的错误结论，整条链被漏掉。
+
+**术语对齐**：
+
+| Bridge 术语 | 含义 | 本 skill 的对应 |
+|---|---|---|
+| 高阶污点漏洞 | 需多请求协同、经持久化存储传递的可控输入漏洞 | Track C 的目标物 |
+| AEH（Action Entry Handler） | 请求动作关键字对应的处理入口 | `entrypoints.json` 的 `handlers[]`（`.cgi → sub_xxx`） |
+| IPF（Input Parsing Function） | 解析用户可控数据的污点源函数 | Track A 的 source（`websGetVar`/`recv`/`nvram_get`…） |
+| BDG | 二进制间污点传播图 | 跨二进制调用链（Track A 的跨文件延伸） |
+| ADG | 动作处理函数间的跨进程控制依赖图 | 写面 ↔ 读面的配对图（Track C 产出） |
+
+**持久化存储 4 类**（= 跨请求通道）：NVRAM / uci 键、运行时文件（`/tmp`·`/var`，含符号链接）、IPC（socket / 控制消息）、进程环境。
+
+**Track C 流程（写-读配对 + 反向溯源）**：
+
+1. **枚举写面**：`sink-rules.json` 的 `cross-request` 规则（`P1-T-001/002`、`P2-T-001/002`）在 Layer 1 标出持久化写入点；逐点记 `{存储, 键/路径, 写 API, 调用者(入口), 值是否用户可控}`。
+2. **配对读面**：对每个写面，全量检索谁读同一键 / 路径并送入 sink（字符串锚点 → xref → 调用者）。写面与读面不在同一请求是**常态**，不是「不可控」的理由。
+3. **反向溯源闭合**：`store → 写面(入口/请求) → 读面(sink)` 三段齐备，且写面满足「用户可达 ∧ 值可控 ∧ 无白名单」时，方可判 `CONFIRMED`；**写面缺失 → 只能 `HYPOTHESIS`**。
+
+**静态枚举的边界**：控制消息关键字常被动态拼接（`str_merge` / `snprintf`，如 `"lan0_" + "management_link"`），纯字符串匹配会漏检——必须按 Layer 3 反编译回溯拼接点（即 Bridge 的 OD-ICP：按需过程间常量传播）。
+
+**门禁判定（G6）**：`coverage_gate.py --cross-request` 扫描报告每条 finding 的 `Source:`：
+
+- 命中 `CROSS_REQUEST_SOURCE`（`nvram`/`uci` 键，或 `/tmp`·`/var`·`/dev/shm`·`/mnt`·`/data`·`persist` 路径）→ 该 finding **必须**含 `WRITE_FACE` 标记（`写入面`/`写端`/`write-face`/`可写`/`被写入`/`由…写入`/`导入`/`restore`/`nvram_set`…）；
+- 缺 → **fail**。静态配置（镜像内 `.conf`/`.cfg`）**不触发**——避免把「版本内固定配置」误当跨请求污点。
+
+**已验证范例（RAXE500）**：`wan_ifname` 在 httpd 内全量 xrefs **只读零写** → 唯一写面锁定到「上传恢复配置 → `shared_acos_nvram_restore_configuration` 无键名白名单导入」→ 读面 `sub_11133C`/`sub_1114D4` 的 `system("ifconfig %s …")` → `F-012`（同源 `F-013`）。这条链在只审单请求时被判为「不可控」而漏掉。
+
 ### Layer 3 证据粒度要求
 
 调用链必须逐跳记录，禁止合并：
@@ -344,9 +384,9 @@ G2 的 waiver 落在 `25-review-list.md` 的 `## WAIVER` 段，格式：
 
 门禁与报告都要能读到 waiver，并把它计入「未覆盖项 + 理由」。
 
-### 5.1.2 三条深度门禁（G4 / G5 / 类型→Base）
+### 5.1.2 四条深度门禁（G4 / G5 / G6 / 类型→Base）
 
-覆盖率门禁原本只回答「**每个文件**有没有结论」。这在 2026-10 的 RAXE500 审计上暴露了系统性问题：`usr/sbin/httpd` 有结论 → 文件级 100% PASS，但它 **2923 个函数只精读了 5 个、167 个 CGI handler 一个没读**，漏掉一条认证后 root 命令注入（`ipv6_disable.cgi` → nvram `wan_ifname` → `system("ifconfig %s mtu %d")`）。为此新增三条门禁，把风险单位从「文件」提升到「入口 / 断言 / 类型」。
+覆盖率门禁原本只回答「**每个文件**有没有结论」。这在 2026-10 的 RAXE500 审计上暴露了系统性问题：`usr/sbin/httpd` 有结论 → 文件级 100% PASS，但它 **2923 个函数只精读了 5 个、167 个 CGI handler 一个没读**，漏掉一条认证后 root 命令注入（`ipv6_disable.cgi` → nvram `wan_ifname` → `system("ifconfig %s mtu %d")`）——而且这条链是**跨请求**的（写面在上传恢复配置、读面在 ipv6 CGI），单请求视角根本看不到（§3.2）。为此新增四条门禁，把风险单位从「文件」提升到「**入口 / 断言 / 跨请求来源 / 类型**」。
 
 **G4 入口级覆盖**（`--entrypoints <entrypoints.json>`）
 
@@ -364,12 +404,20 @@ G2 的 waiver 落在 `25-review-list.md` 的 `## WAIVER` 段，格式：
 - 要求：该章节须出现 `bypass_matrix` 或 ≥10 个 `B1..B12` 条目号。
 - 语义：**「有防护」≠「防护有效」**——这正是 B1–B12（§3.1）的机械化落点。
 
+**G6 跨请求污点溯源**（`--cross-request`，扫 `report.md`）
+
+- 触发：finding 的 `Source:` 命中 `CROSS_REQUEST_SOURCE`——`nvram`/`acosNvramConfig`/`nvram_safe_get`/`nvram_get`/`uci` 键，或 `/tmp/`·`/var/`·`/dev/shm`·`/mnt/`·`/data/`·`persist` 路径。
+- 要求：该 finding 正文须含 `WRITE_FACE` 标记（`写入面`/`写端`/`write-face`/`可写`/`被写入`/`由…写入`/`导入`/`restore`/`nvram_set`…）。
+- **静态配置不触发**：镜像内 `.conf`/`.cfg`（如 RAXE500 `F-002` 的 `updater.conf`）不是运行时写入，不纳入——避免误报。
+- 语义：污点可跨请求经持久化存储传递（Bridge, IEEE S&P'26，§3.2）。**写面缺失 = 溯源未闭合 = 「输入可控」不成立**。
+- 实测：RAXE500 报告 5 条持久化来源（F-003/004/006/012/013），均声明写入面 → PASS。
+
 **类型 → DKTSS Base 命中**（`--type-base`，默认告警 / `--type-base-strict` 硬门禁）
 
 - 报告里每个 `类型:` 标签（用 `/`、`、`、`,` 拆分，去掉 CWE 括注）须能经 `BASE_SYNONYM` 关键词归一到 Base 表某一行；不能则须写「映射依据」，否则列出。
 - 噪声控制：实测 RAXE500 报告 17 个标签仅 3 个未命中（`更新流程降级`、`MITM`、`不安全临时文件`）→ 这 3 个正是 Base 表的真实落空点，已补 2 行（`传输安全降级 / MITM`、`不安全临时文件 / 本地提权`）。
 
-三条门禁**默认不启用**（保持既有流程可复现）；Phase 5 的标准命令应显式带上。回归由 `scripts/selftest.py` 的 `[8/10]`–`[10/10]` 覆盖。
+四条门禁**默认不启用**（保持既有流程可复现）；Phase 5 的标准命令应显式带上。回归由 `scripts/selftest.py` 的深度门禁用例覆盖。
 
 
 ### 5.2 审阅清单的写法

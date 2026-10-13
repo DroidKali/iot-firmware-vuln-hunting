@@ -62,6 +62,23 @@ RECOMMEND_LINE = re.compile(r"^\s*[-*]*\s*\*{0,2}(?:修复建议|建议|加固�
 BYPASS_ITEM = re.compile(r"\bB(?:1[0-2]|[1-9])\b")
 BYPASS_MIN_ITEMS = 10          # 一张完整 B1–B12 矩阵至少应出现 10 个条目号
 
+# ── G6：跨请求污点溯源（高阶漏洞，Bridge / IEEE S&P'26）───────────────────────
+# 对抗「只审单请求数据流」。污点常经 NVRAM / 运行时文件 等**持久化存储**跨请求传递：
+# 请求 1 写入存储，请求 2 读出并触发 sink（RAXE500 F-012/F-013 即此形态）。
+# 判据：凡 finding 的 `Source:` 指向**运行时写入的持久化存储**（nvram/uci 键，或
+# /tmp·/var·/dev/shm 等可写路径），就必须在同一 finding 内声明**写入面**
+# （谁 / 哪个入口能写入该存储）——否则溯源链断开，「输入可控」不成立。
+# 注意：静态配置（固件镜像内的 .conf/.cfg，如 F-002 的 updater.conf）不触发，避免误报。
+CROSS_REQUEST_SOURCE = re.compile(
+    r"nvram|acosNvramConfig|nvram_safe_get|nvram_get|\buci\b"
+    r"|/tmp/|/var/|/dev/shm|/mnt/|/data/|persist",
+    re.I)
+WRITE_FACE = re.compile(
+    r"写入面|写端|write[-_ ]?face|可写|writable|被写入|由[^。\n]{0,60}写(?:入|的)"
+    r"|导入|restore|(?:nvram|uci|config|acosNvramConfig)[^。\n]{0,30}(?:set|safe_set|写入)"
+    r"|_set\b|set\s*\(",
+    re.I)
+
 # ── 类型 → DKTSS Base 命中（兜底规则：报告里出现的类型必须可映射）────────────
 # 报告类型是自由文本（如「硬编码凭据 / 私钥泄露」「更新流程降级 / MITM」），
 # 这里用关键词把标签归一到 Base 表的规范类型；归不到且未写「映射依据」→ 告警。
@@ -412,6 +429,72 @@ def check_bypass_matrix(verified_path: str) -> Dict[str, Any]:
         if not has_matrix:
             out["missing_matrix"].append({
                 "title": title[:80], "line": start + 1, "items_found": len(items)})
+    return out
+
+
+def check_cross_request(report_path: str) -> Dict[str, Any]:
+    """G6：跨请求污点溯源（高阶漏洞）。
+
+    凡 `Source:` 指向**运行时写入的持久化存储**（nvram/uci 键，或 /tmp·/var·
+    /dev/shm 等可写路径），该 finding 就必须声明**写入面**——即该存储的上一跳
+    由谁 / 哪个入口写入。缺写入面 → 溯源未闭合，「输入可控」不成立。
+    静态配置（镜像内 .conf/.cfg）由 CROSS_REQUEST_SOURCE 排除，不触发。
+    """
+    out: Dict[str, Any] = {"checked": False, "findings": 0, "violations": [],
+                           "skipped": None}
+    if not report_path or not os.path.isfile(report_path):
+        out["skipped"] = f"报告不存在: {report_path}"
+        return out
+    out["checked"] = True
+    lines = read(report_path).splitlines()
+
+    # 定位「漏洞详情」区块范围（从该标题到下一个 ## 标题）
+    start = None
+    end = len(lines)
+    for i, ln in enumerate(lines):
+        m = re.match(r"^#{1,3}\s*(.+)$", ln.strip())
+        if not m:
+            continue
+        if start is None and ("漏洞详情" in m.group(1)):
+            start = i
+            continue
+        if start is not None and i > start and re.match(r"^##\s", ln):
+            end = i
+            break
+    if start is None:
+        out["skipped"] = "未找到「漏洞详情」区块"
+        return out
+
+    # 按 ### F-xxx 切分
+    blocks: List[tuple] = []
+    cur: Optional[tuple] = None
+    for i in range(start + 1, end):
+        s = lines[i].strip()
+        m = re.match(r"^#{3,4}\s*(F-\d+\s*[·:：]\s*.+)$", s)
+        if m:
+            if cur:
+                blocks.append(cur)
+            cur = (m.group(1), i, [])
+            continue
+        if cur is not None:
+            cur[2].append(s)
+    if cur:
+        blocks.append(cur)
+
+    SRC = re.compile(r"^\s*[-*]*\s*\*{0,2}Source\*{0,2}\s*[:：]\s*(.+)$")
+    for title, idx, body in blocks:
+        src = None
+        for b in body:
+            m = SRC.match(b)
+            if m:
+                src = m.group(1).strip()
+                break
+        if src is None or not CROSS_REQUEST_SOURCE.search(src):
+            continue
+        out["findings"] += 1
+        if not WRITE_FACE.search("\n".join(body)):
+            out["violations"].append(
+                {"title": title[:80], "line": idx + 1, "source": src[:100]})
     return out
 
 
@@ -773,6 +856,8 @@ def main() -> int:
                     help="G4：判定「服务型大二进制」的 text_kb 阈值，默认 200")
     ap.add_argument("--bypass-check", action="store_true",
                     help="G5：开启绕过矩阵完备校验（对 30-findings-verified.md）")
+    ap.add_argument("--cross-request", action="store_true",
+                    help="G6：开启跨请求污点溯源校验（持久化存储来源须声明写入面）")
     ap.add_argument("--auto-recover", action="store_true",
                     help="G1/G3 自动修复（G2 永不自动）；默认关闭")
     ap.add_argument("--max-rounds", type=int, default=2,
@@ -914,6 +999,10 @@ def main() -> int:
     byp = check_bypass_matrix(args.verified) if args.bypass_check else {
         "checked": False, "claims": [], "missing_matrix": [], "skipped": "未启用 --bypass-check"}
 
+    # G6 跨请求污点溯源（对报告 30-findings 的 Source 字段）
+    xreq = check_cross_request(args.report) if args.cross_request else {
+        "checked": False, "findings": 0, "violations": [], "skipped": "未启用 --cross-request"}
+
     # 类型 → DKTSS Base 命中
     base_path = args.base_table or os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "..", "references", "reporting.md")
@@ -986,6 +1075,13 @@ def main() -> int:
             "绕过矩阵完备（G5）",
             not byp["missing_matrix"],
             f"{len(byp['claims'])} 处防护断言，{len(byp['missing_matrix'])} 处缺 B1–B12 矩阵"))
+
+    # G6 跨请求污点溯源
+    if xreq["checked"]:
+        checks.append((
+            "跨请求污点溯源（G6）",
+            not xreq["violations"],
+            f"持久化存储来源 {xreq['findings']} 条，缺写入面 {len(xreq['violations'])} 条"))
 
     # 类型 → DKTSS Base 命中
     if tbase["checked"]:
@@ -1173,6 +1269,21 @@ def main() -> int:
     elif byp["checked"]:
         lines += ["", "## 绕过矩阵完备（G5）", "",
                   f"通过。{len(byp['claims'])} 处防护断言均有 B1–B12 矩阵。"]
+
+    # G6 明细
+    if xreq["checked"] and xreq["violations"]:
+        lines += ["", "## 跨请求污点溯源（G6，高阶漏洞）", "",
+                  "以下 finding 的 `Source:` 指向运行时写入的持久化存储"
+                  "（nvram/uci 键，或 /tmp·/var 等可写路径），却未声明**写入面**：", "",
+                  "| 条目 | 行 | Source |", "|---|---|---|"]
+        for v in xreq["violations"]:
+            lines.append("| %s | %s | %s |" % (v["title"], v["line"], v["source"]))
+        lines += ["", "处置：污点可跨请求传递（Bridge, IEEE S&P'26）。必须在同一 finding 内"
+                  "写明该存储由谁 / 哪个入口写入（写入面）——写入与读取常分属不同请求。"
+                  "追踪法见 `references/methodology.md` §3.2 与 SKILL.md Phase 3 Track C。", ""]
+    elif xreq["checked"]:
+        lines += ["", "## 跨请求污点溯源（G6）", "",
+                  f"通过。{xreq['findings']} 条持久化存储来源均已声明写入面。"]
 
     # 类型 → Base 明细
     if tbase["checked"] and tbase["unmapped"]:

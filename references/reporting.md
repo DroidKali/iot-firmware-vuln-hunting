@@ -169,6 +169,18 @@ Phase 5 的产出标准。报告面向**产品/安全决策者 + 研发团队**�
 
 每条 finding 至少两条独立证据（静态 + 动态/交叉验证）。
 
+### 跨请求来源的「写入面」（G6）
+
+若某条 finding 的 **Source** 指向**运行时写入的持久化存储**（nvram / uci 键，或 `/tmp`·`/var`·`/dev/shm` 等可写路径），**必须**在该 finding 内写明**写入面**——即该存储的上一跳由谁 / 哪个入口写入。典型写法：
+
+```markdown
+- **Source**：nvram `wan_ifname`（httpd 全量 xrefs 只读不写；唯一写入面为「上传恢复配置」的盲目导入，见下）
+```
+
+**理由**：污点可跨请求经持久化存储传递（写-读配对，见 `methodology.md` §3.2）。只写「来自 nvram」不足以证明可控——必须证明它**被哪个请求写成了攻击者可控的值**。缺写入面 → `coverage_gate.py --cross-request`（G6）判 fail。
+
+**静态配置不适用**：镜像内固定的 `.conf`/`.cfg`（无运行时写入面）不算跨请求来源，不触发 G6。
+
 ### 脱敏规范
 
 | 类型 | 处理 |
@@ -324,6 +336,7 @@ DKTSS = min(10, Base − Friction + Weapon + Ver)
 
 - [ ] 有没有把 `HYPOTHESIS` 写成 `CONFIRMED`？（应为「疑点」+ **写明缺哪一步**）
 - [ ] 每条 finding 有没有 9 个必填字段（类型/位置/优先级/置信度/CVSS 3.1/Source/Sink/完整调用链/证据）？跑 `coverage_gate.py --report` 自动查
+- [ ] Source 指向持久化存储（nvram/uci 键、/tmp·/var 等可写路径）的 finding，有没有写明**写入面**？跑 `coverage_gate.py --cross-request`（G6）自动查
 - [ ] 标题里有没有评级括注（`(Critical)`）？（应放「优先级」字段）
 - [ ] 每条 finding 有没有至少两条独立证据？
 - [ ] 有没有出现无 `文件:偏移` 的描述？

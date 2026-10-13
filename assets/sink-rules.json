@@ -1,6 +1,6 @@
 {
-  "version": "1.0",
-  "description": "IoT 固件 Layer 1 静态扫描规则库。patterns/anti 为 Python 正则（编译失败时按字面量子串处理）。",
+  "version": "1.1",
+  "description": "IoT 固件 Layer 1 静态扫描规则库。patterns/anti 为 Python 正则（编译失败时按字面量子串处理）。category=cross-request 的规则为『跨请求污点』形态标记（读端/写端/IPC/可写路径），命中后须做写-读配对（Bridge, IEEE S&P'26），见 SKILL.md Phase 3 Track C 与 references/methodology.md §3.2。",
   "thresholds": {
     "min_string_len": 4,
     "context_lines": 2,
@@ -356,6 +356,50 @@
       "patterns": ["https?://[A-Za-z0-9.\\-]{4,}"],
       "anti": [],
       "guidance": "汇总为云侧对接面清单，用于判断 mTLS/凭据共享风险。"
+    },
+    {
+      "id": "P1-T-001",
+      "priority": "P1",
+      "category": "cross-request",
+      "title": "NVRAM 污点读端（持久化键被读入）",
+      "applies_to": ["binary", "text", "script"],
+      "patterns": ["nvram_(safe_)?get\\s*\\(", "\\bnvram\\s+get\\b", "acosNvramConfig_(get|read|match|invmatch)\\s*\\("],
+      "anti": [],
+      "cross_request": {"store": "nvram", "role": "read", "write_api": ["nvram_set", "nvram_safe_set", "acosNvramConfig_set", "restore-config"]},
+      "guidance": "跨请求污点【读端】。命中后必须回溯该键的『写入面』：谁调用 nvram_set / 恢复配置导入把用户输入写进同一键？写入请求与读取请求常不同（高阶漏洞，Bridge/IEEE S&P'26）。写入面未定位前，不得判定该键不可控。"
+    },
+    {
+      "id": "P1-T-002",
+      "priority": "P1",
+      "category": "cross-request",
+      "title": "NVRAM 污点写端（持久化写入 / 恢复配置导入）",
+      "applies_to": ["binary", "text", "script"],
+      "patterns": ["nvram_(safe_)?set\\s*\\(", "acosNvramConfig_set\\s*\\(", "\\bnvram\\s+set\\b", "restore_config", "restoreConfig", "nvram_import"],
+      "anti": [],
+      "cross_request": {"store": "nvram", "role": "write"},
+      "guidance": "跨请求污点【写端】。污点进入持久化存储的位置——记下被写入的键名与值的可控性，随后全量检索谁『读』了同一键并送入 sink。恢复配置类导入若无键名白名单，等于任意键可控。"
+    },
+    {
+      "id": "P2-T-001",
+      "priority": "P2",
+      "category": "cross-request",
+      "title": "IPC / 网络收包端（跨进程污点入口）",
+      "applies_to": ["binary"],
+      "patterns": ["recv(from|msg)?\\s*\\(", "\\brecv\\b", "\\buv_", "websGetVar\\s*\\(", "SOAPAction", "notify_rc\\s*\\("],
+      "anti": [],
+      "cross_request": {"store": "ipc", "role": "read", "write_api": ["sendto", "send", "notify_rc", "nvram_safe_set"]},
+      "guidance": "跨进程污点入口。若前端（prog.cgi）经 IPC 把控制权/数据交给后端进程，需配对『写端（sendto/notify_rc）』与『读端（recvfrom）』以恢复控制消息关键字——关键字可被 str_merge 动态拼接，静态字符串匹配会漏。"
+    },
+    {
+      "id": "P2-T-002",
+      "priority": "P2",
+      "category": "cross-request",
+      "title": "运行时可写路径被读入脚本 / 解释器",
+      "applies_to": ["script", "text"],
+      "patterns": ["\\bsource\\s+[^\\n]{0,40}(/tmp/|/var/)", "/tmp/[^\\s\"']+\\.(conf|sh|cfg)", "/var/[^\\s\"']+\\.(conf|sh|cfg)"],
+      "anti": [],
+      "cross_request": {"store": "file", "role": "read", "write_api": ["fopen+fwrite", "echo >", "cat >", "上传落盘", "符号链接"]},
+      "guidance": "文件污点面：以 root `source`/执行 /tmp·/var 下的可写文件，等于跨请求/跨权限污点传递。回溯谁在何时写入该文件（另一请求、低权限进程、符号链接目标），确认写入是否可控。"
     }
   ]
 }

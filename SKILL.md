@@ -22,7 +22,7 @@ agent_created: true
 | 优先级不实  | CVSS 全给 9.8，需拆机的和 WAN 可达的排同一档                          | **DKTSS 评分**（减法模型，Friction 显式扣除利用阻力）      |
 | 报告不可复现 | 每次格式不同、没有验证状态、缺字段                                  | 固定 **7 区块**模板 + **CONFIRMED/HYPOTHESIS 两态** + **9 字段必填校验** |
 
-**核心思路**（迁移自大可实验室《AI 挖 Java 0day 不再靠运气》上篇的流水线设计 + 下篇的质量保障机制）：Skill 不教模型「什么是命令注入」，那是它已知的；Skill 给它装上**资深固件审计员的工作骨架**——定义流程、分配资源、设置护栏、标准化输出，并把中间状态持久化到文件系统，不信任模型的记忆。文章里的「6 阶段流水线 + EALOC 分层 + 三层审计架构 + 双轨模型」在固件场景下逐条对应为下面的 Phase 0-5、EALB、Layer 1-3 与 Track A/B；下篇的「覆盖矩阵、CONFIRMED/HYPOTHESIS、漏洞成立条件表、DKTSS、报告必填字段」对应为 Phase 2.5、`vuln-conditions.md`、`reporting.md` §3.1 与 `coverage_gate.py` 的机械化门禁。
+**核心思路**（迁移自大可实验室《AI 挖 Java 0day 不再靠运气》上篇的流水线设计 + 下篇的质量保障机制）：Skill 不教模型「什么是命令注入」，那是它已知的；Skill 给它装上**资深固件审计员的工作骨架**——定义流程、分配资源、设置护栏、标准化输出，并把中间状态持久化到文件系统，不信任模型的记忆。文章里的「6 阶段流水线 + EALOC 分层 + 三层审计架构 + 双轨模型」在固件场景下逐条对应为下面的 Phase 0-5、EALB、Layer 1-3 与 Track A/B/C（Track C 为固件专有的**跨请求污点**轨，见 Phase 3 Layer 2）；下篇的「覆盖矩阵、CONFIRMED/HYPOTHESIS、漏洞成立条件表、DKTSS、报告必填字段」对应为 Phase 2.5、`vuln-conditions.md`、`reporting.md` §3.1 与 `coverage_gate.py` 的机械化门禁。
 
 ## 何时使用
 
@@ -85,7 +85,7 @@ fw-audit/<target>/
 ├── 03-audit-plan.md             分配清单（谁审哪些文件）
 ├── 25-review-list.md            Phase 2.5 审阅清单（声明 + 逐项打勾）
 ├── 10-layer1-sinks.json         Layer 1 机器扫描结果
-├── 20-findings-candidates.jsonl Layer 2 双轨候选
+├── 20-findings-candidates.jsonl Layer 2 三轨候选（Track A/B/C）
 ├── 30-findings-verified.md      Layer 3 验证后结论（含 NOT_FOUND 台账）
 ├── 40-coverage.md               覆盖率门禁报告
 ├── 50-rules/                    Phase 5 沉淀的 YARA / grep 规则
@@ -194,11 +194,12 @@ mithril --keys <dir>          # 泄露或默认公钥、ROCA、弱 RSA、可因�
 
 工具不齐时的替代：`FAT`、`firmwalker`、`EMBA`、`firmware-mod-kit`，清单见 `references/toolchain.md`。
 
-提取后必做三件事，缺一不可（本机命令用 `fd`/`rg`，见 `references/toolchain.md` §0.1）：
+提取后必做四件事，缺一不可（本机命令用 `fd`/`rg`，见 `references/toolchain.md` §0.1）：
 
 1. `fd -t f -x file {}` → 建立类型清单（替代 `find . -type f -exec file {} +`）
 2. `fd -t f -x sh -c 'test -u "$1" -o -g "$1" && echo "$1"' _ {}` → SUID/SGID
 3. 读启动链：`etc/init.d/*`、`etc/rc.d/*`、`inittab`、`rcS`、`rc.local`、`hotplug`、`/etc/config/*` —— **启动链就是攻击面地图**，它告诉你哪些服务真正在跑
+4. **枚举「动作关键字」（action keyword）**：从 Web 前端（`web/*.js`、`*.htm`、ASP 指令、XHR 参数）与脚本里抽出请求动作名——`rg -o -N '"[A-Z][A-Za-z0-9_]{3,}"' web/ | sort -u`——连同它落在哪个入口文件/二进制。这是 Phase 3 **Track C 构建动作依赖图（ADG）**的种子：**只看单个请求会系统性漏掉「请求 1 写、请求 2 读」的高阶漏洞**（见 Phase 3 Track C 与 `references/methodology.md` §3.2）。
 
 > ⚠️ 区分「本机工具」与「目标环境工具」：上面第 1、2 步是在**我的分析机上**遍历提取产物，用 `fd`；但若把命令放进 rootfs 内执行（chroot / 模拟环境），那是**目标 busybox** 的 `find`，不能换、也不能用 `--include` 等 GNU 扩展。带 `-perm` 的判断尤其要在本机做（Windows 上 `fd`/`fd -x test -u` 的权限位不可靠，此时改用 `fw_triage.py` 的 `permission_scan_reliable` 字段）。
 
@@ -336,9 +337,9 @@ uv run scripts/sink_scan.py fw-audit/<target>/01-extract \
 
 **Layer 1 的定位是辅助参考，不是唯一入口。** 模型必须逐文件阅读分给它的全部代码，Layer 1 只负责告诉它「这里已知有危险形态，优先验证」。只看工具标记的文件，会系统性漏掉逻辑漏洞——认证绕过、状态机缺陷、签名校验缺失这类「本该有却没有」的问题，工具看不见。
 
-#### Layer 2 —— 双轨审计（模型主场）
+#### Layer 2 —— 三轨审计（模型主场）
 
-每个 Agent 对分到的文件跑**两条并行轨道**，按 Tier 决定深度。
+每个 Agent 对分到的文件跑**三条并行轨道**，按 Tier 决定深度。Track A/B 处理**单个请求内**的数据流与控制流；Track C 专攻**跨请求**的持久化污点——固件里最高频、也最容易被单请求视角漏掉的一类（高阶漏洞）。
 
 **Track A · Sink-driven（自下而上）**：从危险调用点往上追数据来源。
 
@@ -358,6 +359,34 @@ strcpy(dst, user_buf) → user_buf 来自哪？ → recv() 的 socket？
 ```
 
 职责：发现「安全控制的缺失」。**认证绕过、OTA 无验签、越权改配置只能用 Track B 找到**——它们不是「某行代码有问题」，而是「某个入口缺了应有的检查」。
+
+**Track C · Cross-request-driven（跨请求 / 状态机）**：污点的写入与触发跨请求、跨进程，经**持久化存储**传递。
+
+```
+请求1: SetNetwork → nvram_safe_set("lan0_management_link", <用户可控>)   ← 写面
+请求2: SetVLAN    → notify_rc("start_vlanall") → rc 进程 → nvram_safe_get(...) → system()  ← 读面 + sink
+```
+
+职责：发现「单请求视角看不到的高阶污点漏洞」。**Track A 追的同请求 source→sink 在这里是断的**——httpd 读 `wan_ifname` 时，同一请求内根本没有它的写入点（RAXE500 `F-012` 就是这样被漏掉的：`wan_ifname` 在 httpd 内 20 处引用**全为读、零写**，真正的写面在上传恢复配置那条链路）。方法源自 Bridge（IEEE S&P'26）。
+
+**持久化存储的 4 类**（都可能成为跨请求污点通道）：
+
+| 类 | 载体 | 写 API（写面） | 读 API（读面） |
+|---|---|---|---|
+| NVRAM | nvram / uci 键 | `nvram_set`·`nvram_safe_set`·`acosNvramConfig_set`·**恢复配置导入** | `nvram_get`·`acosNvramConfig_get/match` |
+| 文件 | `/tmp`·`/var`·`/etc`（含符号链接）| `fopen+fwrite`·`echo >`·上传落盘 | `fopen+fgets`·`source`·`tar -C /` |
+| IPC | socket / 控制消息 | `sendto`·`notify_rc`·`ubus` | `recvfrom`·`recvmsg` |
+| 环境 | 进程环境 | `setenv`·`putenv` | `getenv` |
+
+**Track C 三步**：
+
+1. **枚举写面**：Layer 1 的 `cross-request` 规则（`sink-rules.json` 的 `P1-T-001/002`、`P2-T-001/002`）已标出所有「持久化写入」点；记下键名 / 路径与值的可控性。
+2. **配对读面**：对每个写面，全量检索谁**读**了同一键 / 路径并送入 sink。**写入与读取常分属不同请求、不同进程**——这正是单请求 Track A 追不到的原因。
+3. **闭合溯源**：证明 sink 拿到的值由攻击者**可控地**写入——写面本身是否需认证？是否有键名白名单？（**无白名单的「恢复配置导入」= 任意键可控**，见 RAXE500 `F-012`/`F-013`。）
+
+> ⚠️ **门禁挂钩（G6）**：凡 finding 的 `Source` 指向运行时写入的持久化存储，**必须**声明**写入面**，否则 `coverage_gate.py --cross-request` 判 fail。这把「只审单请求」的错误在门禁层拦住。
+>
+> ⚠️ **静态枚举的边界**：控制消息关键字可能被 `str_merge`/`snprintf` **动态拼接**（如 `"lan0_" + "management_link"`），纯字符串匹配会漏——必须按 Layer 3 反汇编回溯拼接点（Bridge 的 OD-ICP 思路）。
 
 **按 Tier 的深度**：
 
@@ -406,6 +435,8 @@ strcpy(dst, user_buf) → user_buf 来自哪？ → recv() 的 socket？
 #### Layer 3 —— 语义级链路验证
 
 Layer 2 的候选必须验证 **Source→Sink 可达性**。按「有没有 MCP」分两条路，**都要走**，MCP 只是把手工路自动化了。
+
+> **跨请求候选必须补做「反向来源追溯」**（Track C 候选专属）：当 `Source` 来自持久化存储（nvram / 文件 / IPC），Layer 3 的验证不止「**本请求内** source→sink 闭合」，还要**反向**回答「这个值是谁写进来的、什么时候写、是否可控」。对每个此类 sink 维护一条**污点来源历史** `store → 写面(入口/请求) → 读面(sink)`；写面缺失即只能是 `HYPOTHESIS`（= G6 fail）。RAXE500 的做法可参照：先用全量 xrefs 证明 `wan_ifname` 在 httpd 内**只读**，再据此把唯一写面锁定到「恢复配置导入」，从而闭合溯源。
 
 **路径 A：二进制逆向 MCP（有则必用，命中率与效率最高）**
 
@@ -609,7 +640,7 @@ uv run scripts/coverage_gate.py \
     --tiering fw-audit/<target>/02-tiering.json \
     --entrypoints fw-audit/<target>/entrypoints.json \
     --report fw-audit/<target>/report.md \
-    --bypass-check --type-base \
+    --bypass-check --cross-request --type-base \
     --out fw-audit/<target>/40-coverage.md
 ```
 
@@ -617,7 +648,7 @@ uv run scripts/coverage_gate.py \
 
 `--review-list` 触发 **审阅清单三方对齐**（Phase 2.5 的机械化落实）：diff「计划 vs 声明 vs 实际结论」，报 G1/G2/G3 三类缺口。
 
-`--entrypoints` 触发 **G4 入口级覆盖**，`--bypass-check` 触发 **G5 绕过矩阵完备**，`--type-base` 触发 **类型 → DKTSS Base 命中**校验；`--auto-recover` 把 G1/G3 转为自动修复计划。分述见下。
+`--entrypoints` 触发 **G4 入口级覆盖**，`--bypass-check` 触发 **G5 绕过矩阵完备**，`--cross-request` 触发 **G6 跨请求污点溯源**，`--type-base` 触发 **类型 → DKTSS Base 命中**校验；`--auto-recover` 把 G1/G3 转为自动修复计划。分述见下。
 
 门禁判据（任一不满足则**不得出报告**，先补审）：
 - T1 文件覆盖率 **100%**（每个文件必须有审计结论或明确的 `NOT_FOUND`）
@@ -626,6 +657,9 @@ uv run scripts/coverage_gate.py \
 - 所有 `promotions` 都要有对应的升级后分析
 - 审阅清单一致：无 G1（声明未勾）/ G2（计划未声明）/ G3（勾选无结论）
 - 报告完整性：9 个必填字段齐全（见 5.3）
+- 入口级覆盖（G4）：适用文件须有完整入口枚举 + 逐入口结论
+- 绕过假设（G5）：凡「有防护 / 不可利用」断言必须附 B1–B12 矩阵
+- 跨请求溯源（G6）：持久化存储来源的 finding 必须声明写入面
 
 脚本退出码非 0 表示未达标，缺口写入 `40-coverage.md` 的「待补审清单」，回去补。
 
@@ -657,6 +691,17 @@ uv run scripts/entrypoints_init.py --tiering fw-audit/<target>/02-tiering.json \
 
 凡是结论里写了「已鉴权 / 已过滤 / 已验签 / 已限长 / 有效校验 / 不可利用」，就必须在同一章节给出 **B1–B12 绕过矩阵**（检测 `bypass_matrix` 关键词，或 ≥10 个 B 条目号）。「修复建议」行是建议不是断言，不触发。
 > 「有防护」≠「防护有效」。详见 Phase 3 的「绕过假设穷举」与 `references/methodology.md` §3.1。
+
+##### G6 · 跨请求污点溯源（对抗「只审单请求」）
+
+**为什么单列这条**：固件里最高频、也最难发现的一类漏洞是**跨请求**的——污点在请求 1 写入持久化存储（nvram / 文件 / IPC），在请求 2 才被读出并触发 sink。只审单请求的 source→sink 会认为「httpd 里 `wan_ifname` 没有写入点 → 不可控」，从而漏掉 RAXE500 `F-012`/`F-013` 那种整条链。
+
+判据：凡 finding 的 `Source:` 指向**运行时写入的持久化存储**（nvram / uci 键，或 `/tmp`·`/var`·`/dev/shm` 等可写路径），就必须在**同一 finding 内**声明**写入面**（谁 / 哪个入口能写入该存储）。缺写入面 → 溯源未闭合，门禁 fail。
+
+- 触发词：`nvram`·`acosNvramConfig`·`nvram_safe_get`·`uci`，以及 `/tmp/`·`/var/`·`/dev/shm`·`/mnt/`·`/data/`·`persist` 等路径。
+- **静态配置不触发**（固件镜像内的 `.conf`/`.cfg`，如 RAXE500 `F-002` 的 `updater.conf`）——它们不是运行时写入的，避免误报。
+- 写入面标记：`写入面`·`写端`·`write-face`·`可写`·`被写入`·`由…写入`·`导入`·`restore`·`nvram_set`·`acosNvramConfig_set`。
+- 追踪方法（Track C）见 Phase 3 Layer 2 与 `references/methodology.md` §3.2。
 
 ##### 类型 → DKTSS Base 命中（防评分落空）
 
@@ -723,7 +768,7 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 | 文件 | 何时读 |
 |---|---|
 | `references/toolchain.md` | 需要具体命令、安装方式、工具缺失时的替代方案 |
-| `references/methodology.md` | 需要 Tier 规则细节、EALB 计算、双轨模型、门禁判据的完整定义 |
+| `references/methodology.md` | 需要 Tier 规则细节、EALB 计算、三轨模型（Track A/B/C）、跨请求污点（§3.2）、门禁判据的完整定义 |
 | `references/vuln-taxonomy.md` | 需要按攻击面/漏洞类型逐项核查（后门账号、命令注入、OTA、MQTT、U-Boot…） |
 | `references/vuln-conditions.md` | **Layer 3 / Phase 4**：候选要不要升 `CONFIRMED`？按漏洞类型逐条排除成立条件（固件版判定表） |
 | `references/sink-patterns.md` | 需要扩充或理解静态扫描规则，或手写 grep / YARA |
@@ -737,7 +782,7 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 |---|---|
 | `scripts/fw_triage.py` | Phase 0 / 2：固件度量、熵扫描、ELF 加固画像、SUID 面、Tier 分层、EALB 预算 |
 | `scripts/sink_scan.py` | Phase 3 Layer 1：多语言危险模式扫描（数据驱动规则） |
-| `scripts/coverage_gate.py` | Phase 5：覆盖率门禁校验 + **CVE 纪律检查**（`--report`）+ **审阅清单三方对齐**（`--review-list`）+ **G4 入口级覆盖**（`--entrypoints`）+ **G5 绕过矩阵**（`--bypass-check`）+ **类型→Base 命中**（`--type-base`）+ **自动修复计划**（`--auto-recover`） |
+| `scripts/coverage_gate.py` | Phase 5：覆盖率门禁校验 + **CVE 纪律检查**（`--report`）+ **审阅清单三方对齐**（`--review-list`）+ **G4 入口级覆盖**（`--entrypoints`）+ **G5 绕过矩阵**（`--bypass-check`）+ **G6 跨请求污点溯源**（`--cross-request`）+ **类型→Base 命中**（`--type-base`）+ **自动修复计划**（`--auto-recover`） |
 | `scripts/entrypoints_init.py` | Phase 3/5：从 `02-tiering.json` 生成入口枚举骨架 `entrypoints.json`（G4 的输入） |
 | `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证上面脚本的判据（10 组） |
 
