@@ -4,7 +4,7 @@
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">  
   <img alt="python" src="https://img.shields.io/badge/python-3.8%2B%20stdlib%20only-3776AB.svg?logo=python\&logoColor=white">  
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg">  
-  <img alt="files" src="https://img.shields.io/badge/package-19%20files%20%C2%B7%208106%20lines-informational.svg">  
+  <img alt="files" src="https://img.shields.io/badge/package-19%20files%20%C2%B7%208428%20lines-informational.svg">  
   <img alt="selftest" src="https://img.shields.io/badge/selftest-66%20assertions%20passing-brightgreen.svg">  
   <img alt="agent" src="https://img.shields.io/badge/type-Agent%20Skill-7B42BC.svg">  
 </p>
@@ -18,6 +18,7 @@
 ## 目录
 
 - [为什么需要它](#为什么需要它)
+- [三层架构](#三层架构方法论--决策判据--原子能力)
 - [流水线](#流水线)
 - [七条铁律](#七条铁律)
 - [安装](#安装)
@@ -52,6 +53,27 @@
 
 ---
 
+## 三层架构：方法论 / 决策判据 / 原子能力
+
+这套 Skill 固化的**不是「完整工具」，而是三层能力**。这个分层是刻意的，也是它和 FAT / Firmadyne / EMBA 这类自动化平台的根本区别：
+
+| 层 | 固化什么 | 承载位置 |
+|---|---|---|
+| **方法论层** | 决策逻辑、优先级、证据标准、降级策略、交付规范 | `SKILL.md`（七条铁律、Phase 0–5、EALB、三轨审计、G1–G6 门禁）· `references/methodology.md` · `references/reporting.md` |
+| **决策判据层** | **识别到什么特征 → 走哪条路**，以及失败反馈信号 | `references/atomic-capabilities.md` §3（Phase 1 提取选路树 / Phase 4 仿真选路树） |
+| **原子能力层** | **单个可调用的操作**：能力 / 实现方式 / 输入输出 | `references/atomic-capabilities.md` §1–§9（约 45 项：侦察、提取、内容扫描、文件系统侦察、二进制分析、动态验证、网络、硬件） |
+
+**工作流是：侦察 → 按判据选路 → 调用原子能力 → 观察反馈 → 按反馈调整策略。**
+
+不是「按顺序试工具」，更不是「调一个完整工具让它跑完」。举例：
+
+- 提取阶段不问「先跑 unblob 还是 binwalk」，而是先侦察（`file` + 熵 + magic）→ **识别到 squashfs 就直取 `unsquashfs`/`moria -e`；识别到 UBIFS 就取 `ubireader`；熵 > 7.9 且无魔数就判定加密、先解决解密**，不进解包链。
+- 仿真阶段不问「FAT 还是 Qiling」，而是先问「要证明什么」→ 整机可达性走 QEMU system，**启动失败先读 dmesg 定位原因、针对性修补**，而不是换下一个仿真器重跑。
+
+> 整链自动化工具（FAT / Firmadyne / EMBA / FACT / firmwalker）**只有一个合法位置**：主路径跑完后的**交叉验证基线**，其输出按「线索」而非「结论」处理。遇到非常规固件时它们会在某一环卡死，剩下的只有依赖与兼容问题——因为它们在**替你决策**。
+
+---
+
 ## 流水线
 
 ```mermaid
@@ -65,24 +87,24 @@ flowchart TD
     G -->|未达标| D
 ```
 
-| Phase | 名称        | 输入                 | 输出                                               | 主要工具                         |
+| Phase | 名称        | 输入                 | 输出                                               | 主要原子能力                       |
 | ----- | --------- | ------------------ | ------------------------------------------------ | ---------------------------- |
 | 0     | 度量与定界     | 固件镜像               | `00-metrics.json`、`00-scope.md`                  | `fw_triage.py`               |
-| 1     | 提取与侦察     | 固件镜像               | `01-extract/`、`01-manifest.json`                 | unblob → binwalk → moria 降级链 |
+| 1     | 提取与侦察     | 固件镜像               | `01-extract/`、`01-manifest.json`                 | 侦察 R1–R4 → 判据选路 → 解包 E1–E9  |
 | 2     | 分层与分配     | `01-extract/`      | `02-tiering.json`、`03-audit-plan.md`             | `fw_triage.py --tier`        |
 | 2.5   | 覆盖矩阵与审阅清单 | `03-audit-plan.md` | `25-review-list.md`                              | 声明 + 门禁 diff                 |
 | 3     | 三层审计      | 分配清单               | `10-layer1-sinks.json`、`30-findings-verified.md` | `sink_scan.py` + 模型审计        |
-| 4     | 动态验证      | 候选漏洞               | 每条候选的可利用性判定                                      | FAT / Qiling / AFL++         |
+| 4     | 动态验证      | 候选漏洞               | 每条候选的可利用性判定                                      | 仿真选路 → D1–D12 组合             |
 | 5     | 门禁与报告     | 全部产物               | `40-coverage.md`、`report.md`、`50-rules/`         | `coverage_gate.py`           |
 
 ### Phase 速览
 
 - **Phase 0 · 度量与定界** — 挖之前先知道「这是个什么东西、有多大、值不值得挖」。文件级扫描（大小 / Shannon 熵 / magic / 压缩加密判定）、分区块熵、ELF 加固画像（NX / PIE / Canary / RELRO / FORTIFY）、SUID 权限面、攻击面清单。
-- **Phase 1 · 提取与侦察** — `unblob → binwalk v3 → moria` 三级降级链，再由 `mithril` 做 secrets / SBOM / CVE / boot / keys 六种模式侦察。固件常有的 SquashFS 变体、被抹零的 UPX 头、私有魔数都在这层处理。
+- **Phase 1 · 提取与侦察** — **先侦察再决策**：`file` + 熵扫描 + magic 判断格式，再按判据直取对应解包能力（squashfs / UBIFS / JFFS2 / ext / uImage 各有对应原子能力；未知则 `unblob` 递归 carve）。拿到 rootfs 后由 `mithril` 做 secrets / SBOM / CVE / boot / keys 六种模式侦察。固件常有的 SquashFS 变体、被抹零的 UPX 头、私有魔数都在这层处理；高熵无魔数则先判加密，不硬审乱码。
 - **Phase 2 · 分层与分配** — 用 R0–R7 规则把提取产物分成 T1 / T2 / T3 / SKIP，再用 **EALB** 估算审计工作量并切分给多个 Agent。兜底规则永远最后评估，避免抢走静态资源。
 - **Phase 2.5 · 覆盖矩阵** — 专治「声称 100% 实际漏审」。产出审阅清单，Phase 5 由门禁 diff 三方。
 - **Phase 3 · 三层审计** — Layer 1 机器扫广度（不用 LLM）；Layer 2 三轨（Track A 自下而上追 Sink，Track B 自上而下枚举入口，**Track C 跨请求污点**：NVRAM/文件/IPC 的写-读配对）；Layer 3 语义链路验证（IDA / Ghidra / radare2）。
-- **Phase 4 · 动态验证** — 只做「能把 HYPOTHESIS 升成 CONFIRMED」的事。三关：能否跑到该代码 / 环境依赖能否满足 / 有无运行时防护。
+- **Phase 4 · 动态验证** — 只做「能把 HYPOTHESIS 升成 CONFIRMED」的事。**判据在节点上**：先问要证明什么（整机可达 / sink 参数真值 / 内存破坏 / CVE 可达），再按 QEMU 启动反馈逐步修补或组合单二进制模拟与模糊测试。
 - **Phase 5 · 门禁、沉淀与报告** — 覆盖率门禁 + CVE 纪律检查 + 规则沉淀 + 固定 7 区块报告。
 
 ### EALB：给固件估「工作量」，而不是估字节
@@ -143,17 +165,17 @@ npx skills add https://github.com/DroidKali/iot-firmware-vuln-hunting --agent '*
 
 常用管理命令：`npx skills list`（列出已装 Skill）、`npx skills update`（更新到最新）、`npx skills remove iot-firmware-vuln-hunting`（卸载）。
 
-**作为通用知识库使用** — 不安装也行：`git clone` 到任意位置，按 `SKILL.md` 的流程手工执行；四个脚本可独立运行。
+**作为通用知识库使用** — 不安装也行：`git clone` 到任意位置，按 `SKILL.md` 的流程手工执行；五个脚本可独立运行。
 
 ### 前置依赖
 
 | 类别     | 说明                                                                                                                                                    |
 | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Python | 3.8+，**四个脚本只用标准库**，无第三方依赖，三平台均可运行。推荐用 [`uv`](https://github.com/astral-sh/uv) 管理（`uv run` 自动建临时环境）                                                    |
-| 固件工具链  | `unblob` / `binwalk` v3 / `moria` / `mithril` / `FAT` / `Qiling` / `AFL++` / `radare2`。Linux（Docker / WSL / Kali / AttifyOS）体验最好；Windows 宿主建议走 Docker |
+| Python | 3.8+，**五个脚本只用标准库**，无第三方依赖，三平台均可运行。推荐用 [`uv`](https://github.com/astral-sh/uv) 管理（`uv run` 自动建临时环境）                                                    |
+| 固件工具链  | 按判据**按需安装**，不必装齐：`unblob` / `binwalk` v3 / `moria` / `mithril` / `qemu-system-*` / `Qiling` / `AFL++` / `radare2`。Linux（Docker / WSL / Kali / AttifyOS）体验最好；Windows 宿主建议走 Docker |
 | 授权     | **只在获得书面授权（自有设备 / 客户授权 / SRC 范围）的目标上执行**，开工前把范围写进 `fw-audit/<target>/00-scope.md`                                                                     |
 
-> 所有工具都有降级链，缺失时不会卡死——`references/toolchain.md` §8 给出 13 行替代矩阵，且降级需在报告中显式注明。
+> 某个原子能力缺席时，优先按 `references/atomic-capabilities.md` §11 找等价实现（如缺 `rg` → `grep -I`、缺 `ida-mcp` → Ghidra 无头 → radare2），并在报告中显式注明降级、说明是否影响结论强度。**不要为了「稳」去装 FAT / EMBA 这类整链工具**——它们只在主路径跑完后作交叉验证基线，装它的时间通常换不来结论。
 
 ---
 
@@ -176,9 +198,11 @@ mkdir -p fw-audit/$TARGET
 # Phase 0 — 度量与定界
 uv run scripts/fw_triage.py firmware.bin --out fw-audit/$TARGET/00-metrics.json
 
-# Phase 1 — 提取（以降级链为例）
-unblob -e fw-audit/$TARGET/01-extract firmware.bin --report
-#   兜底：moria -e fw-audit/$TARGET/01-extract firmware.bin
+# Phase 1 — 侦察后按判据选路（此处以识别到 squashfs 为例）
+file firmware.bin && binwalk -E firmware.bin          # 先看清是什么
+moria -e fw-audit/$TARGET/01-extract firmware.bin     # 命中 squashfs/UBI/JFFS2/ext 分支时的通用解包
+#   其它分支：ubireader（UBIFS）、jefferson（JFFS2）、unsquashfs（squashfs 补刀）
+#   无法识别时兜底：unblob --report 01-manifest.json -e fw-audit/$TARGET/01-extract firmware.bin
 
 # Phase 2 — 分层与分配（Tier 规则 + EALB 预算）
 uv run scripts/fw_triage.py --tier fw-audit/$TARGET/01-extract \
@@ -257,7 +281,7 @@ uv run scripts/coverage_gate.py \
 
 | 文件                                | 行数  | 何时读                                                  |
 | --------------------------------- | --- | ---------------------------------------------------- |
-| `references/toolchain.md`         | 373 | 需要具体命令、安装方式、工具缺失时的替代方案                               |
+| `references/atomic-capabilities.md` | 629 | **决策判据 + 原子能力**：Phase 1 提取选路（§3.1）、Phase 4 仿真选路（§3.2）、约 45 项原子能力清单与实现命令（§1–§9）、整链工具的合法定位（§10.2）、能力缺席时的替代路径（§11） |
 | `references/methodology.md`       | 491 | 需要 Tier 规则细节、EALB 计算、**三轨模型（Track A/B/C）**、跨请求污点（§3.2）、门禁判据的完整定义                  |
 | `references/emulation-fuzzing.md` | 357 | Phase 4 需要模拟与模糊的具体做法、踩坑与替代方案                         |
 | `references/reporting.md`         | 353 | Phase 5 需要报告字段、评分表、脱敏规范、DKTSS、⑥↔④ 迁移规则、G6 写入面                              |
@@ -277,8 +301,8 @@ iot-firmware-vuln-hunting/
 ├── README.md
 ├── LICENSE
 ├── references/                   # 8 篇按需加载的知识库
-│   ├── methodology.md            # Tier 规则 / EALB / 三层审计（Track A/B/C）/ 门禁判据完整定义
-│   ├── toolchain.md              # 工具链速查 + 环境矩阵 + 缺失降级矩阵
+│   ├── methodology.md            # 方法论层：Tier 规则 / EALB / 三层审计（Track A/B/C）/ 门禁判据完整定义
+│   ├── atomic-capabilities.md    # 判据层 + 原子能力层：Phase 1/4 选路树 + 约 45 项原子能力 + 替代路径矩阵
 │   ├── vuln-conditions.md        # 漏洞成立条件判定表（固件版）
 │   ├── vuln-taxonomy.md          # 漏洞分类学（按攻击面，13 类）
 │   ├── sink-patterns.md          # 静态扫描模式库 schema 与规则说明

@@ -2,29 +2,41 @@
 
 Phase 4 的目标：把 `validated` 的静态链路变成 `confirmed` 的可利用性结论。本文件给出决策树、具体命令、harness 写法与踩坑清单。
 
+> **`references/atomic-capabilities.md` §3.2 是权威判据**（含每个失败分支的处置），本文件是它的**展开与实现细节**，能力编号（D1–D12 / E6–E8 / B1）与之一致。SKILL.md Phase 4 §4.0 给的是主干。
+
 ## 1. 决策树
 
+**先问「要证明什么」，再决定用哪组能力**。节点是判断，叶子是原子能力组合（不是「选哪个工具」）：
+
 ```
-能否直接从厂商拿到完整 rootfs 且固件是标准 Linux？
-├─ 是 → FAT：fat new / extract / analyze / emulate
-│        起不来？→ 看 §3 常见故障，逐个补
-└─ 否（裸机 / MCU / 私有 RTOS / rootfs 不完整）
-   ├─ 目标是单个 ELF（如 /usr/sbin/httpd）？
-   │   → Qiling 单二进制 + 依赖打桩（§4）
-   ├─ 目标是裸机镜像（.bin + 向量表）？
-   │   → fat inspect mcu → Renode / Unicorn 手写 harness / ChipWhisperer（硬件）
-   └─ 目标是协议栈 / 私有格式解析？
-       → 抽出解析函数 → Unicorn 函数级 harness → AFL++ Unicorn 模式
+Q1 要验证的结论类型？
+├─ (A) 整机 / 服务可达性
+│   Q2 内核能提取（E6）且 rootfs 完整（rootfs_ok）？
+│   ├─ 能 → D1 qemu-system-<arch>（bootargs 来自 E7）直接启动
+│   │        └ 起不来 → D2 读串口/dmesg 定原因，再针对性修补（D3）：
+│   │           root= / init / mtdparts / machine+DTB / stub 掉等硬件的启动步骤
+│   │           —— 不要直接换个仿真器重跑
+│   └─ 否（内核加密 / rootfs 不全 / 裸机 MCU）
+│        ├─ 目标是单个 ELF（如 /usr/sbin/httpd）→ 转 (B)
+│        ├─ 目标是裸机镜像（.bin + 向量表）→ Renode / Unicorn 手写 harness / ChipWhisperer
+│        └─ 目标是协议栈、私有格式解析 → 抽解析函数 → 转 (C) 的 Unicorn 模式
+├─ (B) sink 参数真值（命令注入 / 路径穿越 / 逻辑缺陷）
+│   └─ D5 Qiling + D6 打桩 + D7 hook sink 看实参真值（§3）
+├─ (C) 内存破坏是否真实存在
+│   ├─ -O FRIDA：同 arch、能在宿主直接跑
+│   ├─ -U Unicorn：跨 arch 且纯计算型解析函数（无 syscall）
+│   └─ -Q QEMU：跨 arch 且依赖 libc/文件/socket
+└─ (D) 组件 CVE 是否可达 → 静态闭环（Phase 3 三问），不需仿真
 ```
 
-### 1.1 三者不是三选一，是两级
+### 1.1 环境层与引擎层：不是一个选择题
 
 上面的树回答的是「**怎么让代码跑起来**」。但要真正升 confidence，得区分两层：
 
-| 层 | 工具 | 回答的问题 | 产出 |
+| 层 | 能力 | 回答的问题 | 产出 |
 |---|---|---|---|
-| **环境层** | FAT / FirmAE / Qiling / Unicorn harness | 代码**跑不跑得到**？外部输入**到不到 sink**？ | 可达性、参数真值 |
-| **引擎层** | AFL++（`-Q` / `-U` / `-O`） | 内存**是否真的会崩**？ | crash + 可控性 |
+| **环境层** | D1–D8（qemu-system / Qiling / Unicorn harness） | 代码**跑不跑得到**？外部输入**到不到 sink**？ | 可达性、参数真值 |
+| **引擎层** | D10–D11（AFL++ `-Q` / `-U` / `-O`） | 内存**是否真的会崩**？ | crash + 可控性 |
 
 **串联方式**：环境层先跑通（可手工发一个请求/一次调用触发目标路径），再把同一环境接到 AFL++ 上自动变异。**没有环境层，AFL++ 就是瞎跑**——种子进不了解析逻辑时，覆盖率永远停在启动代码。
 
@@ -39,16 +51,35 @@ Phase 4 的目标：把 `validated` 的静态链路变成 `confirmed` 的可利�
 
 **两个判断先做**：
 
-1. **该不该 fuzz？** 只有 **内存破坏类**（栈/堆溢出、UAF、格式化）才值得开 AFL++。**命令注入 / 认证绕过 / 路径穿越 / 逻辑缺陷不要 fuzz**——它们是「参数到没到 sink」的问题，用 Qiling hook `system`/`open` 直接看参数即可，fuzz 既慢又几乎不可能命中。
+1. **该不该 fuzz？** 只有 **内存破坏类**（栈/堆溢出、UAF、格式化）才值得开 AFL++。**命令注入 / 认证绕过 / 路径穿越 / 逻辑缺陷不要 fuzz**——它们是「参数到没到 sink」的问题，用 D7 hook `system`/`open` 直接看参数即可，fuzz 既慢又几乎不可能命中。
 2. **目标是网络服务吗？** 是 → 用 Qiling harness 把 socket 输入重定向到文件，再 `afl-fuzz ... -- python3 harness.py @@`（见 §5）。不是 → 直接命令行喂 `@@`。
 
 **判断标准**：只要能在模拟环境里让目标进入「解析外部输入」的代码路径，Phase 4 就算有效。不需要「整机完美运行」。
 
+**失败时的动作顺序（硬规则）**：读输出定位原因 → 针对性修补 → **换实现是最后手段**。整链工具的失败模式恰恰相反（换下一个工具重跑），这是本 skill 与它们的根本区别。
+
 ---
 
-## 2. 整机模拟（FAT / Firmadyne / FirmAE）
+## 2. 整机模拟（D1：手工 qemu-system 起步；FAT / Firmadyne / FirmAE 作对照）
 
-### FAT 标准流程
+### 手工 qemu-system 起步（D1 的首选实现）
+
+**先手工起**——错误信息最原始，panic 会直接告诉你该修什么；编排工具会把这些信息包起来，反而不好定位。
+
+```bash
+# 1) 按 B1 确认架构：readelf -h 看 Machine / Class / Data
+# 2) 取 E7 的 bootargs 与分区布局：dtc -I dtb -O dts，或 strings vmlinux | rg bootargs
+# 3) 起（ARM 常见写法；MIPS 换成 qemu-system-mipsel -M malta，AArch64 换 -M virt）
+qemu-system-arm -M versatilepb -kernel vmlinux -dtb kernel.dtb \
+  -append "root=/dev/mtdblock2 console=ttyAMA0,115200" \
+  -drive file=rootfs.img,format=raw -nographic
+```
+
+失败时按 §3.2 的判定走 D2：读串口/dmesg 原文 → 对照下面的故障清单定位 → 针对性修补（改 `root=`/`init`/`mtdparts`、指定 `-M`、补 DTB、stub 掉等硬件的启动步骤）。
+
+### FAT 标准流程（对照用）
+
+> `fat` 的编排（自动修 NVRAM/网络/rootfs）适合**借它的修补手法**或做第二意见；不要把仿真托管给它——它失败时只能换下一个工具，而你手工起能改。
 
 ```bash
 fat doctor                                     # 先自检，缺工具按提示装
@@ -59,7 +90,7 @@ fat preflight .fat-projects/<proj>             # 预检：缺什么会告诉你
 fat emulate --project .fat-projects/<proj>
 ```
 
-### 起不来时的故障清单（按出现频率排序）
+### 起不来时的故障清单（D2 的判据表，按出现频率排序）
 
 | 症状 | 原因 | 处理 |
 |---|---|---|
@@ -88,7 +119,7 @@ FirmAE 的仿真成功率高于 Firmadyne（会自动修补 NVRAM、网络、启
 
 ---
 
-## 3. 单二进制模拟（Qiling）
+## 3. 单二进制模拟（D5–D7：Qiling + 依赖打桩）
 
 ### rootfs 准备
 
@@ -173,7 +204,7 @@ ql.run()
 
 ---
 
-## 4. 手动 QEMU 模拟（Qiling/FAT 都不可用时）
+## 4. 手动 QEMU user 模式（D5 的轻量实现，Qiling 不可用时）
 
 ```bash
 # user mode + chroot
@@ -189,7 +220,7 @@ tcpdump -i any -w cap.pcap port 80 &
 
 ---
 
-## 5. 模糊测试（AFL++）
+## 5. 模糊测试（D10–D11：AFL++）
 
 ### 5.1 有源码
 

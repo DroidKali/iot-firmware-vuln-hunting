@@ -120,7 +120,7 @@
 
 ## 7. 手写一行式（工具缺失时的兜底）
 
-**优先用 `rg` / `fd`**（见 `references/toolchain.md` §0.1）；下面同时给 `rg` 与 `grep` 两版，`grep` 版仅在 `rg` 缺失时使用。
+**优先用 `rg` / `fd`**（见 `references/atomic-capabilities.md` §1）；下面同时给 `rg` 与 `grep` 两版，`grep` 版仅在 `rg` 缺失时使用。
 
 ```bash
 # 命令执行面

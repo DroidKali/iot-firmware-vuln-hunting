@@ -24,6 +24,21 @@ agent_created: true
 
 **核心思路**（迁移自大可实验室《AI 挖 Java 0day 不再靠运气》上篇的流水线设计 + 下篇的质量保障机制）：Skill 不教模型「什么是命令注入」，那是它已知的；Skill 给它装上**资深固件审计员的工作骨架**——定义流程、分配资源、设置护栏、标准化输出，并把中间状态持久化到文件系统，不信任模型的记忆。文章里的「6 阶段流水线 + EALOC 分层 + 三层审计架构 + 双轨模型」在固件场景下逐条对应为下面的 Phase 0-5、EALB、Layer 1-3 与 Track A/B/C（Track C 为固件专有的**跨请求污点**轨，见 Phase 3 Layer 2）；下篇的「覆盖矩阵、CONFIRMED/HYPOTHESIS、漏洞成立条件表、DKTSS、报告必填字段」对应为 Phase 2.5、`vuln-conditions.md`、`reporting.md` §3.1 与 `coverage_gate.py` 的机械化门禁。
 
+## 三层架构：方法论 / 决策判据 / 原子能力
+
+本 skill 固化的**不是「完整工具」，而是三层能力**。这个分层是刻意的——把一套完整决策流程固化成一个工具（FAT / Firmadyne / EMBA / FACT 的做法），遇到非常规固件就会在某一环卡死，剩下的只有依赖与兼容问题；而且它**在替 Agent 做决策**，而设备差异（SoC 是 ar71xx 还是 ipq40xx、文件系统是 squashfs 还是 UBIFS、内核是 4.14 还是 5.10、用户态是 BusyBox 还是完整 coreutils）恰恰决定了分析路径。
+
+| 层 | 固化什么 | 承载位置 |
+|---|---|---|
+| **方法论层** | 决策逻辑、优先级、证据标准、降级策略、交付规范 | 本文件（七条铁律、Phase 0–5、EALB、三轨审计、G1–G6 门禁）· `references/methodology.md` · `references/reporting.md`（DKTSS / 7 区块） |
+| **决策判据层** | **识别到什么特征 → 走哪条路**，以及失败反馈信号 | `references/atomic-capabilities.md` **§3**（Phase 1 提取选路树、Phase 4 仿真选路树） |
+| **原子能力层** | **单个可调用的操作**：能力 / 实现方式 / 输入输出 | `references/atomic-capabilities.md` **§1–§9**（约 45 项原子能力：侦察、提取、内容扫描、文件系统侦察、二进制分析、动态验证、网络、硬件） |
+
+**工作流是：侦察 → 按判据选路 → 调用原子能力 → 观察反馈 → 按反馈调整策略。**
+不是「按顺序试工具」，更不是「调一个完整工具让它跑完」。**失败时先读反馈定位原因、针对性修补，换实现是最后手段。**
+
+> 整链自动化工具（FAT / Firmadyne / EMBA / FACT / firmwalker）**只有一个合法位置**：主路径跑完后的**交叉验证基线**（`references/atomic-capabilities.md` §10.2），其输出按「线索」而非「结论」处理。它们不是 Phase 1/4 的主路径。
+
 ## 何时使用
 
 使用：拿到固件镜像 / rootfs / 一堆嵌入式二进制，要做安全评估、漏洞挖掘、后门排查、渗透前置分析、SRC 众测前的自查。
@@ -33,7 +48,7 @@ agent_created: true
 ## 前置：环境与授权
 
 - **授权声明**：只在获得书面授权（自有设备 / 客户授权 / SRC 范围）的目标上执行。开工前把授权范围写进 `fw-audit/<target>/00-scope.md`。
-- **环境**：`unblob` / `binwalk` / `moria` / `mithril` / `FAT` / `Qiling` / `AFL++` / `radare2` 在 Linux（Docker / WSL / Kali / AttifyOS）下体验最好。Windows 宿主请优先用 Docker；本 skill 自带的三个 Python 脚本是**纯标准库**，任何平台都能跑。
+- **环境**：各原子能力的实现（`unblob` / `binwalk` / `moria` / `mithril` / `Qiling` / `qemu-system-*` / `AFL++` / `radare2` 等）在 Linux（Docker / WSL / Kali / AttifyOS）下体验最好，**按 §3 判据按需安装，不必装齐**。Windows 宿主请优先用 Docker；本 skill 自带的全部 Python 脚本（`scripts/`）是**纯标准库**，任何平台都能跑。能力缺席时的替代实现见 `references/atomic-capabilities.md` §11。
 - **容器化跑法定式**：
   ```bash
   docker run --rm -v "$PWD:/data" -w /data ghcr.io/onekey-sec/unblob:latest /data/firmware.bin
@@ -51,7 +66,7 @@ agent_created: true
 | 结构化代码搜索 | **`sg`**（ast-grep） | `rg` + 正则 |
 | Python 环境 | **`uv`**（`uv run` / `uv pip` / `uvx` 免安装直跑） | `venv` + `pip` |
 
-降级要在报告里**显式注明**，不要静默替换。**边界**：这条只适用于本机——提取出的 rootfs 里跑的是**目标设备 busybox** 的 `grep`/`find`，不能换，也不能用 `--include` 等 GNU 扩展。详见 `references/toolchain.md` §0.1。
+降级要在报告里**显式注明**，不要静默替换。**边界**：这条只适用于本机——提取出的 rootfs 里跑的是**目标设备 busybox** 的 `grep`/`find`，不能换，也不能用 `--include` 等 GNU 扩展。详见 `references/atomic-capabilities.md` §1。
 
 ## 七条铁律
 
@@ -92,14 +107,14 @@ fw-audit/<target>/
 └── report.md                    最终报告
 ```
 
-| Phase | 名称    | 输入            | 输出                                               | 主要工具                          |
+| Phase | 名称    | 输入            | 输出                                               | 主要原子能力                        |
 | ----- | ----- | ------------- | ------------------------------------------------ | ----------------------------- |
 | 0     | 度量与定界 | 固件镜像          | `00-metrics.json`、`00-scope.md`                  | `scripts/fw_triage.py`        |
-| 1     | 提取与侦察 | 固件镜像          | `01-extract/`、`01-manifest.json`                 | unblob → binwalk → moria 降级链  |
+| 1     | 提取与侦察 | 固件镜像          | `01-extract/`、`01-manifest.json`                 | 侦察（R1–R4）→ 判据选路（`atomic-capabilities.md` §3.1）→ 解包能力（E1–E9） |
 | 2     | 分层与分配 | `01-extract/` | `02-tiering.json`、`03-audit-plan.md`             | `scripts/fw_triage.py --tier` |
 | 2.5   | 覆盖矩阵与审阅清单 | `03-audit-plan.md` | `25-review-list.md`                            | 人工/模型声明 + 门禁 diff |
 | 3     | 三层审计  | 分配清单          | `10-layer1-sinks.json`、`30-findings-verified.md` | `scripts/sink_scan.py` + 模型审计 |
-| 4     | 动态验证  | 候选漏洞          | 每条候选的可利用性判定                                      | FAT / Qiling / AFL++          |
+| 4     | 动态验证  | 候选漏洞          | 每条候选的可利用性判定                                      | 仿真选路（§3.2）→ 原子能力组合（D1–D12）    |
 | 5     | 门禁与报告 | 全部产物          | `40-coverage.md`、`report.md`、`50-rules/`         | `scripts/coverage_gate.py`    |
 
 ---
@@ -129,16 +144,38 @@ uv run scripts/fw_triage.py <firmware.bin> --out fw-audit/<target>/00-metrics.js
 
 ### Phase 1 · 提取与侦察
 
-按**降级链**执行（unblob → binwalk v3 → moria），**前一个判定失败才用后一个**，并把每次尝试的判据、产物与警告记进 `01-manifest.json` 的 `extraction` 段。
+**先侦察，再决策。** 不要一上来就跑某个解包工具，也不要按固定顺序逐个试——**先拿到特征，再按判据直取对应的原子能力**。完整决策树（含每个分支的失败信号与回退条件）见 `references/atomic-capabilities.md` §3.1，此处给出主干：
 
-**「失败」的判定 = 两级门，看「有没有拿到可用文件系统」，不看退出码。** 退出码 ≠ 0 但提取出了完整 rootfs → **成功**（只记 warning）；退出码 0 但只 carve 出裸块 → **失败**（必须降级）。这一条是为了杜绝「降级混乱」：
+```text
+第 0 步（侦察，必做）：
+  R1 file + magic bytes  →  容器类型
+  R2 熵分布（binwalk -E / moria -E）→  高熵区在哪里、是否整体加密
+  R3 头部与分区          →  各段起止、嵌套层级
+  ↓
+按识别结果分支（命中即取对应原子能力，不再往下试）：
+├─ 熵 > 7.9 且无任何已知魔数、无文件系统候选   → E9 判为加密（不硬审乱码）
+│    └ 先 R2 圈出高熵区边界 → 在内核/引导区找解密函数或密钥 → 解出后回到本条开头重跑
+├─ SquashFS 魔数（hsqs / sqsh）               → E2 unsquashfs / moria -e
+│    └ 解出为空或报 unsupported compression  → 换 sasquatch 版 unsquashfs，或 moria -e（多压缩后端）
+├─ UBI# 头 / UBIFS 节点                       → E3 ubireader → 失败 → moria -e
+├─ JFFS2 魔数（0x1985，注意大小端）            → E4 jefferson → 失败 → moria -e
+├─ ext2/3/4 · F2FS · EROFS · cramfs · romfs   → E5 debugfs / dump.f2fs / fsck.erofs / cramfsck
+├─ cpio / tar / gzip / xz / zstd 流           → E1 unblob 递归（当前层是中间层，继续下钻）
+├─ uImage / FIT / ARM64 Image / zImage        → E6 切内核 → E7 取 DTB+bootargs → E8 恢复符号
+└─ 完全无法识别                                → E1 unblob（carve + 78+ 格式）
+     └ 仍拿不到文件系统 → 记 manifest + warning，转人工 hexdump；不要用「兜底工具」糊过去
+```
+
+每次尝试的**判据、选了哪条路、为什么**都要记进 `01-manifest.json` 的 `extraction` 段（字段里同时写能力编号与实现名，见下）。
+
+**「失败」的判定 = 两级门，看「有没有拿到可用文件系统」，不看退出码。** 退出码 ≠ 0 但提取出了完整 rootfs → **成功**（只记 warning）；退出码 0 但只 carve 出裸块 → **失败**（必须换路）。这一条是为了杜绝「乱换路」：
 
 | 级 | 判据（任一命中即失败） |
 |---|---|
 | **L1 进程级** | ① 命令不存在（`command -v` 失败）② 退出码 ≠ 0 **且** 输出目录为空/未创建 ③ 超时被杀 / OOM（>15 min 无新产物） |
 | **L2 产物级（决定性）** | ④ manifest 空或 0 个 chunk ⑤ **未产出任何可识别文件系统**（只有 carve 出的裸文件/压缩流，没有 SquashFS/ext/JFFS2/UBIFS/CRAMFS/cpio 目录）⑥ 识别到文件系统 chunk 但标记 `unhandled`/`error`（典型：**缺 `sasquatch` → SquashFS 静默为空**） |
 
-**「可用文件系统」的客观定义**（三条同时满足才算有效产物，缺一即降级）：
+**「可用文件系统」的客观定义**（三条同时满足才算有效产物，缺一即换路）：
 
 ```
 rootfs_ok := 存在目录 D，满足
@@ -147,35 +184,46 @@ rootfs_ok := 存在目录 D，满足
   (c) D 下有 bin/sh、bin/busybox、etc/init.d/ 三者之一。
 ```
 
-先跑 `unblob --show-external-dependencies` 确认外部解包器就绪——缺解包器正是 L2-⑥ 的高发原因。
+若走 E1（unblob）实现，先跑 `unblob --show-external-dependencies` 确认外部解包器就绪——缺解包器正是 L2-⑥ 的高发原因。
 
-**不触发降级的情形**：退出码 0 且拿到合规 rootfs，只是个别未知块/边角文件没解 → 记 `warning`，**不降级**；把未解块路径记进 manifest 供后续手撸。**降级不丢弃上一级产物**——carve 出的块、内核、DTB 全部保留并合并进 `01-extract/`。
+**反向判据（不要误换路）**：退出码 0 且拿到合规 rootfs，只是个别未知块/边角文件没解 → 记 `warning`，**不换路**；把未解块路径记进 manifest 供后续手撸。**换路不丢弃上一级产物**——carve 出的块、内核、DTB 全部保留并合并进 `01-extract/`。
 
-**三级全失败**：高熵 + 无任何文件系统 → 判为**加密固件**，走解密（找密钥/解密函数）后**回到 Phase 1 重新入链**，不要硬审乱码。降级链本身必须写进 manifest，便于复盘「为什么用了兜底工具」：
+**全部路径都拿不到文件系统**：高熵 + 无任何文件系统 → 判为**加密固件**，走解密（找密钥/解密函数）后**回到 Phase 1 侦察步重新入链**，不要硬审乱码。每次决策都要留痕，便于复盘「为什么走了这条路」：
 
 ```json
 "extraction": {"attempts": [
-  {"tool": "unblob",  "verdict": "fail", "reason": "L2-⑥ squashfs chunk unhandled (sasquatch missing)", "out": "01-extract.unblob"},
-  {"tool": "binwalk", "verdict": "fail", "reason": "L2-⑤ carved blobs only, no filesystem",        "out": "01-extract.binwalk"},
-  {"tool": "moria",   "verdict": "ok",   "reason": "squashfs 2547 files; bin/busybox + etc/init.d present", "out": "01-extract"}
+  {"capability": "E1", "impl": "unblob",  "verdict": "fail", "reason": "L2-⑥ squashfs chunk unhandled (sasquatch missing)", "out": "01-extract.unblob"},
+  {"capability": "E2", "impl": "binwalk", "verdict": "fail", "reason": "L2-⑤ carved blobs only, no filesystem",        "out": "01-extract.binwalk"},
+  {"capability": "E2", "impl": "moria",   "verdict": "ok",   "reason": "squashfs 2547 files; bin/busybox + etc/init.d present", "out": "01-extract"}
 ]}
 ```
 
+示例（侦察 → 判据 → 原子能力）：
+
 ```bash
-# 1) 首选：unblob（78+ 格式，chunk 起止精确，未知块也 carve）
-unblob --report 01-manifest.json -e fw-audit/<target>/01-extract firmware.bin
-unblob --show-external-dependencies     # 先确认外部解包器就绪；缺 sasquatch 会丢 SquashFS
+# 第 0 步：侦察（R1–R3）——先看清是什么，再动手解
+file firmware.bin
+binwalk firmware.bin                                   # R1/R3 仅识别
+binwalk -E firmware.bin                                # R2 熵分布，判断是否有加密区
+moria -j firmware.bin > moria-findings.json            # R1/R2/R3 一起给（偏移+类型+置信度）
+moria -E firmware.bin                                  # R2 孤立高熵区（疑似加密/压缩）
 
-# 2) 次选：binwalk v3（熵分析 + 签名识别，Rust 版更快更准）
-binwalk -Me firmware.bin
-
-# 3) 兜底：moria（进程内解 SquashFS/ext/F2FS/JFFS2/UBIFS/EROFS…，无需 root，默认递归）
+# 命中 squashfs 分支（E2）
 moria -e firmware.bin -C fw-audit/<target>/01-extract
-moria -j firmware.bin > moria-findings.json    # JSON 给脚本和模型消费
-moria --list firmware.bin                      # 只看容器成员，不落盘
+# 或 unsquashfs -d rootfs <按 R3 偏移切出的 squashfs 镜像>
 
-# 4) 单文件系统补刀
-unsquashfs -d rootfs fw-audit/<target>/01-extract/0x…/squashfs-root
+# 命中 UBI/UBIFS 分支（E3）
+ubireader_extract_images firmware.bin -o 01-extract/ubi
+# 命中 JFFS2 分支（E4）
+jefferson -d 01-extract/jffs2 <按 R3 偏移切出的 jffs2 分区>
+
+# 命中内核分支（E6→E7→E8）
+binwalk -e firmware.bin                                 # 或按偏移 dd 切
+dtc -I dtb -O dts -o kernel.dts <提取出的 dtb>          # E7 取 bootargs/分区布局
+vmlinux-to-elf vmlinux vmlinux.sym                      # E8 恢复符号，后续 nm/objdump 可用
+
+# 完全无法识别时（E1 兜底）
+unblob --report 01-manifest.json -e fw-audit/<target>/01-extract firmware.bin
 ```
 
 提取完立刻做**内容级扫描**（moria 管「字节在哪」，mithril 管「里面写了什么」）：
@@ -192,9 +240,9 @@ mithril --keys <dir>          # 泄露或默认公钥、ROCA、弱 RSA、可因�
 
 > ⚠️ **`--cve` 的输出是线索，不是漏洞。** 它只回答「组件版本是否落在 CVE 影响区间」——**不回答「这段代码是否真的存在于固件里、是否可达」**。所有 `--cve` 命中一律先记为 `cve-hit`，写入 `20-findings-candidates.jsonl` 时 `track="component"`、`confidence="candidate"`，**必须**在 Phase 3/4 补做可达性验证（见铁律 7）后才能改措辞或计入漏洞数。禁止把它直接列进「漏洞」章节。
 
-工具不齐时的替代：`FAT`、`firmwalker`、`EMBA`、`firmware-mod-kit`，清单见 `references/toolchain.md`。
+**能力缺席时不要换路去装整链工具。** 缺哪个原子能力，优先按 `references/atomic-capabilities.md` §11 找等价实现（如 C1–C3 缺 mithril → `firmwalker` + 自写 `rg` 规则，但 CVE 结果的可信度下降、三问复核要更严）。`FAT` / `EMBA` / `FACT` 只在主路径跑完后作**交叉验证基线**（§10.2），不作为替代路径，其输出按线索处理。
 
-提取后必做四件事，缺一不可（本机命令用 `fd`/`rg`，见 `references/toolchain.md` §0.1）：
+提取后必做四件事，缺一不可（本机命令用 `fd`/`rg`，见 `references/atomic-capabilities.md` §1）：
 
 1. `fd -t f -x file {}` → 建立类型清单（替代 `find . -type f -exec file {} +`）
 2. `fd -t f -x sh -c 'test -u "$1" -o -g "$1" && echo "$1"' _ {}` → SUID/SGID
@@ -471,7 +519,7 @@ db.bytes.find_text_between('ping')          # 字符串/字节搜索
 
 **MCP 的硬前置与坑**：需 IDA 9.4+ 与 idalib 授权（商业授权，**没有就退回路径 B**）；`execute_python` 默认 `flush_database=True` 会立刻写 `.id0/.id1`，**对固件二进制是写操作**——先在副本上跑；一条命令超时（默认 360s）只是「请求中断」，阻塞型 `sleep()` 可能仍在跑；失败**不自动重试**（可能已改库）。
 
-**路径 B：无 MCP 时的降级链（任何环境都必须能跑）**
+**路径 B：无 MCP 时的替代实现链（任何环境都必须能跑）**
 
 ```bash
 # 1) 反汇编 / 交叉引用（radare2，可脚本化，最通用）
@@ -508,45 +556,50 @@ strings -a -t x usr/sbin/httpd | rg -i 'referer|cmd|ping|traceroute'
 
 静态链路完整 ≠ 可利用。固件场景还必须过三关：**能不能跑到这段代码**、**环境依赖（NVRAM/ioctl/硬件）能不能满足**、**有没有运行时防护**。
 
-#### 4.0 先选对工具：FAT / Qiling / AFL++ 决策树
+#### 4.0 选路判据：要证明什么 → 需要哪组原子能力
 
-**先纠正一个常见误解：这三者不是「三选一」，而是两级。**
+**先问一个更高层的问题：你要把哪一条 HYPOTHESIS 升成 CONFIRMED？** 判据不是「哪个工具更强」，而是**结论类型决定能力组合**。完整决策树（含每个失败分支的处置）见 `references/atomic-capabilities.md` §3.2：
 
-- **环境层**（FAT / Qiling）：负责**让代码跑起来 + 能 hook**，回答「可达性」与「参数真值」
-- **引擎层**（AFL++）：负责**自动找崩溃**，回答「内存破坏是否真存在」
-
-典型用法是**串联**：先用 FAT 或 Qiling 建好可达环境，再按目标形态挑 AFL++ 的插桩模式。**判据不是「哪个工具更强」，而是「你要把哪一条 HYPOTHESIS 升成 CONFIRMED」**：
-
+```text
+Q1 要验证的是哪一类结论？
+│
+├─ (A) 整机 / 服务可达性（路由可达？认证状态？）
+│   Q2 内核能否提取（E6）且 rootfs 完整（rootfs_ok）？
+│    ├─ 能 → D1：qemu-system-<arch> + E7 的 bootargs 直接启动
+│    │    └ 启动失败 → D2 读串口/dmesg，按原因分支（不是换个仿真器重跑）：
+│    │        ├─ no init found / VFS mount fail → D3 修 root= 或换 init
+│    │        ├─ 找不到 root device（mtdblock?） → D3 改 mtdparts / 建节点
+│    │        ├─ CPU/SoC 不匹配、无机器描述     → -M 或补 DTB（回 E7）
+│    │        ├─ 卡在等硬件（watchdog/NVRAM）   → D3 改 init 或 stub 掉该步骤
+│    │        └─ 内核与自带驱动不兼容           → 换厂商同版内核；仍不行 → 转 (B)
+│    │    └ 启动成功 → D4 探测真实服务/路由，回 Phase 3 补证据
+│    └─ 不能（内核加密/缺失/rootfs 不全）→ 直接转 (B)
+│
+├─ (B) sink 参数真值（命令注入 / 路径穿越 / 逻辑缺陷 / 认证绕过）
+│    ├─ 能加载并跑到 sink → D5 Qiling + D6 打桩 + D7 hook sink 看实参真值
+│    ├─ Qiling 因私有 syscall/加壳失败 → D8 strace/qemu-user + N2/N3 手工构造请求
+│    └─ 完全无法执行 → 回退静态闭环（Phase 3），结论保持 HYPOTHESIS，不得声称已验证
+│
+├─ (C) 内存破坏是否真实存在（溢出 / UAF / 格式化）
+│   Q4 目标二进制能否在宿主原生跑？
+│    ├─ 能（同 arch / 可 native build）      → D10 afl-fuzz -O（FRIDA）
+│    ├─ 跨 arch 且纯解析函数（无 syscall）    → D10 -U（Unicorn，最快）
+│    ├─ 跨 arch 且依赖 libc/文件/socket       → D10 -Q（QEMU）
+│    ├─ 是网络服务                            → 先 D5 写 harness（socket→文件）再喂 D10
+│    └─ 有 magic / 校验和 / 长度比对          → D10 加 CmpLog（-c）或 laf-intel
+│       然后 D11 逐个 triage 崩溃样本，判 PC 是否可控
+│
+└─ (D) 组件 CVE 是否可达 → 静态闭环（Phase 3 的「代码在 / 可达 / 未修复」三问），
+    不需要仿真；只有当三问齐备、要复现时才回到 (A) 或 (B)。详见 §4.5。
 ```
-                          要验证什么？
-        ┌───────────────────────┼───────────────────────┐
-   (A) 整机/服务可达性      (B) sink 参数真值          (C) 内存破坏是否真存在
-    路由可达? 认证状态?     (输入是否可控)             (栈/堆溢出 UAF 格式化)
-          │                       │                        │
-      FAT 整机模拟            Qiling 单二进制          先有可达环境(FAT/Qiling)
-          │ 起不来                + hook sink 看参数         │ 该二进制能在宿主原生跑?
-          ▼                       │                        ├─ 能(同 arch) ──► AFL++ -O (FRIDA)
-     FirmAE 交叉验证              │                        ├─ 跨 arch+纯解析函数 ─► AFL++ -U (Unicorn)
-          │ 还起不来              │                        └─ 跨 arch+需 libc/文件 ─► AFL++ -Q (QEMU)
-          ▼                       │                                 │ 目标是网络服务?
-     Qiling 单二进制 + 依赖打桩 ◄──┘                       用 Qiling harness 把 socket→文件再喂 AFL++
-```
 
-**选型表**：
+**硬规则：**
 
-| 目标形态 | 首选 | 备选 | 前置 |
-|---|---|---|---|
-| 标准 Linux 整机、要跑真服务 | **FAT**（编排完整） | **FirmAE**（自动修 NVRAM/网络，成功率更高） | Docker / 已提取 rootfs |
-| 整机起不来、只差某个硬件依赖 | **Qiling** + 打桩（`nvram_get`/ioctl/watchdog） | Unicorn 手写 harness | 目标 ELF + 固件自带 libc |
-| 只想看 sink 参数真值（命令注入/路径穿越） | **Qiling** hook `system`/`open` | FAT + `hooks.yaml` | Layer 3 已定位 sink 地址 |
-| 同 arch、能在宿主直接跑 | **AFL++ `-O`**（FRIDA） | native 编译 | root / ptrace 可用 |
-| 跨 arch、纯计算型解析函数 | **AFL++ `-U`**（Unicorn，最快） | QEMU 模式 | harness 把输入灌进内存 |
-| 跨 arch、依赖 libc/文件/socket | **AFL++ `-Q`**（QEMU） | — | `qemu-user` 支持该 arch |
-| 目标有 magic / 校验和 / 长度比对 | AFL++ **`-c`（CmpLog）** 或 laf-intel | 手工 patch 掉比较 | — |
+1. **反馈优先于重试。** 起不来先去读输出（dmesg / 串口 / strace），定位到具体原因再针对性修补；**换实现是最后手段**。这正是本 skill 与整链仿真工具的根本区别——它们失败时只能换下一个工具，我们能改。
+2. **不要为 fuzzing 而 fuzzing。** 只有 finding 类型是**内存破坏**（溢出 / UAF / 格式化），且静态链路已证可达时，才值得开 AFL++。**命令注入 / 认证绕过 / 路径穿越 / 逻辑缺陷用 D7 hook 直接看参数即可**——它们不是「跑崩了才算」，而是「参数到没到 sink」。对这类问题开 fuzzer 是纯浪费预算，且大概率一无所获。
+3. **每条 HYPOTHESIS 都要落明确结论**：升成 CONFIRMED，或写清「为何在当前条件下不可验证」并保持 HYPOTHESIS。禁止用「未验证」当作无限期搁置的借口（铁律 4）。
 
-**不要为 fuzzing 而 fuzzing**：只有当 finding 类型是**内存破坏**（溢出 / UAF / 格式化），且静态链路已证可达时，才值得开 AFL++。**命令注入 / 认证绕过 / 路径穿越 / 逻辑缺陷用 Qiling hook 直接看参数即可**——它们不是「跑崩了才算」，而是「参数到没到 sink」。对这类问题开 fuzzer 是纯浪费预算，且大概率一无所获。
-
-**三种执行模式速览**（同一套命令，模式决定插桩方式）：
+**三种插桩模式速览**（同一套命令，模式决定插桩方式）：
 
 | 模式 | 适用 | 相对速度 | 局限 |
 |---|---|---|---|
@@ -554,26 +607,31 @@ strings -a -t x usr/sbin/httpd | rg -i 'referer|cmd|ping|traceroute'
 | `-U` Unicorn | 纯函数，harness 把输入写进内存后调用 | 最快 | 不能有 syscall / 文件依赖 |
 | `-O` FRIDA | 目标能在宿主原生跑或已 native build | 快 | 需 ptrace / root |
 
-#### 4.1 整机模拟 —— FAT（首选，编排完整）
+#### 4.1 整机模拟（D1）—— 手工 qemu-system 起步，编排工具只作对照
+
+**先用最原始的通道起步**：错误信息最直接，启动失败时才知道该修什么（这就是「反馈优先于重试」）。
 
 ```bash
-fat ./firmware.bin                                          # 识别
-fat new ./firmware.bin
-fat extract .fat-projects/<proj>
-fat analyze .fat-projects/<proj>
+# D1：手工起（按 B1 识别的架构选 qemu-system-*；bootargs 来自 E7）
+qemu-system-arm -M versatilepb -kernel vmlinux -dtb kernel.dtb \
+  -append "root=/dev/mtdblock2 console=ttyAMA0,115200" \
+  -drive file=rootfs.img,format=raw -nographic
+# 起不来就用 D2：把串口输出/panic 原文读出来，按 §4.0 的失败分支定位修补点
+```
+
+```bash
+# 想借编排工具的自动修补手法（NVRAM/网络/rootfs 修补）时，把它们当「对照组」而不是托管方
+fat new ./firmware.bin && fat extract .fat-projects/<proj> && fat analyze .fat-projects/<proj>
+fat startup-map --rootfs ./rootfs                           # 启动流程与真正会跑的服务（对照 F3）
 fat trust-map --rootfs ./rootfs                             # 信任边界与可信二进制地图
-fat startup-map --rootfs ./rootfs                           # 启动流程与真正会跑的服务
-fat search --rootfs ./rootfs --profile credentials -I --context 2
-fat r2-triage --file ./usr/sbin/httpd --json                # 二进制分诊
-fat taint --file ./www/cgi-bin/diag.cgi --summary           # 污点追踪（source→sink）
-fat taint-cross --rootfs ./rootfs                           # 跨二进制污点
-fat emulate --project .fat-projects/<proj>                  # 起模拟（QEMU 编排）
+fat r2-triage --file ./usr/sbin/httpd --json                # 二进制分诊（对照 B3/B5）
+fat taint --file ./www/cgi-bin/diag.cgi --summary           # 污点追踪（对照 B6）
 fat emulate --project .fat-projects/<proj> --instrument hooks.yaml   # 带 hook 跑
 ```
 
-`fat emulate` 起来的服务**可能监听在可达网络上**，务必放在隔离网络 / 容器里，不要桥接到办公网。
+**用法红线**：`fat` 的这些子命令都是**对照与查漏**——它的结果与我们的 B3/B5/B6 输出比对，**差异即线索**；不要因为「它跑通了」就认为可达性已证。`fat emulate` 起来的服务**可能监听在可达网络上**，务必放在隔离网络 / 容器里，不要桥接到办公网。
 
-#### 4.2 单二进制模拟 —— Qiling（依赖硬件时打桩）
+#### 4.2 单二进制模拟（D5–D7）—— Qiling + 依赖打桩
 
 整机模拟起不来时（依赖特定 NVRAM 布局、私有 ioctl、看门狗），用 Qiling 只跑目标二进制并给缺失依赖打桩：
 
@@ -592,7 +650,7 @@ ql.run()
 
 Qiling 的价值：**跨架构 + 跨平台 + 可 hook + 可热补丁**，能在 x86 宿主上跑 MIPS/ARM 的 `httpd`，并在 `system()` 入口看参数真值。详细打桩写法与踩坑见 `references/emulation-fuzzing.md`。
 
-#### 4.3 模糊测试 —— AFL++（找内存破坏类缺陷）
+#### 4.3 模糊测试（D10–D11）—— AFL++（找内存破坏类缺陷）
 
 封闭二进制无源码，用 AFL++ 的二进制模式：
 
@@ -769,7 +827,7 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 
 | 文件 | 何时读 |
 |---|---|
-| `references/toolchain.md` | 需要具体命令、安装方式、工具缺失时的替代方案 |
+| `references/atomic-capabilities.md` | **决策判据 + 原子能力**：Phase 1 提取选路（§3.1）、Phase 4 仿真选路（§3.2）、约 45 项原子能力清单与实现命令（§1–§9）、整链工具的合法定位（§10.2）、能力缺席时的替代路径（§11） |
 | `references/methodology.md` | 需要 Tier 规则细节、EALB 计算、三轨模型（Track A/B/C）、跨请求污点（§3.2）、门禁判据的完整定义 |
 | `references/vuln-taxonomy.md` | 需要按攻击面/漏洞类型逐项核查（后门账号、命令注入、OTA、MQTT、U-Boot…） |
 | `references/vuln-conditions.md` | **Layer 3 / Phase 4**：候选要不要升 `CONFIRMED`？按漏洞类型逐条排除成立条件（固件版判定表） |
@@ -801,8 +859,11 @@ uv run scripts/selftest.py
 | 提取后只看了 `www/` 就下结论 | 回 Phase 2，按 R2/R3 补 `init.d`、`*.so`、CGI 二进制 |
 | 报告里出现「可能存在格式化字符串漏洞」 | 触犯铁律 1：要么给 `文件:偏移` 证据，要么降级为「疑点」并说明未能验证的原因 |
 | 二进制里出现 `system()` 就直接报 RCE | 必须完成 Source→Sink 追链，确认参数外部可控；否则只是 P3 代码质量项 |
-| SquashFS 用 `binwalk -e` 没解出来就放弃 | 换 `unblob`（需 sasquatch）或 `moria -e`，两者都支持 SquashFS 全变体 |
-| 整机模拟起不来就跳过 Phase 4 | 改用 Qiling 单二进制 + 打桩；再不行做静态链路并标注「未经动态确认」 |
+| SquashFS 解不出来就放弃 | 按 `atomic-capabilities.md` §3.1 的判据换到 E2 的其它实现（sasquatch 版 `unsquashfs` 或 `moria -e`），两者都支持 SquashFS 全变体 |
+| 一上来就跑解包工具、跳过侦察 | 回 §3.1 第 0 步：先 `file` + 熵 + 头部，拿到特征再选路；否则必然在非常规固件上乱试 |
+| 某个能力失败，不看输出就换下一个重跑 | **反馈优先于重试**：先读输出（dmesg / 报错 / panic 原文）定位原因，针对性修补；换实现是最后手段 |
+| 为了「稳」把 FAT / EMBA / 全家桶装齐 | 按 §3 判据**按需**装原子能力；整链工具只在主路径跑完后作交叉验证（§10.2），装它的时间通常换不来结论 |
+| 整机模拟起不来就跳过 Phase 4 | 改用 D5 单二进制 + D6 打桩；再不行走静态闭环并标注「未经动态确认」 |
 | 模糊跑两小时没崩就认为没漏洞 | 检查覆盖率（`afl-showmap`）、语料质量、目标是否真进入解析逻辑 |
 | 把 `mithril --cve` 结果直接当漏洞报 | 组件版本命中 ≠ 设备可利用（可能未编译该功能 / 已打补丁 / 不可达）。必须验证可达性与触发条件。跑 `coverage_gate.py --report` 会自动拦下这类写法 |
 | 「组件版本受影响所以漏洞存在」 | 五道缺口逐一排除：代码是否存在、是否 backport、编译选项、运行时配置、输入路径可达。版本号本身也可能被厂商改过 |
