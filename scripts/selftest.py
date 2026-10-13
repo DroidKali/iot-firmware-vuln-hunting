@@ -210,7 +210,7 @@ def main() -> int:
         with open(p, "w", encoding="utf-8", newline="\n") as f:
             f.write(txt)
 
-    print("\n[1/11] fw_triage.py — 度量 / 加固画像 / 分层")
+    print("\n[1/12] fw_triage.py — 度量 / 加固画像 / 分层")
     r = run([os.path.join(HERE, "fw_triage.py"), img, "--rootfs", root, "--tier",
              "--budget", "800", "--out", metrics, "--plan", plan, "--pretty"])
     check("fw_triage 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
@@ -238,7 +238,7 @@ def main() -> int:
     check("T3 含 www/index.html", "www/index.html" in set(t["t3_list"]))
     check("EALB > 0", t["ealoc_total"] > 0, str(t["ealoc_total"]))
 
-    print("\n[2/11] sink_scan.py — Layer 1 危险模式扫描")
+    print("\n[2/12] sink_scan.py — Layer 1 危险模式扫描")
     r = run([os.path.join(HERE, "sink_scan.py"), root, "--json", sinks])
     check("sink_scan 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
     if r.returncode != 0:
@@ -252,19 +252,19 @@ def main() -> int:
     check("etc/passwd 不再误报 P1-S-020", ("P1-S-020", "etc/passwd") not in key)
     check("文档目录被跳过", not any(f["file"].startswith("usr/share/doc") for f in sd["findings"]))
 
-    print("\n[3/11] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
+    print("\n[3/12] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vpart, "--tiering", tiering])
     check("不完整输入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
 
-    print("\n[4/11] coverage_gate.py — 覆盖率门禁（完整应通过）")
+    print("\n[4/12] coverage_gate.py — 覆盖率门禁（完整应通过）")
     out = os.path.join(base, "40-coverage.md")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vfull, "--tiering", tiering, "--out", out])
     check("完整输入 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("门禁报告已生成", os.path.isfile(out))
 
-    print("\n[5/11] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
+    print("\n[5/12] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
     bad_rep = os.path.join(base, "report-bad.md")
     with open(bad_rep, "w", encoding="utf-8") as fh:
         fh.write(
@@ -341,7 +341,7 @@ def main() -> int:
     check("⑥ 保留指针行（移动语义）→ 退出码 0", r.returncode == 0,
           r.stdout.strip()[-200:])
 
-    print("\n[6/11] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
+    print("\n[6/12] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
     review_bad = os.path.join(base, "25-review-list.md")
     with open(review_bad, "w", encoding="utf-8") as fh:
         fh.write("- [x] `www/cgi-bin/ping.cgi`\n"     # 有结论 → OK
@@ -373,7 +373,7 @@ def main() -> int:
     check("审阅清单一致 → 退出码 0", r.returncode == 0,
           r.stdout.strip()[-160:])
 
-    print("\n[7/11] coverage_gate.py — 报告 9 必填字段校验")
+    print("\n[7/12] coverage_gate.py — 报告 9 必填字段校验")
     f_bad = os.path.join(base, "report-fields-bad.md")
     with open(f_bad, "w", encoding="utf-8") as fh:
         fh.write(
@@ -409,7 +409,7 @@ def main() -> int:
     check("9 字段齐全 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("报告模板字段不误报", _template_fields_clean())
 
-    print("\n[8/11] coverage_gate.py — G4 入口级覆盖（文件级 100% ≠ 入口级 100%）")
+    print("\n[8/12] coverage_gate.py — G4 入口级覆盖（文件级 100% ≠ 入口级 100%）")
     tj_g4 = os.path.join(base, "02-tiering-g4.json")
     with open(tj_g4, "w", encoding="utf-8") as fh:
         json.dump({"rootfs_analysis": {"tiering": {"shards": [{"items": [
@@ -451,7 +451,7 @@ def main() -> int:
              "--entrypoints", ep_ok, "--out", os.path.join(base, "40-g4c.md")])
     check("入口枚举 + 全部处置 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
 
-    print("\n[9/11] coverage_gate.py — G5 绕过矩阵（「有防护」≠「防护有效」）")
+    print("\n[9/12] coverage_gate.py — G5 绕过矩阵（「有防护」≠「防护有效」）")
     vp_bad = os.path.join(base, "30-claim-bad.md")
     with open(vp_bad, "w", encoding="utf-8") as fh:
         fh.write("# 结论\n\n## F-001 · x\n\n- 影响: 已鉴权，不可利用\n")
@@ -481,7 +481,7 @@ def main() -> int:
     check("G5 端到端接入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
     check("检出绕过矩阵缺失", "绕过矩阵完备（G5）" in open(out_g5, encoding="utf-8").read())
 
-    print("\n[10/11] coverage_gate.py — G6 跨请求污点溯源（持久化来源须声明写入面）")
+    print("\n[10/12] coverage_gate.py — G6 跨请求污点溯源（持久化来源须声明写入面）")
     _F = ("- **类型**：命令注入\n- **位置**：`usr/sbin/httpd:0x1`\n- **优先级**：P1\n"
           "- **置信度**：CONFIRMED\n- **CVSS 3.1**：`AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H` = 9.8\n"
           "{src}- **Sink**：system()\n- **完整调用链**：1. a @0x1\n- **证据**：`[E1]` disasm\n")
@@ -516,7 +516,7 @@ def main() -> int:
              os.path.join(base, "40-g6b.md")])
     check("声明写入面端到端 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
 
-    print("\n[11/11] coverage_gate.py — G1/G2/G3 自动修复 + 类型→Base 命中")
+    print("\n[11/12] coverage_gate.py — G1/G2/G3 自动修复 + 类型→Base 命中")
     out_rec = os.path.join(base, "40-recover.md")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vpart, "--tiering", tiering,
@@ -549,6 +549,82 @@ def main() -> int:
                  "- **类型**：硬编码凭据 / 私钥泄露（CWE-798）\n")
     check("可映射类型 → 不报",
           not _cg.check_type_base(rep_mapped, base_md)["unmapped"])
+
+    print("\n[12/12] sink_scan.py — 结构级二次过滤（正则初筛 → 结构确认 / 否定 / 回退）")
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+    import sink_scan as _ss  # noqa
+    sf = os.path.join(base, "struct")
+    os.makedirs(sf, exist_ok=True)
+
+    def _w(name: str, text: str) -> str:
+        p = os.path.join(sf, name)
+        with open(p, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        return p
+
+    def _readtext(p: str) -> str:
+        try:
+            return open(p, encoding="utf-8", errors="replace").read()
+        except OSError:
+            return ""
+
+    p_real = _w("real.sh", '#!/bin/sh\neval "$user"\n')                 # 真调用
+    p_fake = _w("fake.sh", '#!/bin/sh\n# eval "$a"\necho "eval $a"\n')  # 仅注释 + 字符串
+    p_unkn = _w("unknown_script", "import os\nos.system(cmd)\n")        # 无扩展名/无 shebang
+
+    _all = [_ss.compile_rule(r) for r in _ss.load_rules(None)["rules"]]
+    thr = _ss.load_rules(None)["thresholds"]
+    rs = [r for r in _all if r["id"] == "P0-S-001"]
+    rw = [r for r in _all if r["id"] == "P0-W-001"]
+    no_eng = {"ast-grep": None, "semgrep": None}
+    has_eng = {"ast-grep": os.path.join(sf, "fake-engine"), "semgrep": None}
+
+    def sfile(path: str, rel: str, rules, engines, enabled, fb, st):
+        return _ss.scan_file(path, rel, rules, thr, [], [], 2, engines, fb, st, enabled, 5)
+
+    a = sfile(p_real, "real.sh", rs, no_eng, False, [], {})
+    b = sfile(p_fake, "fake.sh", rs, no_eng, False, [], {})
+    check("关闭结构引擎 → 正则基线：两文件都命中", len(a) == 1 and len(b) == 1)
+
+    fb, st = [], {}
+    b2 = sfile(p_fake, "fake.sh", rs, no_eng, True, fb, st)
+    check("引擎缺失 → 回退正则（结果不丢）", len(b2) == 1)
+    check("引擎缺失 → 记录 engine-missing",
+          any(x["reason"] == "engine-missing" for x in fb),
+          json.dumps(fb[:1], ensure_ascii=False))
+
+    fb, st = [], {}
+    d = sfile(p_unkn, "unknown_script", rw, has_eng, True, fb, st)
+    check("语言不可判 → 回退正则（结果不丢）", len(d) == 1)
+    check("语言不可判 → 记录 lang-undetected",
+          any(x["reason"] == "lang-undetected" for x in fb),
+          json.dumps(fb[:1], ensure_ascii=False))
+
+    _orig_sm = _ss.structural_match
+    _ss.structural_match = (lambda eng, binp, lang, pat, path, to:
+                            'eval "$user"' in _readtext(path))
+    try:
+        fb1, st1 = [], {}
+        c1 = sfile(p_real, "real.sh", rs, has_eng, True, fb1, st1)
+        fb2, st2 = [], {}
+        c2 = sfile(p_fake, "fake.sh", rs, has_eng, True, fb2, st2)
+        check("结构确认 → 保留命中且标 engine",
+              len(c1) == 1 and c1[0]["engine"] == "ast-grep")
+        check("结构否定 → 注释/字符串命中被过滤",
+              len(c2) == 0 and st2.get("structural_filtered", 0) == 1,
+              f"filtered={st2.get('structural_filtered')}")
+    finally:
+        _ss.structural_match = _orig_sm
+
+    _ss.structural_match = lambda *a, **k: None
+    try:
+        fb3, st3 = [], {}
+        e = sfile(p_real, "real.sh", rs, has_eng, True, fb3, st3)
+        check("引擎报错 → 回退正则并记录 engine-error",
+              len(e) == 1 and any(x["reason"] == "engine-error" for x in fb3))
+    finally:
+        _ss.structural_match = _orig_sm
 
     print()
     if FAILS:

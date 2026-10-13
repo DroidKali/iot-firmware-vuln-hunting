@@ -6,7 +6,7 @@
 
 ```json
 {
-  "version": "1.0",
+  "version": "1.2",
   "rules": [
     {
       "id": "P0-C-001",
@@ -14,13 +14,19 @@
       "category": "cmd-exec",        // 分类，用于聚合统计
       "title": "命令执行接口",
       "applies_to": ["binary", "text"],   // binary | text | script | web | config
-      "patterns": ["\\bsystem\\s*\\("],   // Python re，任一命中即算
+      "patterns": ["\\bsystem\\s*\\("],   // Python re，任一命中即算（初筛 + 回退保留项）
       "anti": ["system\\s*\\(\\s*\"[^\"]*\"\\s*\\)"],  // 命中即排除（降噪）
+      "structural": [                // 可选：结构级二次过滤（仅 P0/P1 的 script/web 规则）
+        {"engine": "ast-grep", "language": "php",
+         "pattern": ["system($$$ARGS)", "exec($$$ARGS)"]}   // str 或数组，数组内 OR
+      ],
       "guidance": "向上追参数来源，确认是否外部可控、是否过滤、是否需认证"
     }
   ]
 }
 ```
+
+**`structural` 语义**：仅在**正则已命中**的脚本 / web 文件上，用 `ast-grep`（或 `semgrep`）按语法树确认调用真实存在——结构否定判为注释 / 字符串误报丢弃；引擎缺失或语言不可判则自动回退 `patterns` 正则，并记录到输出的 `engine_status.fallbacks`。**对剥离符号的 ELF 不适用。** 判据见 `atomic-capabilities.md` §3.3 / §5.2。
 
 **文件类型判定**（scanner 内部）：
 

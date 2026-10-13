@@ -4,8 +4,8 @@
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">  
   <img alt="python" src="https://img.shields.io/badge/python-3.8%2B%20stdlib%20only-3776AB.svg?logo=python\&logoColor=white">  
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg">  
-  <img alt="files" src="https://img.shields.io/badge/package-19%20files%20%C2%B7%208428%20lines-informational.svg">  
-  <img alt="selftest" src="https://img.shields.io/badge/selftest-66%20assertions%20passing-brightgreen.svg">  
+  <img alt="files" src="https://img.shields.io/badge/package-19%20files%20%C2%B7%208883%20lines-informational.svg">  
+  <img alt="selftest" src="https://img.shields.io/badge/selftest-108%20assertions%20passing-brightgreen.svg">  
   <img alt="agent" src="https://img.shields.io/badge/type-Agent%20Skill-7B42BC.svg">  
 </p>
 
@@ -61,7 +61,7 @@
 |---|---|---|
 | **方法论层** | 决策逻辑、优先级、证据标准、降级策略、交付规范 | `SKILL.md`（七条铁律、Phase 0–5、EALB、三轨审计、G1–G6 门禁）· `references/methodology.md` · `references/reporting.md` |
 | **决策判据层** | **识别到什么特征 → 走哪条路**，以及失败反馈信号 | `references/atomic-capabilities.md` §3（Phase 1 提取选路树 / Phase 4 仿真选路树） |
-| **原子能力层** | **单个可调用的操作**：能力 / 实现方式 / 输入输出 | `references/atomic-capabilities.md` §1–§9（约 45 项：侦察、提取、内容扫描、文件系统侦察、二进制分析、动态验证、网络、硬件） |
+| **原子能力层** | **单个可调用的操作**：能力 / 实现方式 / 输入输出 | `references/atomic-capabilities.md` §1–§9（54 项：侦察、提取、内容扫描、文件系统侦察、二进制分析、动态验证、网络、硬件） |
 
 **工作流是：侦察 → 按判据选路 → 调用原子能力 → 观察反馈 → 按反馈调整策略。**
 
@@ -187,7 +187,7 @@ npx skills add https://github.com/DroidKali/iot-firmware-vuln-hunting --agent '*
 uv run scripts/selftest.py
 ```
 
-脚本会用纯 Python 手工构造合法 ELF64 与合成 rootfs，端到端跑通另外四个脚本，覆盖 **11 组 / 66 条断言**，其中包含「门禁必须拦下坏报告」的负向用例。看到全绿即安装成功。
+脚本会用纯 Python 手工构造合法 ELF64 与合成 rootfs，端到端跑通另外四个脚本，覆盖 **12 组 / 108 条断言**，其中包含「门禁必须拦下坏报告」的负向用例。看到全绿即安装成功。
 
 ### 2. 一次完整审计
 
@@ -237,9 +237,9 @@ uv run scripts/coverage_gate.py \
 | -------------------------- | ---- | --------------------------------------------------------------- |
 | `scripts/fw_triage.py`     | 852  | Phase 0 / 2：固件度量、熵扫描、ELF 加固画像、SUID 面、Tier 分层、EALB 预算            |
 | `scripts/coverage_gate.py` | 1345 | Phase 5：覆盖率门禁 + CVE 纪律检查（`--report`，V0–V4）+ 审阅清单三方对齐（`--review-list`）+ G4 入口级覆盖 + G5 绕过矩阵 + **G6 跨请求污点溯源** + 类型→Base + 自动修复计划 |
-| `scripts/sink_scan.py`     | 342  | Phase 3 Layer 1：多语言危险模式扫描（数据驱动规则）                               |
+| `scripts/sink_scan.py`     | 540  | Phase 3 Layer 1：多语言危险模式扫描（正则初筛 + ast-grep 结构级二次过滤；引擎缺失自动回退并记录）                               |
 | `scripts/entrypoints_init.py` | 139 | Phase 2/5：从 `02-tiering.json` 生成 `entrypoints.json` 骨架（`--merge` 保留已手填数据） |
-| `scripts/selftest.py`      | 566  | 安装自检：合成固件与 rootfs，端到端验证上面四个脚本的判据（11 组 / 66 条断言）                 |
+| `scripts/selftest.py`      | 642  | 安装自检：合成固件与 rootfs，端到端验证上面四个脚本的判据（12 组 / 108 条断言）                 |
 
 ### 覆盖率门禁判据
 
@@ -273,6 +273,8 @@ uv run scripts/coverage_gate.py \
 
 > **二进制规则与源码规则严格分离。** 剥离符号的 ELF `.dynstr` 里只有裸符号名（`system` 而非 `system(`），套用源码正则 `system\s*\(` 会**系统性漏检所有 PLT 调用**。因此单开一套 `P0-B-*` 规则用词边界匹配，并在输出里把命中类型标为 `binary-string`——它只说明「二进制里有这个字符串」，不等于「代码调用了它并传了用户输入」。
 
+> **脚本 / web 目标的二次过滤（v1.2 起）。** 正则分不清「代码」与「注释 / 字符串」（`# eval "$x"`、`echo "system(id)"`、`// system($x)` 都会误报）。P0/P1 的 script/web 规则额外带 `structural` 字段：对**正则已命中**的文件用 `ast-grep` 按语法树确认，结构否定即判为误报丢弃。引擎缺失或语言不可判时**自动回退正则，并记录进 `engine_status.fallbacks`**（不静默）。三条要点：只作二次过滤、对剥离符号的 ELF **不适用**、**不要把反编译伪代码喂给它**（IDA 伪代码不是合法 C）。判据见 `references/atomic-capabilities.md` §3.3，实现见 §5.2。
+
 ---
 
 ## 参考文件
@@ -281,12 +283,12 @@ uv run scripts/coverage_gate.py \
 
 | 文件                                | 行数  | 何时读                                                  |
 | --------------------------------- | --- | ---------------------------------------------------- |
-| `references/atomic-capabilities.md` | 629 | **决策判据 + 原子能力**：Phase 1 提取选路（§3.1）、Phase 4 仿真选路（§3.2）、约 45 项原子能力清单与实现命令（§1–§9）、整链工具的合法定位（§10.2）、能力缺席时的替代路径（§11） |
+| `references/atomic-capabilities.md` | 716 | **决策判据 + 原子能力**：Phase 1 提取选路（§3.1）、Phase 4 仿真选路（§3.2）、**Phase 3 Layer 1 引擎选路（§3.3）**、54 项原子能力清单与实现命令（§1–§9）、**结构级脚本扫描（§5.2）**、整链工具的合法定位（§10.2）、能力缺席时的替代路径（§11） |
 | `references/methodology.md`       | 491 | 需要 Tier 规则细节、EALB 计算、**三轨模型（Track A/B/C）**、跨请求污点（§3.2）、门禁判据的完整定义                  |
 | `references/emulation-fuzzing.md` | 357 | Phase 4 需要模拟与模糊的具体做法、踩坑与替代方案                         |
 | `references/reporting.md`         | 353 | Phase 5 需要报告字段、评分表、脱敏规范、DKTSS、⑥↔④ 迁移规则、G6 写入面                              |
 | `references/vuln-conditions.md`   | 393 | **Layer 3 / Phase 4**：候选要不要升 `CONFIRMED`？按类型逐条排除成立条件 |
-| `references/sink-patterns.md`     | 251 | 需要扩充或理解静态扫描规则，或手写 grep / YARA                        |
+| `references/sink-patterns.md`     | 257 | 需要扩充或理解静态扫描规则（含 `structural` 结构级规则 schema），或手写 grep / YARA                        |
 | `references/vuln-taxonomy.md`     | 218 | 需要按攻击面 / 漏洞类型逐项核查（后门账号、命令注入、OTA、MQTT、U-Boot…）        |
 | `references/resource-index.md`    | 233 | 需要外部资料：awesome-connected-things-sec 精编索引（按阶段映射）      |
 
@@ -302,7 +304,7 @@ iot-firmware-vuln-hunting/
 ├── LICENSE
 ├── references/                   # 8 篇按需加载的知识库
 │   ├── methodology.md            # 方法论层：Tier 规则 / EALB / 三层审计（Track A/B/C）/ 门禁判据完整定义
-│   ├── atomic-capabilities.md    # 判据层 + 原子能力层：Phase 1/4 选路树 + 约 45 项原子能力 + 替代路径矩阵
+│   ├── atomic-capabilities.md    # 判据层 + 原子能力层：Phase 1/4 选路树 + 54 项原子能力 + 替代路径矩阵
 │   ├── vuln-conditions.md        # 漏洞成立条件判定表（固件版）
 │   ├── vuln-taxonomy.md          # 漏洞分类学（按攻击面，13 类）
 │   ├── sink-patterns.md          # 静态扫描模式库 schema 与规则说明
@@ -310,7 +312,7 @@ iot-firmware-vuln-hunting/
 │   ├── reporting.md              # 报告规范 + IoT 评分 + DKTSS
 │   └── resource-index.md         # 外部资源索引
 ├── assets/
-│   ├── sink-rules.json           # 38 条规则 / 15 类（数据驱动扫描，含 cross-request 跨请求污点）
+│   ├── sink-rules.json           # 38 条规则 / 15 类（数据驱动扫描，含 cross-request 跨请求污点与 structural 结构级二次过滤）
 │   ├── tier-rules.json           # R0–R7 分层规则
 │   └── report-template.md        # 固定 7 区块报告模板
 └── scripts/                      # 5 个纯标准库 Python 脚本

@@ -40,7 +40,8 @@ FAT / Firmadyne / FirmAE / EMBA / FACT 这类工具的本质，是**把一整套
 |---|---|---|---|
 | **查找文件** | **`fd`**（Rust 重写 find） | `find` | 语法短、默认忽略 `.gitignore` 与隐藏项、并行遍历 |
 | **过滤内容** | **`rg`**（ripgrep） | `grep` | 默认跳过二进制与 `.gitignore`、自动多线程、`-uu` 关忽略、`-t py` / `-g '*.sh'` 限类型 |
-| **结构化代码搜索** | **`sg`**（ast-grep） | `rg` + 正则 | 按语法树匹配，跨语言、不受格式/换行影响；适合「找所有 `strcpy` 的第二参是否为常量」这类问题 |
+| **结构化代码搜索** | **`sg`**（ast-grep） | `rg` + 正则 | 按语法树匹配，跨语言、不受格式/换行影响；适合「找所有 `strcpy` 的第二参是否为常量」这类问题。**本体也是 Layer 1 的结构级二次过滤引擎**（见 §2.3 C6 / §3.3），命令名 `ast-grep` 或 `sg` 均可 |
+| **源码级污点 / 结构匹配** | **`semgrep`** | `sg` + 人工三跳追链 | 支持跨函数污点（taint mode），用于 Phase 3 对**源码类目标**自动追 source→sink；对剥离符号的 ELF **不适用**（见 §5.2） |
 | **Python 环境** | **`uv`** | `venv` + `pip` | `uv venv` / `uv pip install` / `uv tool install` / **`uvx` 免安装直跑** |
 
 ```bash
@@ -60,6 +61,11 @@ rg --files-with-matches 'telnetd' rootfs # 定位到文件
 # 结构化搜索：ast-grep
 sg -p '$F($A, $B)' -l c                  # 双参函数调用
 sg -p 'system($ARG)' -l c                # 所有 system 调用及其实参
+sg -p 'eval $$$ARGS' -l bash file.sh     # shell 真调用（不匹配注释/字符串）
+
+# 源码级污点：semgrep（仅源码类目标）
+semgrep -e 'system(...)' --lang php --json file.php
+semgrep --config taint-rule.yaml --json rootfs/webs   # taint mode 需 YAML 规则
 
 # Python：uv 而不是 pip / venv
 uv venv .venv && source .venv/bin/activate
@@ -81,7 +87,7 @@ uv run script.py                         # 用项目环境跑
 | Docker | ★★★★★ | 推荐。unblob 官方镜像自带全部解包器；`docker run --rm -v "$PWD:/data" -w /data ghcr.io/onekey-sec/unblob:latest /data/firmware.bin` |
 | WSL2 | ★★★★ | 可用，注意 `/mnt/c` 上执行大文件解包会慢 |
 | AttifyOS / EmbedOS / IoT Pentesting OS | ★★★★★ | 预装 Attify 全家桶 |
-| Windows 原生 | ★★ | 只有本 skill 的三个 Python 脚本能原生跑；其余走 Docker 或 Linux 主机 |
+| Windows 原生 | ★★ | 只有本 skill 的五个 Python 脚本能原生跑；其余走 Docker 或 Linux 主机 |
 
 ---
 
@@ -121,6 +127,7 @@ uv run script.py                         # 用项目环境跑
 | C3 | **组件 CVE 比对** | `mithril --cve`（离线本地镜像，带 CISA KEV / EPSS） | rootfs → 版本区间命中（**只有 cve-hit，非漏洞**） |
 | C4 | **启动与信任姿态** | `mithril --boot`、`--keys` | rootfs / BIOS → U-Boot env、Secure Boot 姿态、公钥弱点 |
 | C5 | **许可证与文件来源** | `mithril --licenses` | rootfs → 许可证清单与文件位置 |
+| C6 | **源码 / 脚本结构级扫描（二次过滤）** | `ast-grep`（`sg`）/ `semgrep`，由 `sink_scan.py` 的 `structural` 规则驱动 | 正则命中的脚本/web 文件 → 结构确认后的真实调用点（剔除注释/字符串误报）；对剥离符号的 ELF **不适用**（见 §3.3 / §5.2） |
 
 ### 2.4 文件系统侦察（FS Triage）
 
@@ -301,6 +308,43 @@ Q1 要验证的是哪一类结论？
 | `-U` Unicorn | 纯函数，harness 把输入写进内存后调用 | 最快 | 不能有 syscall / 文件依赖 |
 | `-O` FRIDA | 目标能在宿主原生跑或已 native build | 快 | 需 ptrace / root |
 
+### 3.3 Phase 3 · Layer 1 引擎选路（脚本 / web 目标的结构级二次过滤）
+
+Layer 1 的主引擎永远是**正则初筛**（`sink_scan.py` + `sink-rules.json` 的 `patterns`）：快、全量、不限语言。但对**脚本 / web 目标**，正则有一个结构性缺陷——**分不清「代码」与「注释 / 字符串」**：
+
+```bash
+# 下面三行正则都会命中 system(
+// system($x);              # 注释里的假调用
+echo "system(id)";          # 字符串里的假调用
+system($cmd);               # 真调用
+```
+
+**判据（命中即取，逐级回退，回退必须记录）**：
+
+```
+文件被正则命中，且该规则带 structural？
+├─ 否 → 保持正则结果（正常路径，无需记录）
+└─ 是 → 文件语言可判？（先看 LANG_BY_EXT 扩展名，再看 shebang / <?php）
+   ├─ 否 → 回退正则，记 fallback = lang-undetected
+   └─ 是 → 该语言有 structural 变体？
+      ├─ 否 → 回退正则，记 fallback = lang-unsupported
+      └─ 是 → 引擎二进制可用？
+         ├─ 否 → 回退正则，记 fallback = engine-missing
+         └─ 是 → 跑结构匹配（同一变体内多模式取 OR）
+            ├─ 结构确认 → 保留命中，标 engine = <引擎>
+            ├─ 结构否定 → 丢弃该命中（判为注释 / 字符串误报），计 filtered
+            └─ 解析失败 / 超时 → 回退正则，记 fallback = engine-error
+```
+
+**铁律**：
+
+1. **只作二次过滤，不作候选生成器。** 结构引擎只在**正则已命中**的文件上运行，不负责发现新候选。这样成本被正则约束住，也不改变 Layer 1 的召回语义。
+2. **对剥离符号的 ELF 不适用。** ast-grep / semgrep 是**源码级**工具。**不要**把反编译伪代码喂给它们——IDA 伪代码不是合法 C（`sub_XXXX`、`__int64`、`goto LABEL_xx`、非标转型），C 解析器会产出垃圾 AST，导致假阳性与静默漏检。这是实验级思路，不进主路径。
+3. **语言判不出就回退并记录。** 固件脚本常无扩展名、shebang 指向 busybox ash、厂商方言未必能被 tree-sitter 解析。任何回退都写进 `engine_status.fallbacks`，**不得静默**。
+4. **引擎缺席只影响噪声比，不影响结论强度。** 回退正则与结构过滤后的命中同属「形态存在」，都必须经 Layer 3 确认。
+
+> `ast-grep`（`sg`）与 `semgrep` 在 Layer 1「过滤注释 / 字符串」这件事上**职责重叠**——**选一个即可**，不要两个都塞进 Layer 1（会引入三套规则 DSL）。`semgrep` 的独立价值在 Layer 2/3 的**污点追踪**（见 §5.2）。
+
 ---
 
 ## 4. 提取与解包的实现细节
@@ -394,6 +438,48 @@ mithril --rules my.json <dir>     # 用户自定义规则
   - **不计入漏洞总数、不打 CVSS、不映射 P0-P3**，报告里单列「组件风险（未验证）」区块
   - 升级为漏洞必须补齐三项检查：**代码在** + **可达** + **未修复**。详见 `references/reporting.md` 第 ⑥ 区块与 SKILL.md 铁律 7
 - 全程离线、无网络调用（除 `--fetch-db` / `--update-db`），可气隙运行。
+
+### 5.2 结构级脚本扫描（C6 的实现：ast-grep / semgrep）
+
+**定位**：Layer 1 的二次过滤（ast-grep），以及 Layer 2/3 对**源码类目标**的污点辅助（semgrep taint）。
+
+```bash
+# --- Layer 1 二次过滤（由 sink-rules.json 的 structural 字段驱动，无需手工切引擎） ---
+python sink_scan.py 01-extract --ast-grep-bin ast-grep --json 10-layer1-sinks.json
+python sink_scan.py 01-extract --no-structural       # 强制纯正则，用作对照基线
+
+# 单独看某个规则的结构命中（调试规则时用）
+ast-grep run --pattern 'system($$$ARGS)' --lang php --json=stream webs/x.php
+ast-grep run --pattern 'eval $$$ARGS'    --lang bash --json=stream etc/rc.d/x.sh
+# 命令名 ast-grep 或 sg 均可
+
+# --- Layer 2/3：源码类目标的污点追踪（taint mode，需 YAML 规则） ---
+semgrep --config taint-rule.yaml --json rootfs/webs
+semgrep -e 'system(...)' --lang php --json webs/x.php        # 单模式检索
+```
+
+**规则写法**（只给 P0/P1 的 script/web 规则加，P2/P3 保留正则）：
+
+```json
+{
+  "id": "P0-W-001",
+  "patterns": ["\\bsystem\\s*\\("],
+  "structural": [
+    {"engine": "ast-grep", "language": "php",
+     "pattern": ["system($$$ARGS)", "exec($$$ARGS)", "shell_exec($$$ARGS)"]}
+  ]
+}
+```
+
+- `patterns` 是**回退保留项**：引擎缺失或解析失败时仍能工作，不丢能力。
+- `pattern` 可为字符串或字符串数组（数组内 **OR** 语义：任一确认即视为确认）。
+
+**约束与坑**：
+
+- semgrep 扫大目录时**文件定位阶段会显著变慢**（上万文件级达分钟级）。**只对 T1/T2 的脚本与 web 目录运行**，不要全量扫 rootfs；必要时用 `--max-target-bytes` 限单文件大小。
+- 两个引擎的规则语法**互不兼容**：ast-grep 是「模式即代码」，semgrep 是 YAML + 专用模式语法。**不要试图共用一套规则文件**。
+- 引擎可执行文件通过 `--ast-grep-bin` / `--semgrep-bin` 指定；`engine_status.engines` 会记录实际解析到的路径。
+- 新增规则必须先用 `--only-rule <id>` 跑通再进流水线。
 
 ---
 
@@ -616,7 +702,8 @@ afl-showmap -o map -- ./target @@           # 覆盖率确认
 |---|---|---|
 | `fd` | `find` | 语法变长、无并行；结论不变 |
 | `rg` | `grep -r`（需加 `-I`，否则误扫二进制） | 噪声变大、变慢；结论不变 |
-| `sg`（ast-grep） | `rg` + 多行正则（`-U`） | 跨行/格式差异下**可能漏检** |
+| `sg`（ast-grep） | `rg` + 多行正则（`-U`） | 跨行/格式差异下**可能漏检**；结构级二次过滤失效 → **注释/字符串误报回归**，结论不变（仍需 Layer 3 复核） |
+| `semgrep`（taint） | 人工三跳追链（Layer 3 主力） | 自动化程度下降、更耗时；**结论强度不变** |
 | E1 unblob | binwalk v3 → moria → 手工 `binwalk -E` + `dd` 按偏移切 | 格式覆盖下降，未知块丢失 |
 | E2 sasquatch | `moria -e` / 从 `moria --list` 给的偏移手工 `unsquashfs` | 多一步；结论不变 |
 | C1–C3 mithril | `firmwalker` + 自写 `rg` 规则 + 在线查 CVE（注意断网要求） | 失去 SBOM/KEV/EPSS 关联；CVE 结果的**可信度下降**（需更严格的三问复核） |

@@ -1,6 +1,6 @@
 {
-  "version": "1.1",
-  "description": "IoT 固件 Layer 1 静态扫描规则库。patterns/anti 为 Python 正则（编译失败时按字面量子串处理）。category=cross-request 的规则为『跨请求污点』形态标记（读端/写端/IPC/可写路径），命中后须做写-读配对（Bridge, IEEE S&P'26），见 SKILL.md Phase 3 Track C 与 references/methodology.md §3.2。",
+  "version": "1.2",
+  "description": "IoT 固件 Layer 1 静态扫描规则库。patterns/anti 为 Python 正则（编译失败时按字面量子串处理），是初筛引擎。可选的 structural 字段为『结构级二次过滤』：仅在正则已命中的脚本/web 文件上，用 ast-grep（或 semgrep）按语法树确认调用是否真实存在，从而排除注释/字符串误报；结构否定即丢弃，引擎缺失或解析失败自动回退正则并在 engine_status.fallbacks 记录，绝不静默。仅 P0/P1 的 script/web/text 类规则配 structural；对剥离符号的 ELF 二进制不适用。category=cross-request 的规则为『跨请求污点』形态标记（读端/写端/IPC/可写路径），命中后须做写-读配对（Bridge, IEEE S&P'26），见 SKILL.md Phase 3 Track C 与 references/methodology.md §3.2。",
   "thresholds": {
     "min_string_len": 4,
     "context_lines": 2,
@@ -45,6 +45,10 @@
       "applies_to": ["script"],
       "patterns": ["`", "\\$\\(", "\\beval\\b", "\\bexec\\b", "\\bsource\\s+/", "\\$[A-Za-z_][A-Za-z0-9_]*\\s*\\|"],
       "anti": ["^\\s*#"],
+      "structural": [
+        {"engine": "ast-grep", "language": "bash",
+         "pattern": ["eval $$$ARGS", "exec $$$ARGS", "source $FILE"]}
+      ],
       "guidance": "重点看变量是否来自外部（nvram get、CGI 环境变量、网络请求），是否加了引号。"
     },
     {
@@ -55,6 +59,14 @@
       "applies_to": ["web", "text", "script"],
       "patterns": ["\\bsystem\\s*\\(", "\\bexec\\s*\\(", "\\bshell_exec\\s*\\(", "\\bpassthru\\s*\\(", "\\bproc_open\\s*\\(", "\\bpopen\\s*\\(", "\\bassert\\s*\\(\\s*\\$", "preg_replace\\s*\\(.*/e"],
       "anti": [],
+      "structural": [
+        {"engine": "ast-grep", "language": "php",
+         "pattern": ["system($$$ARGS)", "exec($$$ARGS)", "shell_exec($$$ARGS)", "passthru($$$ARGS)", "proc_open($$$ARGS)", "popen($$$ARGS)"]},
+        {"engine": "ast-grep", "language": "python",
+         "pattern": ["os.system($$$ARGS)", "os.popen($$$ARGS)", "subprocess.call($$$ARGS)", "subprocess.Popen($$$ARGS)"]},
+        {"engine": "ast-grep", "language": "javascript",
+         "pattern": ["child_process.exec($$$ARGS)", "child_process.execSync($$$ARGS)"]}
+      ],
       "guidance": "确认参数是否直接来自 $_GET/$_POST/QUERY_STRING/CONTENT_LENGTH。"
     },
     {
@@ -65,6 +77,10 @@
       "applies_to": ["web"],
       "patterns": ["\\beval\\s*\\(", "\\bFunction\\s*\\(", "document\\.write\\s*\\(", "\\.innerHTML\\s*=", "setTimeout\\s*\\(\\s*['\"]"],
       "anti": ["^\\s*//"],
+      "structural": [
+        {"engine": "ast-grep", "language": "javascript",
+         "pattern": ["eval($$$ARGS)", "Function($$$ARGS)", "document.write($$$ARGS)", "$X.innerHTML = $Y", "setTimeout($$$ARGS)"]}
+      ],
       "guidance": "查数据是否来自 location.hash / postMessage / 后端注入的配置。"
     },
     {
@@ -105,6 +121,11 @@
       "applies_to": ["binary", "text", "web", "script"],
       "patterns": ["unserialize\\s*\\(", "\\bXMLDecoder\\b", "ObjectInputStream", "yaml\\.load\\s*\\(", "pickle\\.loads?\\s*\\(", "\\bMarshal\\.load\\b"],
       "anti": [],
+      "structural": [
+        {"engine": "ast-grep", "language": "php", "pattern": ["unserialize($$$ARGS)"]},
+        {"engine": "ast-grep", "language": "python",
+         "pattern": ["yaml.load($$$ARGS)", "pickle.loads($$$ARGS)", "pickle.load($$$ARGS)"]}
+      ],
       "guidance": "反序列化对象是否可被外部输入控制。"
     },
     {
@@ -215,6 +236,10 @@
       "applies_to": ["script", "text", "config"],
       "patterns": ["chmod\\s+(-R\\s+)?777", "chmod\\s+(-R\\s+)?666", "umask\\s+0"],
       "anti": ["^\\s*#"],
+      "structural": [
+        {"engine": "ast-grep", "language": "bash",
+         "pattern": ["chmod 777 $$$REST", "chmod -R 777 $$$REST", "chmod 666 $$$REST", "chmod -R 666 $$$REST", "umask 0"]}
+      ],
       "guidance": "看作用的路径是否可被低权限进程影响。"
     },
     {
