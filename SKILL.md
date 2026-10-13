@@ -460,12 +460,14 @@ db.bytes.find_text_between('ping')          # 字符串/字节搜索
 
 用它的理由：固件里高频的「字符串锚点 → 引用点 → 调用者」三跳手工追链，在 MCP 下变成一条 xref 查询。**但注意**：MCP 给出的是反编译器的*推断*（变量类型、函数边界都可能错），**证据仍是反汇编/字节，不是伪代码**——伪代码只能用于理解控制流，不能直接当 finding 的原文证据引用。
 
-配置（写进 `~/.workbuddy/mcp.json` 的 `mcpServers`，改完需在连接器管理页点「信任」才生效）：
+配置（写进**你所用 Agent 的 MCP 配置文件**——形如 `~/.<agent>/mcp.json`——的 `mcpServers`，改完需在连接器管理页点「信任」才生效）：
 
 ```json
 {"mcpServers": {"ida": {"command": "uvx",
-  "args": ["--exclude-newer=1s", "ida-mcp", "stdio", "--agent=workbuddy"]}}}
+  "args": ["--exclude-newer=1s", "ida-mcp", "stdio"]}}}
 ```
+
+> `stdio` 子命令另有一个**可选**参数 `--agent <名称>`，官方说明是 "Agent name to record in the MCP session trace"——只写进会话跟踪元数据，不参与任何鉴权或功能开关，**可省略**，填任意名称也可。
 
 **MCP 的硬前置与坑**：需 IDA 9.4+ 与 idalib 授权（商业授权，**没有就退回路径 B**）；`execute_python` 默认 `flush_database=True` 会立刻写 `.id0/.id1`，**对固件二进制是写操作**——先在副本上跑；一条命令超时（默认 360s）只是「请求中断」，阻塞型 `sleep()` 可能仍在跑；失败**不自动重试**（可能已改库）。
 

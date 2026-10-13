@@ -54,7 +54,7 @@ sg -p 'system($ARG)' -l c                # 所有 system 调用及其实参
 uv venv .venv && source .venv/bin/activate
 uv pip install unblob qiling
 uv tool install binwalk                  # 装 CLI 工具
-uvx ida-mcp stdio --agent=workbuddy      # 免安装直跑，不污染环境
+uvx ida-mcp stdio                        # 免安装直跑，不污染环境（可加 --agent <名称> 记录会话调用方）
 uv run script.py                         # 用项目环境跑
 ```
 
@@ -238,16 +238,18 @@ db.segments / db.names / db.entries / db.imports
 
 ```bash
 uvx ida-nexus python firmware.bin -c 'db.functions.get_all()'
-uvx ida-mcp stdio --agent=workbuddy        # stdio MCP
+uvx ida-mcp stdio                          # stdio MCP
 uvx ida-mcp http --host 127.0.0.1 --port 8737   # Streamable HTTP
 uvx ida-mcp dashboard --open               # 会话/成本面板
 ```
 
-MCP 配置（写入 `~/.workbuddy/mcp.json`，改后在连接器管理页点「信任」才生效）：
+> `stdio` 子命令另有**可选**参数 `--agent <名称>`（官方说明 "Agent name to record in the MCP session trace"）——只写进会话跟踪元数据，不影响鉴权与功能，可省略。
+
+MCP 配置（写入**你所用 Agent 的 MCP 配置文件**，形如 `~/.<agent>/mcp.json`；改后在连接器管理页点「信任」才生效）：
 
 ```json
 {"mcpServers": {"ida": {"command": "uvx",
-  "args": ["--exclude-newer=1s", "ida-mcp", "stdio", "--agent=workbuddy"]}}}
+  "args": ["--exclude-newer=1s", "ida-mcp", "stdio"]}}}
 ```
 
 **坑（必读）**：
