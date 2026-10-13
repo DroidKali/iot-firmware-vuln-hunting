@@ -210,7 +210,7 @@ def main() -> int:
         with open(p, "w", encoding="utf-8", newline="\n") as f:
             f.write(txt)
 
-    print("\n[1/5] fw_triage.py — 度量 / 加固画像 / 分层")
+    print("\n[1/10] fw_triage.py — 度量 / 加固画像 / 分层")
     r = run([os.path.join(HERE, "fw_triage.py"), img, "--rootfs", root, "--tier",
              "--budget", "800", "--out", metrics, "--plan", plan, "--pretty"])
     check("fw_triage 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
@@ -238,7 +238,7 @@ def main() -> int:
     check("T3 含 www/index.html", "www/index.html" in set(t["t3_list"]))
     check("EALB > 0", t["ealoc_total"] > 0, str(t["ealoc_total"]))
 
-    print("\n[2/5] sink_scan.py — Layer 1 危险模式扫描")
+    print("\n[2/10] sink_scan.py — Layer 1 危险模式扫描")
     r = run([os.path.join(HERE, "sink_scan.py"), root, "--json", sinks])
     check("sink_scan 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
     if r.returncode != 0:
@@ -252,19 +252,19 @@ def main() -> int:
     check("etc/passwd 不再误报 P1-S-020", ("P1-S-020", "etc/passwd") not in key)
     check("文档目录被跳过", not any(f["file"].startswith("usr/share/doc") for f in sd["findings"]))
 
-    print("\n[3/7] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
+    print("\n[3/10] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vpart, "--tiering", tiering])
     check("不完整输入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
 
-    print("\n[4/7] coverage_gate.py — 覆盖率门禁（完整应通过）")
+    print("\n[4/10] coverage_gate.py — 覆盖率门禁（完整应通过）")
     out = os.path.join(base, "40-coverage.md")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vfull, "--tiering", tiering, "--out", out])
     check("完整输入 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("门禁报告已生成", os.path.isfile(out))
 
-    print("\n[5/7] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
+    print("\n[5/10] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
     bad_rep = os.path.join(base, "report-bad.md")
     with open(bad_rep, "w", encoding="utf-8") as fh:
         fh.write(
@@ -303,7 +303,45 @@ def main() -> int:
     check("无违规", "V1" not in good_txt and "V0" not in good_txt)
     check("报告模板本身不误报", _template_clean())
 
-    print("\n[6/7] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
+    # V4：同一 CVE-ID 不得同时作为 ④ 条目与 ⑥ 未验证线索（应「移动」而非「复制」）
+    _f001 = ("### F-001 · 组件漏洞\n\n"
+             "- 类型: 命令注入\n"
+             "- 位置: /usr/sbin/httpd @0xB8600\n"
+             "- 优先级: P1\n"
+             "- 置信度: CONFIRMED\n"
+             "- CVSS 3.1: 7.3\n"
+             "- Source: nvram wget_verchk_pid\n"
+             "- Sink: system() @0x41E30\n"
+             "- 完整调用链: upload → restore → sub_B8600 → system()\n"
+             "- 证据: 命中 CVE-2021-28831，反编译见 30-findings-verified.md\n\n")
+    dup_rep = os.path.join(base, "report-dup-cve.md")
+    with open(dup_rep, "w", encoding="utf-8") as fh:
+        fh.write("## 4. 漏洞详情\n\n" + _f001 +
+                 "## 6. 组件风险（未验证）\n\n"
+                 "- busybox 1.31：疑似存在 CVE-2021-28831，尚未验证可达性\n\n## 7. 附录\n")
+    out_dup = os.path.join(base, "40-coverage-dup.md")
+    r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
+             "--verified", vfull, "--tiering", tiering,
+             "--report", dup_rep, "--out", out_dup])
+    check("同 CVE-ID 双现（④+⑥）→ 退出码 1", r.returncode == 1, f"rc={r.returncode}")
+    check("检出 V4 复制而非移动", "V4" in open(out_dup, encoding="utf-8").read())
+
+    mig_rep = os.path.join(base, "report-mig-cve.md")
+    with open(mig_rep, "w", encoding="utf-8") as fh:
+        fh.write("## 4. 漏洞详情\n\n" + _f001 +
+                 "## 6. 组件风险（未验证）\n\n"
+                 "**已验证并升入第 4 区块的条目**：\n\n"
+                 "| CVE | 状态 | 依据 |\n|---|---|---|\n"
+                 "| CVE-2021-28831 | `cve-reachable` | 函数 @0x1000 + F-001 |\n\n"
+                 "## 7. 附录\n")
+    out_mig = os.path.join(base, "40-coverage-mig.md")
+    r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
+             "--verified", vfull, "--tiering", tiering,
+             "--report", mig_rep, "--out", out_mig])
+    check("⑥ 保留指针行（移动语义）→ 退出码 0", r.returncode == 0,
+          r.stdout.strip()[-200:])
+
+    print("\n[6/10] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
     review_bad = os.path.join(base, "25-review-list.md")
     with open(review_bad, "w", encoding="utf-8") as fh:
         fh.write("- [x] `www/cgi-bin/ping.cgi`\n"     # 有结论 → OK
@@ -335,7 +373,7 @@ def main() -> int:
     check("审阅清单一致 → 退出码 0", r.returncode == 0,
           r.stdout.strip()[-160:])
 
-    print("\n[7/7] coverage_gate.py — 报告 9 必填字段校验")
+    print("\n[7/10] coverage_gate.py — 报告 9 必填字段校验")
     f_bad = os.path.join(base, "report-fields-bad.md")
     with open(f_bad, "w", encoding="utf-8") as fh:
         fh.write(
@@ -370,6 +408,112 @@ def main() -> int:
              "--report", f_good, "--out", os.path.join(base, "40-coverage-fg.md")])
     check("9 字段齐全 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("报告模板字段不误报", _template_fields_clean())
+
+    print("\n[8/10] coverage_gate.py — G4 入口级覆盖（文件级 100% ≠ 入口级 100%）")
+    tj_g4 = os.path.join(base, "02-tiering-g4.json")
+    with open(tj_g4, "w", encoding="utf-8") as fh:
+        json.dump({"rootfs_analysis": {"tiering": {"shards": [{"items": [
+            {"file": "usr/sbin/httpd", "tier": "T1", "text_kb": 888.24},
+            {"file": "lib/libcrypto.so.1.1", "tier": "T1", "text_kb": 1159.65},
+        ]}]}}}, fh, ensure_ascii=False)
+    ep_missing = os.path.join(base, "entrypoints-missing.json")
+    r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
+             "--verified", vfull, "--tiering", tj_g4,
+             "--entrypoints", ep_missing, "--out", os.path.join(base, "40-g4a.md")])
+    check("缺 entrypoints.json → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
+
+    ep_todo = os.path.join(base, "entrypoints-todo.json")
+    with open(ep_todo, "w", encoding="utf-8") as fh:
+        json.dump({"schema": "entrypoints/v1", "files": [
+            {"file": "usr/sbin/httpd", "handler_table_count": 3,
+             "handlers": [{"name": "a.cgi", "conclusion": ""},
+                          {"name": "b.cgi", "conclusion": ""},
+                          {"name": "c.cgi", "conclusion": ""}]}]}, fh, ensure_ascii=False)
+    out_g4b = os.path.join(base, "40-g4b.md")
+    r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
+             "--verified", vfull, "--tiering", tj_g4,
+             "--entrypoints", ep_todo, "--out", out_g4b])
+    g4b = open(out_g4b, encoding="utf-8").read()
+    check("枚举齐但 0 处置 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
+    check("检出 G4 入口审计率不足", "入口级覆盖（G4）" in g4b and "0.0%" in g4b)
+
+    ep_ok = os.path.join(base, "entrypoints-ok.json")
+    with open(ep_ok, "w", encoding="utf-8") as fh:
+        json.dump({"schema": "entrypoints/v1", "files": [
+            {"file": "usr/sbin/httpd", "handler_table_count": 3,
+             "handlers": [{"name": "a.cgi", "conclusion": "NOT_FOUND"},
+                          {"name": "b.cgi", "conclusion": "F-001"},
+                          {"name": "c.cgi", "conclusion": "F-002"}]},
+            {"file": "lib/libcrypto.so.1.1", "waiver": {"reason": "库"}}]},
+            fh, ensure_ascii=False)
+    r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
+             "--verified", vfull, "--tiering", tj_g4,
+             "--entrypoints", ep_ok, "--out", os.path.join(base, "40-g4c.md")])
+    check("入口枚举 + 全部处置 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
+
+    print("\n[9/10] coverage_gate.py — G5 绕过矩阵（「有防护」≠「防护有效」）")
+    vp_bad = os.path.join(base, "30-claim-bad.md")
+    with open(vp_bad, "w", encoding="utf-8") as fh:
+        fh.write("# 结论\n\n## F-001 · x\n\n- 影响: 已鉴权，不可利用\n")
+    vp_good = os.path.join(base, "30-claim-good.md")
+    with open(vp_good, "w", encoding="utf-8") as fh:
+        fh.write("# 结论\n\n## F-001 · x\n\n- 影响: 已鉴权\n\nbypass_matrix:\n"
+                 + "".join(f"| B{i} | 已测·不可绕过 |\n" for i in range(1, 13)))
+    vp_neutral = os.path.join(base, "30-claim-neutral.md")
+    with open(vp_neutral, "w", encoding="utf-8") as fh:
+        fh.write("# 结论\n\n## F-001 · x\n\n- 影响: 无鉴权，未过滤\n")
+    check("防护断言缺矩阵 → 检出",
+          len(_cg.check_bypass_matrix(vp_bad)["missing_matrix"]) == 1)
+    check("完整 B1–B12 矩阵 → 不报",
+          not _cg.check_bypass_matrix(vp_good)["missing_matrix"])
+    check("「无鉴权 / 未过滤」不误报",
+          not _cg.check_bypass_matrix(vp_neutral)["claims"])
+
+    vcf = os.path.join(base, "30-claim-full.md")
+    with open(vcf, "w", encoding="utf-8") as fh:
+        fh.write(open(vfull, encoding="utf-8").read()
+                 + "\n## F-099 · 测试防护断言\n\n- 文件: `www/cgi-bin/ping.cgi`\n"
+                   "- 影响: 已有过滤，不可利用\n")
+    out_g5 = os.path.join(base, "40-g5.md")
+    r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
+             "--verified", vcf, "--tiering", tiering, "--bypass-check",
+             "--out", out_g5])
+    check("G5 端到端接入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
+    check("检出绕过矩阵缺失", "绕过矩阵完备（G5）" in open(out_g5, encoding="utf-8").read())
+
+    print("\n[10/10] coverage_gate.py — G1/G2/G3 自动修复 + 类型→Base 命中")
+    out_rec = os.path.join(base, "40-recover.md")
+    r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
+             "--verified", vpart, "--tiering", tiering,
+             "--review-list", review_bad, "--auto-recover",
+             "--recover-round", "1", "--max-rounds", "2", "--out", out_rec])
+    rec_txt = open(out_rec, encoding="utf-8").read()
+    check("G2 未声明 → 仍阻断（禁止自动）", r.returncode == 1, f"rc={r.returncode}")
+    check("G1/G3 转自动修复计划", "自动修复第 1/2 轮" in rec_txt)
+    check("生成 auto-recover.json",
+          os.path.isfile(os.path.join(base, "40-recover.auto-recover.json")))
+    out_rec3 = os.path.join(base, "40-recover3.md")
+    run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
+         "--verified", vpart, "--tiering", tiering,
+         "--review-list", review_bad, "--auto-recover",
+         "--recover-round", "3", "--max-rounds", "2", "--out", out_rec3])
+    check("轮次超限 → 回硬门禁",
+          "轮次超限" in open(out_rec3, encoding="utf-8").read())
+
+    base_md = os.path.join(os.path.dirname(HERE), "references", "reporting.md")
+    tb = _cg.parse_base_table(base_md)
+    check("Base 表可解析且 ≥30 行", tb["ok"] and tb["rows"] >= 30, str(tb["rows"]))
+    rep_unmapped = os.path.join(base, "report-type-unmapped.md")
+    with open(rep_unmapped, "w", encoding="utf-8") as fh:
+        fh.write("## 4. 漏洞详情\n\n### F-001 · x\n\n- **类型**：星际传送门滥用\n")
+    check("未命中类型 → 报出",
+          len(_cg.check_type_base(rep_unmapped, base_md)["unmapped"]) == 1)
+    rep_mapped = os.path.join(base, "report-type-mapped.md")
+    with open(rep_mapped, "w", encoding="utf-8") as fh:
+        fh.write("## 4. 漏洞详情\n\n### F-001 · x\n\n"
+                 "- **类型**：硬编码凭据 / 私钥泄露（CWE-798）\n")
+    check("可映射类型 → 不报",
+          not _cg.check_type_base(rep_mapped, base_md)["unmapped"])
 
     print()
     if FAILS:

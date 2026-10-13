@@ -129,7 +129,37 @@ uv run scripts/fw_triage.py <firmware.bin> --out fw-audit/<target>/00-metrics.js
 
 ### Phase 1 · 提取与侦察
 
-按**降级链**执行，前一个失败才用后一个，并把策略与警告记进 `01-manifest.json`。
+按**降级链**执行（unblob → binwalk v3 → moria），**前一个判定失败才用后一个**，并把每次尝试的判据、产物与警告记进 `01-manifest.json` 的 `extraction` 段。
+
+**「失败」的判定 = 两级门，看「有没有拿到可用文件系统」，不看退出码。** 退出码 ≠ 0 但提取出了完整 rootfs → **成功**（只记 warning）；退出码 0 但只 carve 出裸块 → **失败**（必须降级）。这一条是为了杜绝「降级混乱」：
+
+| 级 | 判据（任一命中即失败） |
+|---|---|
+| **L1 进程级** | ① 命令不存在（`command -v` 失败）② 退出码 ≠ 0 **且** 输出目录为空/未创建 ③ 超时被杀 / OOM（>15 min 无新产物） |
+| **L2 产物级（决定性）** | ④ manifest 空或 0 个 chunk ⑤ **未产出任何可识别文件系统**（只有 carve 出的裸文件/压缩流，没有 SquashFS/ext/JFFS2/UBIFS/CRAMFS/cpio 目录）⑥ 识别到文件系统 chunk 但标记 `unhandled`/`error`（典型：**缺 `sasquatch` → SquashFS 静默为空**） |
+
+**「可用文件系统」的客观定义**（三条同时满足才算有效产物，缺一即降级）：
+
+```
+rootfs_ok := 存在目录 D，满足
+  (a) D 下有 {bin|usr|etc|lib} 中至少 2 个；
+  (b) D 下 ELF 文件数 ≥ 1，或 shell 脚本数 ≥ 1；
+  (c) D 下有 bin/sh、bin/busybox、etc/init.d/ 三者之一。
+```
+
+先跑 `unblob --show-external-dependencies` 确认外部解包器就绪——缺解包器正是 L2-⑥ 的高发原因。
+
+**不触发降级的情形**：退出码 0 且拿到合规 rootfs，只是个别未知块/边角文件没解 → 记 `warning`，**不降级**；把未解块路径记进 manifest 供后续手撸。**降级不丢弃上一级产物**——carve 出的块、内核、DTB 全部保留并合并进 `01-extract/`。
+
+**三级全失败**：高熵 + 无任何文件系统 → 判为**加密固件**，走解密（找密钥/解密函数）后**回到 Phase 1 重新入链**，不要硬审乱码。降级链本身必须写进 manifest，便于复盘「为什么用了兜底工具」：
+
+```json
+"extraction": {"attempts": [
+  {"tool": "unblob",  "verdict": "fail", "reason": "L2-⑥ squashfs chunk unhandled (sasquatch missing)", "out": "01-extract.unblob"},
+  {"tool": "binwalk", "verdict": "fail", "reason": "L2-⑤ carved blobs only, no filesystem",        "out": "01-extract.binwalk"},
+  {"tool": "moria",   "verdict": "ok",   "reason": "squashfs 2547 files; bin/busybox + etc/init.d present", "out": "01-extract"}
+]}
+```
 
 ```bash
 # 1) 首选：unblob（78+ 格式，chunk 起止精确，未知块也 carve）
@@ -264,6 +294,26 @@ uv run scripts/coverage_gate.py \
     --out fw-audit/<target>/40-coverage.md
 ```
 
+**检出缺口后的修复路径（自动 vs 人工，必须显式区分）**
+
+检出 G1/G2/G3 只是第一步；**能不能自动补齐，取决于缺口的性质**——不是一律人工，也不是一律自动：
+
+| 缺口 | 性质 | 自动修复？ | 动作 |
+|---|---|---|---|
+| **G1 声明未勾选** | 已规划、没执行完 | ✅ **自动** | 把缺失文件重派给原 shard；原 Agent 已结束则新起「补审」Agent，只带该文件 + Layer 1 摘要 + 所属 shard 上下文，补审后写结论并打勾 |
+| **G3 勾选无结论** | 已读、没落结论 | ✅ **自动（限 1 轮）** | 触发「结论汇总」重跑：把该文件已产出的内容整理为 `## F-xxx` 或 `## NOT_FOUND · <file>`；**重跑仍无结论 → 升级人工** |
+| **G2 计划未声明** | 范围被悄悄缩小 | ❌ **禁止自动** | 只能二选一：**(a)** 生成「补充分片」把文件补进清单并重审；**(b)** 写 **waiver** 豁免（含理由 + 责任人 + 影响面）。**禁止静默塞回清单** |
+
+**五条硬规则**：
+
+1. **自动修复的边界 = 不得改变「审什么」的范围。** G1/G3 属「已规划未执行完」→ 可自动补执行；G2 属**范围决策** → 必须人工留痕。
+2. **自动修复不得静默。** 每轮写入 `40-coverage.md` 的 `auto_recovered` 段（缺口类型 / 文件 / 轮次 / 结果）；**缺口一旦出现过就永久留痕**，不能「修完即消失」。
+3. **轮次上限 2 轮。** 第 3 轮仍有缺口 → 强制人工，门禁直接阻断。
+4. **自动修复只补产物，不编结论。** 结论仍由人/模型基于证据写，机器不得替它生成 finding。
+5. **G2 走 waiver 的，waiver 必须出现在最终报告「未覆盖项 + 理由」里。**
+
+> **实现现状**：`coverage_gate.py` 目前**只检出不修复**。落地需新增 `--auto-recover [--max-rounds N]` 开关（默认关闭＝保守），详见 `references/methodology.md` §5.1.1。
+
 ---
 
 ### Phase 3 · 三层审计架构
@@ -313,11 +363,36 @@ strcpy(dst, user_buf) → user_buf 来自哪？ → recv() 的 socket？
 
 | Tier | 深度      | 具体动作                                                                                                       |
 | ---- | ------- | ---------------------------------------------------------------------------------------------------------- |
-| T1   | 全量 8 项  | ①入口枚举 ②数据流 ③安全控制逐项核查 ④敏感操作（文件/网络/加密/序列化/`insmod`/`ioctl`）⑤自定义封装库是否包了危险操作 ⑥配置与初始化 ⑦业务逻辑（状态机/竞态/条件判断）⑧绕过假设穷举 |
+| T1   | 全量 8 项  | ①入口枚举 ②数据流 ③安全控制逐项核查 ④敏感操作（文件/网络/加密/序列化/`insmod`/`ioctl`）⑤自定义封装库是否包了危险操作 ⑥配置与初始化 ⑦业务逻辑（状态机/竞态/条件判断）⑧绕过假设穷举（B1–B12 清单，见 `references/methodology.md` §3.1） |
 | T2   | 3 项     | 数据流 + 敏感操作 + 安全控制                                                                                          |
 | T3   | 3 项模式匹配 | 硬编码凭据 / 调试接口 / 危险字符串                                                                                       |
 
 **动态提升**：T2 文件里发现封装了危险操作 → 就地按 T1 分析；T3 文件里发现业务逻辑 → 提升到 T2。每次提升写进 `02-tiering.json` 的 `promotions` 数组，便于复盘。
+
+**⑧ 绕过假设穷举（T1 必做，最易被跳过的一项）**
+
+原则：**「有防护」不等于「防护有效」。** 凡是 Track B 判定某入口「已有防护」（有鉴权 / 有白名单 / 有长度校验 / 有验签 / 有路径过滤），**不得就此记「安全」或 NOT_FOUND**——必须对该入口逐条跑 B1–B12 绕过清单，每条结论三选一：
+
+- `N/A`（该类型不适用于此入口，写明理由）
+- `已测·不可绕过`（附**具体证据**：哪行比较、哪个过滤、实测输入）
+- `可绕过` → **升级为 finding**，走 Layer 3 追链
+
+| # | 绕过面 | 固件场景怎么测 |
+|---|---|---|
+| B1 | **空口令 / 缺省口令** | 口令字段缺失 vs 为空串；`strcmp(pw, "")==0`；认证函数早返回；直接置位绕过登录 |
+| B2 | **默认 / 硬编码凭证** | `default_passwd`、`super_password`、后门账号；常量串比对（非哈希）；厂商通用口令可猜 |
+| B3 | **认证覆盖缺口** | 免鉴权白名单（`no_auth`/`skip_auth`）覆盖了敏感路由；**HTTP 方法差异**（GET 免鉴权、POST 鉴权）；后缀/前缀豁免 |
+| B4 | **前缀匹配绕过（startswith/strstr）** | `strncmp(path,"/cgi-bin/",9)` 能否被 `/cgi-bin/..%2f`、`/cgi-bin/x/../../`、`/cgi-bin/` 后带 `?`/`#` 骗过 |
+| B5 | **路径穿越变形** | `../`、`..\`、`%2e%2e%2f`、`..%c0%af`、双重编码、绝对路径、尾随点/空格、长路径截断、软链接 |
+| B6 | **大小写 / 编码 / 规范化** | 比较不区分大小写但 FS 区分；UTF-8 overlong；`%00` 截断；Unicode 归一化后不等 |
+| B7 | **参数污染（HPP）** | 校验取**第一个**同名参数、使用取**最后一个**；数组参数；「缺值」与「空值」分支不同 |
+| B8 | **边界 / 截断** | `>` vs `>=` 差一；有符号/无符号；`strncpy` 不补 `\0`；`strlen` 后长度被改；整数溢出绕过上限 |
+| B9 | **白名单命令注入** | 白名单「有」但可被 `;` `&&` `\|` 换行 `` ` `` `$()` 注入；参数位注入（`-o`、空格/引号逃逸）；元字符编码 |
+| B10 | **时间窗口 / 竞态（TOCTOU）** | 校验路径 vs 打开路径不一致；检查后被替换；令牌验证后被改；并发请求绕过一次性检查 |
+| B11 | **状态 / 顺序绕行** | 未初始化状态被信任；跳过前置步骤直调后置接口；重放；恢复出厂后残留下发 |
+| B12 | **校验对象 ≠ 使用对象** | 校验 `Host` 却信 `X-Forwarded-Host`；校验前端文件名后端用另一字段；验签 A 却加载 B；查一个 header 却信任另一个 |
+
+产出：每个入口一张 `bypass_matrix` —— `{入口, 已存在的防护, B1..B12 结论, 升级出的 finding_id}`，随该文件的结论一起写入 `30-findings-verified.md`。
 
 候选结果逐行写入 `20-findings-candidates.jsonl`：
 
@@ -400,6 +475,52 @@ strings -a -t x usr/sbin/httpd | rg -i 'referer|cmd|ping|traceroute'
 
 静态链路完整 ≠ 可利用。固件场景还必须过三关：**能不能跑到这段代码**、**环境依赖（NVRAM/ioctl/硬件）能不能满足**、**有没有运行时防护**。
 
+#### 4.0 先选对工具：FAT / Qiling / AFL++ 决策树
+
+**先纠正一个常见误解：这三者不是「三选一」，而是两级。**
+
+- **环境层**（FAT / Qiling）：负责**让代码跑起来 + 能 hook**，回答「可达性」与「参数真值」
+- **引擎层**（AFL++）：负责**自动找崩溃**，回答「内存破坏是否真存在」
+
+典型用法是**串联**：先用 FAT 或 Qiling 建好可达环境，再按目标形态挑 AFL++ 的插桩模式。**判据不是「哪个工具更强」，而是「你要把哪一条 HYPOTHESIS 升成 CONFIRMED」**：
+
+```
+                          要验证什么？
+        ┌───────────────────────┼───────────────────────┐
+   (A) 整机/服务可达性      (B) sink 参数真值          (C) 内存破坏是否真存在
+    路由可达? 认证状态?     (输入是否可控)             (栈/堆溢出 UAF 格式化)
+          │                       │                        │
+      FAT 整机模拟            Qiling 单二进制          先有可达环境(FAT/Qiling)
+          │ 起不来                + hook sink 看参数         │ 该二进制能在宿主原生跑?
+          ▼                       │                        ├─ 能(同 arch) ──► AFL++ -O (FRIDA)
+     FirmAE 交叉验证              │                        ├─ 跨 arch+纯解析函数 ─► AFL++ -U (Unicorn)
+          │ 还起不来              │                        └─ 跨 arch+需 libc/文件 ─► AFL++ -Q (QEMU)
+          ▼                       │                                 │ 目标是网络服务?
+     Qiling 单二进制 + 依赖打桩 ◄──┘                       用 Qiling harness 把 socket→文件再喂 AFL++
+```
+
+**选型表**：
+
+| 目标形态 | 首选 | 备选 | 前置 |
+|---|---|---|---|
+| 标准 Linux 整机、要跑真服务 | **FAT**（编排完整） | **FirmAE**（自动修 NVRAM/网络，成功率更高） | Docker / 已提取 rootfs |
+| 整机起不来、只差某个硬件依赖 | **Qiling** + 打桩（`nvram_get`/ioctl/watchdog） | Unicorn 手写 harness | 目标 ELF + 固件自带 libc |
+| 只想看 sink 参数真值（命令注入/路径穿越） | **Qiling** hook `system`/`open` | FAT + `hooks.yaml` | Layer 3 已定位 sink 地址 |
+| 同 arch、能在宿主直接跑 | **AFL++ `-O`**（FRIDA） | native 编译 | root / ptrace 可用 |
+| 跨 arch、纯计算型解析函数 | **AFL++ `-U`**（Unicorn，最快） | QEMU 模式 | harness 把输入灌进内存 |
+| 跨 arch、依赖 libc/文件/socket | **AFL++ `-Q`**（QEMU） | — | `qemu-user` 支持该 arch |
+| 目标有 magic / 校验和 / 长度比对 | AFL++ **`-c`（CmpLog）** 或 laf-intel | 手工 patch 掉比较 | — |
+
+**不要为 fuzzing 而 fuzzing**：只有当 finding 类型是**内存破坏**（溢出 / UAF / 格式化），且静态链路已证可达时，才值得开 AFL++。**命令注入 / 认证绕过 / 路径穿越 / 逻辑缺陷用 Qiling hook 直接看参数即可**——它们不是「跑崩了才算」，而是「参数到没到 sink」。对这类问题开 fuzzer 是纯浪费预算，且大概率一无所获。
+
+**三种执行模式速览**（同一套命令，模式决定插桩方式）：
+
+| 模式 | 适用 | 相对速度 | 局限 |
+|---|---|---|---|
+| `-Q` QEMU | 跨架构黑盒，无需源码/插桩 | 中（~1–5k exec/s） | 需 AFL++ 的 qemu 支持该 arch |
+| `-U` Unicorn | 纯函数，harness 把输入写进内存后调用 | 最快 | 不能有 syscall / 文件依赖 |
+| `-O` FRIDA | 目标能在宿主原生跑或已 native build | 快 | 需 ptrace / root |
+
 #### 4.1 整机模拟 —— FAT（首选，编排完整）
 
 ```bash
@@ -462,6 +583,18 @@ afl-fuzz -Q -i seeds/ -o out/ -- python3 harness.py @@
 
 必须从物理接口取固件时（加密芯片、无升级包），走 UART/JTAG/SPI/SWD 路线，流程见 `references/resource-index.md` 的 Hardware Attacks 章节。此阶段产出的固件回到 Phase 1 重新入流水线。
 
+#### 4.5 CVE 线索验证（⑥ → ④ 的唯一入口）
+
+Phase 4 不只服务自研 finding，也是 **⑥ 组件风险（未验证）** 的唯一升级通道。对 Phase 1 登记进 ⑥ 的每条 `cve-hit` 逐条判定三问：
+
+- **代码在**：固件内定位到受影响函数 / 符号（`mithril --cve` 只给版本，这一步要靠字符串、符号、反编译特征落实）；
+- **可达**：从外部入口追出调用链，且前置条件在当前固件配置下成立；
+- **未修复**：补丁特征不存在（对比厂商新版固件 / 检查关键分支是否缺失）。
+
+三问齐备且静态闭环成立 → 按漏洞四问复核后**移入 ④**（`cve-reachable`；再经动态复现 → `cve-exploitable`）；任一项不成立 → 记 `cve-nonreachable`，移入 `30-findings-verified.md` 的 `NOT_FOUND` 台账。**每条都要落明确结论，不做「疑似但搁置」**——否则 ⑥ 会退化成无限期的垃圾抽屉。
+
+产出：除 `40-coverage.md` 外，在 `30-findings-verified.md` 维护一张 **CVE 验证台账**（`CVE-ID → 三问逐项结论 → 迁移去向 F-0xx / NOT_FOUND`），供 Phase 5 生成报告时对账；迁移后同步更新统计（见 §5.3 第 6 区块）。
+
 ---
 
 ### Phase 5 · 门禁、沉淀与报告
@@ -474,13 +607,17 @@ uv run scripts/coverage_gate.py \
     --verified fw-audit/<target>/30-findings-verified.md \
     --review-list fw-audit/<target>/25-review-list.md \
     --tiering fw-audit/<target>/02-tiering.json \
+    --entrypoints fw-audit/<target>/entrypoints.json \
     --report fw-audit/<target>/report.md \
+    --bypass-check --type-base \
     --out fw-audit/<target>/40-coverage.md
 ```
 
-`--report` 触发 **CVE 纪律检查**（铁律 7 的机械化落实）：扫描报告里是否把版本命中的组件 CVE 写成了漏洞断言（V1）、是否混进了「漏洞统计」表（V2）、是否被打了 P0-P3/CVSS（V3）、以及有没有单列「组件风险（未验证）」区块（V0）。命中即为门禁失败，退出码 1。
+`--report` 触发 **CVE 纪律检查**（铁律 7 的机械化落实）：扫描报告里是否把版本命中的组件 CVE 写成了漏洞断言（V1）、是否混进了「漏洞统计」表（V2）、是否被打了 P0-P3/CVSS（V3）、**同一 `CVE-ID` 是否同时出现在 ④ 与 ⑥（V4：应是「移动」而非「复制」）**、以及有没有单列「组件风险（未验证）」区块（V0）。命中即为门禁失败，退出码 1。
 
 `--review-list` 触发 **审阅清单三方对齐**（Phase 2.5 的机械化落实）：diff「计划 vs 声明 vs 实际结论」，报 G1/G2/G3 三类缺口。
+
+`--entrypoints` 触发 **G4 入口级覆盖**，`--bypass-check` 触发 **G5 绕过矩阵完备**，`--type-base` 触发 **类型 → DKTSS Base 命中**校验；`--auto-recover` 把 G1/G3 转为自动修复计划。分述见下。
 
 门禁判据（任一不满足则**不得出报告**，先补审）：
 - T1 文件覆盖率 **100%**（每个文件必须有审计结论或明确的 `NOT_FOUND`）
@@ -489,6 +626,46 @@ uv run scripts/coverage_gate.py \
 - 所有 `promotions` 都要有对应的升级后分析
 - 审阅清单一致：无 G1（声明未勾）/ G2（计划未声明）/ G3（勾选无结论）
 - 报告完整性：9 个必填字段齐全（见 5.3）
+
+脚本退出码非 0 表示未达标，缺口写入 `40-coverage.md` 的「待补审清单」，回去补。
+
+##### G4 · 入口级覆盖（对抗「文件级 100%、函数级 0.2%」）
+
+**为什么单列这条**：文件级覆盖会说「`usr/sbin/httpd` 有结论 → PASS」，哪怕它 2923 个函数只读了 5 个、167 个 CGI handler 一个没读。风险的真实单位是**入口**，不是文件。
+
+适用对象：**T1 且 `text_kb > 200` 的服务型可执行**（`bin|sbin|usr/bin|usr/sbin` 下的 ELF，排除 `.so` 库）。用 `scripts/entrypoints_init.py` 生成骨架：
+
+```bash
+uv run scripts/entrypoints_init.py --tiering fw-audit/<target>/02-tiering.json \
+    --out fw-audit/<target>/entrypoints.json --merge fw-audit/<target>/entrypoints.json
+```
+
+每个适用文件须有一条记录（schema `entrypoints/v1`）：
+
+```json
+{"file": "usr/sbin/httpd",
+ "handler_table_count": 167,                  // 权威派发表条目数（必填）
+ "enumerated_from": "IDA 0x186e28..0x187370 六段连续表",
+ "handlers": [{"name": "ramain.cgi", "addr": "0x4ad44", "conclusion": "F-012"}]}
+```
+
+判据：①每个适用文件有记录；②`len(handlers) ≥ handler_table_count`（枚举完整）；③**每个入口有非空 `conclusion`**（已处置：finding id / `NOT_FOUND` / `待动态验证`）；④全局入口审计率 ≥ `--entrypoint-audit-min`（默认 100%）。
+豁免只有两条，且都**留痕**：文件级 `waiver{reason}`，或 `entrypoints:"none"` + `reason`（无外部可达入口的 CLI 工具——它们是 sink 不是 source）。
+显式给了 `--entrypoints` 却找不到文件 → **判失败**，绝不静默跳过。
+
+##### G5 · 绕过矩阵完备（对抗「有防护」当结论）
+
+凡是结论里写了「已鉴权 / 已过滤 / 已验签 / 已限长 / 有效校验 / 不可利用」，就必须在同一章节给出 **B1–B12 绕过矩阵**（检测 `bypass_matrix` 关键词，或 ≥10 个 B 条目号）。「修复建议」行是建议不是断言，不触发。
+> 「有防护」≠「防护有效」。详见 Phase 3 的「绕过假设穷举」与 `references/methodology.md` §3.1。
+
+##### 类型 → DKTSS Base 命中（防评分落空）
+
+报告里每个 `类型:` 标签必须能命中 `references/reporting.md` 的 Base 表某一行，否则要么归一到已有类型、要么写「映射依据」、要么给 Base 表补一行。默认**告警**，`--type-base-strict` 转硬门禁。
+
+##### G1/G2/G3 的自动修复（`--auto-recover`）
+
+`--auto-recover [--max-rounds 2] [--recover-round N]`：G1/G3 转自动（重派 / 重总结，**不改变审计范围、不编造结论**），G2 **永不自动**（只能补充分片重审或书面 waiver）。超轮次后 G1/G3 亦回硬门禁。计划同时落盘为 `40-coverage.auto-recover.json` 供编排层消费。详见 `references/methodology.md` §5.1.1。
+
 
 脚本退出码非 0 表示未达标，缺口写入 `40-coverage.md` 的「待补审清单」，回去补。
 
@@ -505,7 +682,7 @@ uv run scripts/coverage_gate.py \
 
 每条规则注明来源 finding ID 与命中条件，避免「规则越加越多、噪声越来越大」。
 
-#### 5.3 报告（固定 6 区块，不得缺项）
+#### 5.3 报告（固定 7 区块，不得缺项）
 
 模板见 `assets/report-template.md`：
 
@@ -515,6 +692,7 @@ uv run scripts/coverage_gate.py \
 4. **漏洞详情**：ID / 标题 / 类型 / CVSS 3.1 向量 / IoT 语境修正 / 置信度 / 完整复现步骤 / 证据 / 修复建议
 5. **加固与配置缺陷**（非漏洞但影响面）：ELF 加固缺失、硬编码凭据、调试接口、弱随机、无验签 OTA、U-Boot env 泄露
 6. **组件风险（未验证）**：`mithril --cve` 命中的组件 CVE **单独成节，不并入第 4 区块**。每条注明「版本区间命中，**可达性未验证**」；已验证可达的才能升入第 4 区块并标注 `cve-reachable`/`cve-exploitable`。**禁止**把本节的条数计入漏洞总数，禁止在摘要里把它们写成「发现 N 个漏洞」。
+   **⑥ ↔ ④ 迁移（与 Phase 4 联动）**：Phase 4 把 ⑥ 的线索逐条验证，通过（代码在 + 可达 + 未修复）即**「移动」而非「复制」**——从 ⑥ 删除、在 ④ 新建 `F-0xx`，⑥ 内只留一行「→ F-0xx」指针；排除项移入 `30-findings-verified.md` 的 `NOT_FOUND` 台账。**迁移后必须同步更新执行摘要统计表与优先级分布**（④ `+1`、⑥ 未验证 `−1`）。同一 `CVE-ID` 不得两处并存（门禁 **V4** 拦截）。完整状态机与措辞见 `references/reporting.md` §1-⑥。
 7. **附录**：工具版本、命令回放、规则文件、敏感信息位置索引（值已脱敏）
 
 #### 5.4 IoT 语境评分
@@ -559,10 +737,11 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 |---|---|
 | `scripts/fw_triage.py` | Phase 0 / 2：固件度量、熵扫描、ELF 加固画像、SUID 面、Tier 分层、EALB 预算 |
 | `scripts/sink_scan.py` | Phase 3 Layer 1：多语言危险模式扫描（数据驱动规则） |
-| `scripts/coverage_gate.py` | Phase 5：覆盖率门禁校验 + **CVE 纪律检查**（`--report`）+ **审阅清单三方对齐**（`--review-list`），输出待补审与违规清单 |
-| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证上面三个脚本的判据 |
+| `scripts/coverage_gate.py` | Phase 5：覆盖率门禁校验 + **CVE 纪律检查**（`--report`）+ **审阅清单三方对齐**（`--review-list`）+ **G4 入口级覆盖**（`--entrypoints`）+ **G5 绕过矩阵**（`--bypass-check`）+ **类型→Base 命中**（`--type-base`）+ **自动修复计划**（`--auto-recover`） |
+| `scripts/entrypoints_init.py` | Phase 3/5：从 `02-tiering.json` 生成入口枚举骨架 `entrypoints.json`（G4 的输入） |
+| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证上面脚本的判据（10 组） |
 
-四个脚本都只用 Python 标准库，无第三方依赖，Windows / Linux / macOS 均可运行。用 `uv` 管理环境（`uv run` 自动建临时环境；无 `uv` 时直接 `python scripts/xxx.py` 亦可）。安装后建议先跑一次自检：
+脚本都只用 Python 标准库，无第三方依赖，Windows / Linux / macOS 均可运行。用 `uv` 管理环境（`uv run` 自动建临时环境；无 `uv` 时直接 `python scripts/xxx.py` 亦可）。安装后建议先跑一次自检：
 
 ```bash
 uv run scripts/selftest.py

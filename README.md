@@ -1,12 +1,12 @@
 # IoT 固件漏洞挖掘
 
-<p>
-  <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">
-  <img alt="python" src="https://img.shields.io/badge/python-3.8%2B%20stdlib%20only-3776AB.svg?logo=python&logoColor=white">
-  <img alt="platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg">
-  <img alt="files" src="https://img.shields.io/badge/package-16%20files%20%C2%B7%206071%20lines-informational.svg">
-  <img alt="selftest" src="https://img.shields.io/badge/selftest-61%20assertions%20passing-brightgreen.svg">
-  <img alt="agent" src="https://img.shields.io/badge/type-Agent%20Skill-7B42BC.svg">
+<p>  
+  <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">  
+  <img alt="python" src="https://img.shields.io/badge/python-3.8%2B%20stdlib%20only-3776AB.svg?logo=python\&logoColor=white">  
+  <img alt="platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg">  
+  <img alt="files" src="https://img.shields.io/badge/package-19%20files%20%C2%B7%207810%20lines-informational.svg">  
+  <img alt="selftest" src="https://img.shields.io/badge/selftest-60%20assertions%20passing-brightgreen.svg">  
+  <img alt="agent" src="https://img.shields.io/badge/type-Agent%20Skill-7B42BC.svg">  
 </p>
 
 > 把「资深固件审计员的工作骨架」装进大模型：**定义流程、分配资源、设置护栏、标准化输出**，并把中间状态持久化到文件系统，不信任模型的记忆。
@@ -34,17 +34,17 @@
 
 固件挖洞的难点**不是「看不懂代码」**，而是**没有系统化的工作流**。裸跑大模型会稳定复现九个失效模式：
 
-| 失效模式 | 裸跑表现 | 本 Skill 的约束 |
-| --- | --- | --- |
-| 随机游走 | 打开几个 `httpd` / `cgi-bin` 就深挖，忘了看过什么 | 强制 Phase 流水线 + 每阶段落盘 |
-| 覆盖不全 | 只看 `www/` 和 `bin/`，漏掉 `etc/init.d`、`.so`、内核模块、shell 脚本 | Phase 2 强制分层枚举 + Phase 2.5 审阅清单三方对齐 + Phase 5 覆盖率门禁 |
-| 假装覆盖 | **声称审完了、实际只审了 70–85%** | 审阅清单逐项打勾 + 门禁 diff「计划 ↔ 声明 ↔ 结论」 |
-| 幻觉 | 编造函数名、伪造 `system()` 调用、凭印象写 CVE 号 | 每条结论必须带 `文件:偏移` + 原始证据片段 |
-| 危险调用当漏洞 | 扫到 `system()` / `strcpy()` 就报 RCE / 溢出 | 漏洞成立条件四问（代码存在 / 可达 / 可控 / 防护）+ 判定树 |
-| CVE 当漏洞 | 组件版本命中就写「设备存在 XX 漏洞」 | 铁律 7 + 门禁 CVE 纪律检查（V0–V3） |
-| 深度不均 | 在静态图片上耗半天，放过 `upnpd` 的整数溢出 | Tier 分层 + EALB 资源分配 |
-| 优先级不实 | CVSS 全给 9.8，需拆机的和 WAN 可达的排同一档 | DKTSS 评分（减法模型，Friction 显式扣除利用阻力） |
-| 报告不可复现 | 每次格式不同、没有验证状态、缺字段 | 固定 7 区块模板 + CONFIRMED/HYPOTHESIS 两态 + 9 字段必填校验 |
+| 失效模式    | 裸跑表现                                                   | 本 Skill 的约束                                         |
+| ------- | ------------------------------------------------------ | --------------------------------------------------- |
+| 随机游走    | 打开几个 `httpd` / `cgi-bin` 就深挖，忘了看过什么                    | 强制 Phase 流水线 + 每阶段落盘                                |
+| 覆盖不全    | 只看 `www/` 和 `bin/`，漏掉 `etc/init.d`、`.so`、内核模块、shell 脚本 | Phase 2 强制分层枚举 + Phase 2.5 审阅清单三方对齐 + Phase 5 覆盖率门禁 |
+| 假装覆盖    | **声称审完了、实际只审了 70–85%**                                 | 审阅清单逐项打勾 + 门禁 diff「计划 ↔ 声明 ↔ 结论」                    |
+| 幻觉      | 编造函数名、伪造 `system()` 调用、凭印象写 CVE 号                      | 每条结论必须带 `文件:偏移` + 原始证据片段                            |
+| 危险调用当漏洞 | 扫到 `system()` / `strcpy()` 就报 RCE / 溢出                 | 漏洞成立条件四问（代码存在 / 可达 / 可控 / 防护）+ 判定树                  |
+| CVE 当漏洞 | 组件版本命中就写「设备存在 XX 漏洞」                                   | 铁律 7 + 门禁 CVE 纪律检查（V0–V3）                           |
+| 深度不均    | 在静态图片上耗半天，放过 `upnpd` 的整数溢出                             | Tier 分层 + EALB 资源分配                                 |
+| 优先级不实   | CVSS 全给 9.8，需拆机的和 WAN 可达的排同一档                          | DKTSS 评分（减法模型，Friction 显式扣除利用阻力）                    |
+| 报告不可复现  | 每次格式不同、没有验证状态、缺字段                                      | 固定 7 区块模板 + CONFIRMED/HYPOTHESIS 两态 + 9 字段必填校验      |
 
 其中**前六个已被脚本机械化拦截**——不是写进提示词里「请模型不要忘」，而是由 `coverage_gate.py` 在 Phase 5 直接检查并 `exit 1` 拦下。后三个靠规则资产与评分模型约束。
 
@@ -65,15 +65,15 @@ flowchart TD
     G -->|未达标| D
 ```
 
-| Phase | 名称 | 输入 | 输出 | 主要工具 |
-| --- | --- | --- | --- | --- |
-| 0 | 度量与定界 | 固件镜像 | `00-metrics.json`、`00-scope.md` | `fw_triage.py` |
-| 1 | 提取与侦察 | 固件镜像 | `01-extract/`、`01-manifest.json` | unblob → binwalk → moria 降级链 |
-| 2 | 分层与分配 | `01-extract/` | `02-tiering.json`、`03-audit-plan.md` | `fw_triage.py --tier` |
-| 2.5 | 覆盖矩阵与审阅清单 | `03-audit-plan.md` | `25-review-list.md` | 声明 + 门禁 diff |
-| 3 | 三层审计 | 分配清单 | `10-layer1-sinks.json`、`30-findings-verified.md` | `sink_scan.py` + 模型审计 |
-| 4 | 动态验证 | 候选漏洞 | 每条候选的可利用性判定 | FAT / Qiling / AFL++ |
-| 5 | 门禁与报告 | 全部产物 | `40-coverage.md`、`report.md`、`50-rules/` | `coverage_gate.py` |
+| Phase | 名称        | 输入                 | 输出                                               | 主要工具                         |
+| ----- | --------- | ------------------ | ------------------------------------------------ | ---------------------------- |
+| 0     | 度量与定界     | 固件镜像               | `00-metrics.json`、`00-scope.md`                  | `fw_triage.py`               |
+| 1     | 提取与侦察     | 固件镜像               | `01-extract/`、`01-manifest.json`                 | unblob → binwalk → moria 降级链 |
+| 2     | 分层与分配     | `01-extract/`      | `02-tiering.json`、`03-audit-plan.md`             | `fw_triage.py --tier`        |
+| 2.5   | 覆盖矩阵与审阅清单 | `03-audit-plan.md` | `25-review-list.md`                              | 声明 + 门禁 diff                 |
+| 3     | 三层审计      | 分配清单               | `10-layer1-sinks.json`、`30-findings-verified.md` | `sink_scan.py` + 模型审计        |
+| 4     | 动态验证      | 候选漏洞               | 每条候选的可利用性判定                                      | FAT / Qiling / AFL++         |
+| 5     | 门禁与报告     | 全部产物               | `40-coverage.md`、`report.md`、`50-rules/`         | `coverage_gate.py`           |
 
 ### Phase 速览
 
@@ -114,37 +114,44 @@ agents  = max(1, ceil(EALB / budget))                 # budget 默认 800
 5. **覆盖率门禁** — Phase 5 之前必须让分配清单里**每一个文件**都有审计结论。覆盖率 < 100% 不许出报告。
 6. **凭据脱敏** — 私钥、口令、云 token 在报告里只保留指纹（如 `SHA256:ab12…` 前 8 位）与位置，完整值单独写入 `50-secrets.local`（不进报告）。
 7. **CVE 命中 ≠ 可利用漏洞** — 版本落在影响区间只是一条**线索**。必须回到 Phase 3/4 验证可达性后才允许升级措辞：
-
-   | 状态 | 判据 | 允许的措辞 |
-   | --- | --- | --- |
-   | `cve-hit` | 仅版本号落在影响区间 | 「疑似存在 CVE-XXXX-YYYY，尚未验证可达性」 |
-   | `cve-reachable` | 已定位到受影响函数的可达路径 | 「存在 CVE-XXXX-YYYY，可达路径为…」 |
-   | `cve-exploitable` | 动态复现或完整利用链 | 「可被利用」 |
-
+   | 状态                | 判据             | 允许的措辞                        |
+   | ----------------- | -------------- | ---------------------------- |
+   | `cve-hit`         | 仅版本号落在影响区间     | 「疑似存在 CVE-XXXX-YYYY，尚未验证可达性」 |
+   | `cve-reachable`   | 已定位到受影响函数的可达路径 | 「存在 CVE-XXXX-YYYY，可达路径为…」    |
+   | `cve-exploitable` | 动态复现或完整利用链     | 「可被利用」                       |
    反例：某固件带 `busybox 1.31`（命中数十条 CVE），但该镜像编译时裁掉了相关 applet、或该版本已 backport 修复、或漏洞需要编译期未开启的选项——**版本在区间内但代码不存在，漏洞就不存在**。结论只能来自对固件内实际代码的检查，不能来自版本号。
 
 ---
 
 ## 安装
 
-这是一个 **Agent Skill**，把整个仓库放进 skills 目录即可。
-
-**WorkBuddy / CodeBuddy**
+这是一个 **Agent Skill**，遵循开放的 Agent Skills 规范（`SKILL.md` + `references/` + `assets/` + `scripts/`），用 [`skills`](https://github.com/antfu/skills-cli) CLI 一行命令安装：
 
 ```bash
-git clone https://github.com/DroidKali/iot-firmware-vuln-hunting.git \
-  ~/.workbuddy/skills/iot-firmware-vuln-hunting
+# 安装（自动探测本机已装的 Agent，装入其全局 skills 目录）
+npx skills add https://github.com/DroidKali/iot-firmware-vuln-hunting -g
+
+# 指定目标 Agent（-a 后填任意受支持的 Agent 标识）
+npx skills add https://github.com/DroidKali/iot-firmware-vuln-hunting -a <agent> -g
+
+# 先看看仓库里有哪些 Skill，不写入任何文件
+npx skills add https://github.com/DroidKali/iot-firmware-vuln-hunting --list
+
+# 非交互安装（CI / 批量 / 装到所有已探测 Agent）
+npx skills add https://github.com/DroidKali/iot-firmware-vuln-hunting --agent '*' -g -y
 ```
 
-**作为通用知识库使用** — 直接 clone 到任意位置，按 `SKILL.md` 的流程手工执行；四个脚本可独立运行。
+常用管理命令：`npx skills list`（列出已装 Skill）、`npx skills update`（更新到最新）、`npx skills remove iot-firmware-vuln-hunting`（卸载）。
+
+**作为通用知识库使用** — 不安装也行：`git clone` 到任意位置，按 `SKILL.md` 的流程手工执行；四个脚本可独立运行。
 
 ### 前置依赖
 
-| 类别 | 说明 |
-| --- | --- |
-| Python | 3.8+，**四个脚本只用标准库**，无第三方依赖，三平台均可运行。推荐用 [`uv`](https://github.com/astral-sh/uv) 管理（`uv run` 自动建临时环境） |
-| 固件工具链 | `unblob` / `binwalk` v3 / `moria` / `mithril` / `FAT` / `Qiling` / `AFL++` / `radare2`。Linux（Docker / WSL / Kali / AttifyOS）体验最好；Windows 宿主建议走 Docker |
-| 授权 | **只在获得书面授权（自有设备 / 客户授权 / SRC 范围）的目标上执行**，开工前把范围写进 `fw-audit/<target>/00-scope.md` |
+| 类别     | 说明                                                                                                                                                    |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Python | 3.8+，**四个脚本只用标准库**，无第三方依赖，三平台均可运行。推荐用 [`uv`](https://github.com/astral-sh/uv) 管理（`uv run` 自动建临时环境）                                                    |
+| 固件工具链  | `unblob` / `binwalk` v3 / `moria` / `mithril` / `FAT` / `Qiling` / `AFL++` / `radare2`。Linux（Docker / WSL / Kali / AttifyOS）体验最好；Windows 宿主建议走 Docker |
+| 授权     | **只在获得书面授权（自有设备 / 客户授权 / SRC 范围）的目标上执行**，开工前把范围写进 `fw-audit/<target>/00-scope.md`                                                                     |
 
 > 所有工具都有降级链，缺失时不会卡死——`references/toolchain.md` §8 给出 13 行替代矩阵，且降级需在报告中显式注明。
 
@@ -158,7 +165,7 @@ git clone https://github.com/DroidKali/iot-firmware-vuln-hunting.git \
 uv run scripts/selftest.py
 ```
 
-脚本会用纯 Python 手工构造合法 ELF64 与合成 rootfs，端到端跑通另外三个脚本，覆盖 **7 步 / 61 条断言**，其中包含「门禁必须拦下坏报告」的负向用例。看到全绿即安装成功。
+脚本会用纯 Python 手工构造合法 ELF64 与合成 rootfs，端到端跑通另外四个脚本，覆盖 **10 组 / 60 条断言**，其中包含「门禁必须拦下坏报告」的负向用例。看到全绿即安装成功。
 
 ### 2. 一次完整审计
 
@@ -200,14 +207,15 @@ uv run scripts/coverage_gate.py \
 
 ## 脚本
 
-四个脚本都**只用 Python 标准库**，无第三方依赖。
+五个脚本都**只用 Python 标准库**，无第三方依赖。
 
-| 脚本 | 行数 | 用途 |
-| --- | --- | --- |
-| `scripts/fw_triage.py` | 852 | Phase 0 / 2：固件度量、熵扫描、ELF 加固画像、SUID 面、Tier 分层、EALB 预算 |
-| `scripts/coverage_gate.py` | 669 | Phase 5：覆盖率门禁 + CVE 纪律检查（`--report`）+ 审阅清单三方对齐（`--review-list`） |
-| `scripts/selftest.py` | 387 | 安装自检：合成固件与 rootfs，端到端验证上面三个脚本的判据 |
-| `scripts/sink_scan.py` | 342 | Phase 3 Layer 1：多语言危险模式扫描（数据驱动规则） |
+| 脚本                         | 行数   | 用途                                                              |
+| -------------------------- | ---- | --------------------------------------------------------------- |
+| `scripts/fw_triage.py`     | 852  | Phase 0 / 2：固件度量、熵扫描、ELF 加固画像、SUID 面、Tier 分层、EALB 预算            |
+| `scripts/coverage_gate.py` | 1234 | Phase 5：覆盖率门禁 + CVE 纪律检查（`--report`，V0–V4）+ 审阅清单三方对齐（`--review-list`）+ G4 入口级覆盖 + G5 绕过矩阵 + 类型→Base + 自动修复计划 |
+| `scripts/sink_scan.py`     | 342  | Phase 3 Layer 1：多语言危险模式扫描（数据驱动规则）                               |
+| `scripts/entrypoints_init.py` | 139 | Phase 2/5：从 `02-tiering.json` 生成 `entrypoints.json` 骨架（`--merge` 保留已手填数据） |
+| `scripts/selftest.py`      | 531  | 安装自检：合成固件与 rootfs，端到端验证上面四个脚本的判据（10 组 / 60 条断言）                 |
 
 ### 覆盖率门禁判据
 
@@ -218,20 +226,23 @@ uv run scripts/coverage_gate.py \
 - 每条 `candidate` 必须有明确处置：升 `validated` / 降 `NOT_FOUND` / 标记「证据不足，待动态验证」
 - 所有 `promotions`（Tier 动态提升）都要有对应的升级后分析
 - 审阅清单一致：无 G1（声明未勾）/ G2（计划未声明）/ G3（勾选无结论）
+- **G4 入口级覆盖**（`--entrypoints`）：服务型大二进制的 handler 需枚举完整，且每个入口有处置结论
+- **G5 绕过矩阵**（`--bypass-check`）：写了「有防护 / 不可利用」的入口必须附 B1–B12 逐项证伪
+- **类型 → DKTSS Base 命中**（`--type-base`）：报告里出现的类型必须能映射到 Base 表（`--type-base-strict` 下未命中即失败）
 - 报告完整性：9 个必填字段齐全
 
-`--report` 另外触发 CVE 纪律检查 V0–V3：缺「组件风险（未验证）」区块 / 版本命中写成漏洞断言 / CVE 混进「漏洞统计」表 / 未验证的组件 CVE 被打了 P0–P3 或 CVSS。
+`--report` 另外触发 CVE 纪律检查 **V0–V4**：缺「组件风险（未验证）」区块（V0）/ 版本命中写成漏洞断言（V1）/ CVE 混进「漏洞统计」表（V2）/ 未验证的组件 CVE 被打了 P0–P3 或 CVSS（V3）/ **同一 CVE-ID 同时出现在 ④ 与 ⑥（V4：应「移动」而非「复制」）**。
 
 ### 静态扫描规则库
 
 `assets/sink-rules.json` — **34 条规则 / 14 类**，含阈值与白名单：
 
-| 优先级 | 条数 | 分布（类别：条数） |
-| --- | --- | --- |
-| P0 | 11 | crypto 6、cmd-exec 5、memory 4、auth 4、info 3、attack-surface 2、credential 2、debug 2、web 1、privileged 1、deserialization 1、ota 1、permission 1、config 1 |
-| P1 | 12 | 同上按 category 分布 |
-| P2 | 7 | |
-| P3 | 4 | |
+| 优先级 | 条数 | 分布（类别：条数）                                                                                                                                         |
+| --- | -- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P0  | 11 | crypto 6、cmd-exec 5、memory 4、auth 4、info 3、attack-surface 2、credential 2、debug 2、web 1、privileged 1、deserialization 1、ota 1、permission 1、config 1 |
+| P1  | 12 | 同上按 category 分布                                                                                                                                   |
+| P2  | 7  |                                                                                                                                                   |
+| P3  | 4  |                                                                                                                                                   |
 
 > **二进制规则与源码规则严格分离。** 剥离符号的 ELF `.dynstr` 里只有裸符号名（`system` 而非 `system(`），套用源码正则 `system\s*\(` 会**系统性漏检所有 PLT 调用**。因此单开一套 `P0-B-*` 规则用词边界匹配，并在输出里把命中类型标为 `binary-string`——它只说明「二进制里有这个字符串」，不等于「代码调用了它并传了用户输入」。
 
@@ -241,20 +252,21 @@ uv run scripts/coverage_gate.py \
 
 按需加载，不要一次全读。
 
-| 文件 | 行数 | 何时读 |
-| --- | --- | --- |
-| `references/toolchain.md` | 373 | 需要具体命令、安装方式、工具缺失时的替代方案 |
-| `references/methodology.md` | 340 | 需要 Tier 规则细节、EALB 计算、双轨模型、门禁判据的完整定义 |
-| `references/emulation-fuzzing.md` | 332 | Phase 4 需要模拟与模糊的具体做法、踩坑与替代方案 |
-| `references/reporting.md` | 304 | Phase 5 需要报告字段、评分表、脱敏规范 |
-| `references/vuln-conditions.md` | 393 | **Layer 3 / Phase 4**：候选要不要升 `CONFIRMED`？按类型逐条排除成立条件 |
-| `references/sink-patterns.md` | 251 | 需要扩充或理解静态扫描规则，或手写 grep / YARA |
-| `references/vuln-taxonomy.md` | 218 | 需要按攻击面 / 漏洞类型逐项核查（后门账号、命令注入、OTA、MQTT、U-Boot…） |
-| `references/resource-index.md` | 233 | 需要外部资料：awesome-connected-things-sec 精编索引（按阶段映射） |
+| 文件                                | 行数  | 何时读                                                  |
+| --------------------------------- | --- | ---------------------------------------------------- |
+| `references/toolchain.md`         | 373 | 需要具体命令、安装方式、工具缺失时的替代方案                               |
+| `references/methodology.md`       | 443 | 需要 Tier 规则细节、EALB 计算、双轨模型、门禁判据的完整定义                  |
+| `references/emulation-fuzzing.md` | 357 | Phase 4 需要模拟与模糊的具体做法、踩坑与替代方案                         |
+| `references/reporting.md`         | 340 | Phase 5 需要报告字段、评分表、脱敏规范、DKTSS、⑥↔④ 迁移规则                              |
+| `references/vuln-conditions.md`   | 393 | **Layer 3 / Phase 4**：候选要不要升 `CONFIRMED`？按类型逐条排除成立条件 |
+| `references/sink-patterns.md`     | 251 | 需要扩充或理解静态扫描规则，或手写 grep / YARA                        |
+| `references/vuln-taxonomy.md`     | 218 | 需要按攻击面 / 漏洞类型逐项核查（后门账号、命令注入、OTA、MQTT、U-Boot…）        |
+| `references/resource-index.md`    | 233 | 需要外部资料：awesome-connected-things-sec 精编索引（按阶段映射）      |
 
 ---
 
 ## 目录结构
+
 
 ```
 iot-firmware-vuln-hunting/
@@ -274,10 +286,11 @@ iot-firmware-vuln-hunting/
 │   ├── sink-rules.json           # 34 条规则 / 14 类（数据驱动扫描）
 │   ├── tier-rules.json           # R0–R7 分层规则
 │   └── report-template.md        # 固定 7 区块报告模板
-└── scripts/                      # 4 个纯标准库 Python 脚本
+└── scripts/                      # 5 个纯标准库 Python 脚本
     ├── fw_triage.py
     ├── sink_scan.py
     ├── coverage_gate.py
+    ├── entrypoints_init.py
     └── selftest.py
 ```
 
@@ -307,12 +320,12 @@ fw-audit/<target>/
 
 本 Skill 把 [大可实验室《AI 挖 Java 0day 不再靠运气》](https://mp.weixin.qq.com/s/HeC-2Ydyx8SmjxPj8EtKcw) 的软件供应链审计流水线迁移到固件场景：
 
-| 文章中的机制 | 固件场景对应 |
-| --- | --- |
-| 6 阶段流水线 | Phase 0–5 + Phase 2.5 |
-| EALOC 分层 | **EALB**（`ELF .text` 段大小 × Tier 权重） |
-| 三层审计架构 | Layer 1 机器扫 / Layer 2 双轨 / Layer 3 语义链路 |
-| 双轨模型 | Track A（Sink 驱动）+ Track B（入口驱动） |
+| 文章中的机制                                   | 固件场景对应                                                                         |
+| ---------------------------------------- | ------------------------------------------------------------------------------ |
+| 6 阶段流水线                                  | Phase 0–5 + Phase 2.5                                                          |
+| EALOC 分层                                 | **EALB**（`ELF .text` 段大小 × Tier 权重）                                            |
+| 三层审计架构                                   | Layer 1 机器扫 / Layer 2 双轨 / Layer 3 语义链路                                        |
+| 双轨模型                                     | Track A（Sink 驱动）+ Track B（入口驱动）                                                |
 | 覆盖矩阵、CONFIRMED/HYPOTHESIS、漏洞成立条件表、报告必填字段 | Phase 2.5、`vuln-conditions.md`、`reporting.md` §3.1 与 `coverage_gate.py` 的机械化门禁 |
 
 工具生态取自：

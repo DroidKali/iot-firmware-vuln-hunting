@@ -170,6 +170,40 @@ Layer 1 **只能发现「危险形态的存在」，不能发现「安全控制�
 | 固件升级端点 | 字符串 `upgrade`、`firmware`、`.bin` | 签名校验、路径穿越、降级 |
 | 云侧对接 | AWS/Azure/MQTT endpoint、证书 | 证书共享、默认凭据、明文 |
 
+### 3.1 绕过假设穷举清单（Track B / T1 第⑧项）
+
+**为什么单列**：「危险调用」靠 Track A 找，「控制缺失」靠 Track B 找。但 Track B 最危险的习惯是——**看到 `if (check_auth(x))` 就写「已鉴权，安全」**。固件里大量真实漏洞恰恰藏在「防护存在但可绕过」：校验比较写错、白名单可被编码骗过、校验对象与使用对象不是同一个。
+
+**触发条件**：只要你在结论里写下「已有防护 / 已鉴权 / 已过滤 / 已验签 / 已限长」——**必须**对该入口跑完 B1–B12，每条给出 `N/A`（附理由）/ `已测·不可绕过`（附证据）/ `可绕过`（升 finding）。**禁止以「有防护」直接收尾。**
+
+| # | 绕过面 | 怎么验证（固件语境） | 真实案例形态 |
+|---|---|---|---|
+| B1 | 空口令 / 缺省口令 | 找认证函数的**早返回**与**空值分支**；口令字段缺失 ≠ 为空串，两者常走不同分支 | 登录页不填密码直接提交；`strcmp(pw,"")==0` 通过 |
+| B2 | 默认 / 硬编码凭证 | `mithril --secrets` + 字符串搜 `default_passwd`/`super_password`/`factory`；常量串比对（非哈希）即可用 | 出厂通用口令、调试后门账号、`admin/admin` |
+| B3 | 认证覆盖缺口 | 枚举 `no_auth`/`skip_auth`/白名单表；**按 HTTP 方法分别测**（GET 免鉴权、POST 鉴权是经典设计缺陷）；后缀/前缀豁免 | `/goform/` 需鉴权，但 `/cgi-bin/` 同级接口不需 |
+| B4 | 前缀匹配绕过 | 定位 `strncmp`/`strstr`/`startswith` 的匹配位置与长度；构造能「匹配前缀但落到别处」的路径 | `/cgi-bin/diag.cgi` 是白的 → 用 `/cgi-bin/../etc/...` 绕过 |
+| B5 | 路径穿越变形 | 逐个试变形：`../`、`..\`、`%2e%2e%2f`、`..%c0%af`、双重编码、绝对路径、尾随 `.`/空格、长路径截断、软链接 | Zip Slip；升级包内 `../../etc/passwd` |
+| B6 | 大小写 / 编码 / 规范化 | 比较是否大小写敏感、FS 是否敏感（通常不敏感→可绕过）；`%00` 截断；UTF-8 overlong；Unicode 归一化 | `../` 被过滤但 `..%2f` 未过滤 |
+| B7 | 参数污染（HPP） | 同名参数重复时，**校验函数取哪个、使用函数取哪个**；`&a=1&a=2`；数组参数；「缺值」vs「空值」 | 网关校验取第一个、后端取最后一个 |
+| B8 | 边界 / 截断 | 找 `>` vs `>=`、signed/unsigned 比较、`strncpy` 不补 `\0`、`strlen` 之后长度被改、整数溢出绕过上限检查 | 长度检查 `if (len > 0x100)` 但 `len` 是 signed |
+| B9 | 白名单命令注入 | 白名单「有」不代表安全：查参数是否被拼进 shell；试 `;` `&&` `\|` 换行 `` ` `` `$()`；参数位注入（`-o`、引号逃逸） | `ping` 白名单，但 IP 参数未过滤 `;` |
+| B10 | 时间窗口 / 竞态（TOCTOU） | 校验路径 vs 打开路径是否同一个；检查后被替换的窗口；令牌验证后是否可变；并发绕一次性检查 | 上传临时文件校验后、执行前被替换 |
+| B11 | 状态 / 顺序绕行 | 未初始化状态是否被信任；能否跳过前置步骤直调后置接口；重放；恢复出厂后是否残留 | 未登录直调「已登录才该能调」的接口 |
+| B12 | 校验对象 ≠ 使用对象 | 列出「校验了什么」与「用了什么」，若不一致即可绕：`Host` vs `X-Forwarded-Host`；前端文件名 vs 后端字段；验签 A 却加载 B；查一个 header 却信任另一个 | ISAPI/代理场景的 Host 校验绕过 |
+
+**产出格式**（写进该文件结论的 `bypass_matrix`）：
+
+```yaml
+entry: /cgi-bin/ipv6_disable.cgi
+existing_control: "is_authorizied() 校验 board_id"
+B1: N/A (无口令面)
+B2: N/A
+B3: 可绕过 → finding F-012 (handler 表未在鉴权白名单内)
+B5: 已测·不可绕过 (证据: 路径经 realpath 后再比对)
+B9: 可绕过 → finding F-013 (wan_ifname 未过滤即拼 system)
+upgraded_findings: [F-012, F-013]
+```
+
 ### Layer 3 证据粒度要求
 
 调用链必须逐跳记录，禁止合并：
@@ -268,6 +302,75 @@ F-001  usr/sbin/httpd  strcpy @0x2a30
 **注意 G2 与 T1 覆盖率的关系**：T1 覆盖率是「结论集 vs 计划集」；G2 是「声明集 vs 计划集」。一个模型可能 T1 覆盖率达标（因为把该审的都写了 NOT_FOUND），但清单里压根没声明过某个文件——说明它的「审阅过程」和「结论产出」是脱节的，无法复现。两个检查都要过。
 
 `coverage_gate.py --review-list` 会自动做这个 diff，G1/G2/G3 任一非空即门禁失败。**审阅清单必须逐项打勾**（读完一个文件立刻把 `[ ]` 改 `[x]`），事后补勾等于没审。
+
+### 5.1.1 缺口检出后的修复路径（自动 / 人工）
+
+检出 G1/G2/G3 **不等于一律要人工介入**——按缺口性质分流（与 `SKILL.md` Phase 2.5 一致）：
+
+| 缺口 | 自动修复？ | 理由 | 动作 |
+|---|---|---|---|
+| **G1 声明未勾选** | ✅ **自动** | 范围**已声明**，只是没执行完 | 重派缺失文件给同 shard；原 Agent 结束则新起「补审」Agent（只带该文件 + Layer 1 摘要 + shard 上下文） |
+| **G3 勾选无结论** | ✅ **自动（限 1 轮）** | 文件**已被读过**，只差落结论 | 重跑「结论汇总」；仍无结论 → 升级人工 |
+| **G2 计划未声明** | ❌ **禁止自动** | 这是**范围被缩小**，属范围决策；自动补回会掩盖问题 | 只能「补充分片重审」或「书面 waiver」，且必须在报告中留痕 |
+
+**自动化红线**：
+
+1. 自动修复**只允许补执行 / 补汇总**，**不得改变审阅范围**（G2 尤其禁止自动）。
+2. 每轮修复写 `40-coverage.md` 的 `auto_recovered` 段（缺口类型 / 文件 / 轮次 / 结果）；**缺口留痕永久保留**，不允许「修完即消失」。
+3. **最多 2 轮自动修复**；第 3 轮仍有缺口 → 强制人工 + 门禁阻断。
+4. 机器**不得生成 finding 结论**，只能整理已有产物。
+
+**门禁开关（已实现）**：
+
+```bash
+coverage_gate.py --auto-recover [--max-rounds 2] [--recover-round N]
+```
+
+缺省仍是**只检出（保守）**。开启后：G1 → `reassign`，G3 → `reconclude`，G2 → `blocked_manual`（永不自动）。轮次超限（`--recover-round > --max-rounds`）→ G1/G3 亦回硬门禁。计划同时写入 `40-coverage.auto-recover.json` 供编排层消费：
+
+```json
+{"round": 1, "max_rounds": 2, "budget_exhausted": false,
+ "reassign": [{"file": "usr/sbin/upnpd", "action": "re-dispatch", "stage": "补审"}],
+ "reconclude": [{"file": "usr/sbin/ghost", "action": "re-summarize", "stage": "结论汇总"}],
+ "blocked_manual": ["usr/lib/libnew.so"]}
+```
+
+G2 的 waiver 落在 `25-review-list.md` 的 `## WAIVER` 段，格式：
+
+```markdown
+## WAIVER
+- `usr/lib/libfoo.so` — 纯第三方二进制，无外部输入面，版本已由 SBOM 记录 (@审计负责人)
+```
+
+门禁与报告都要能读到 waiver，并把它计入「未覆盖项 + 理由」。
+
+### 5.1.2 三条深度门禁（G4 / G5 / 类型→Base）
+
+覆盖率门禁原本只回答「**每个文件**有没有结论」。这在 2026-10 的 RAXE500 审计上暴露了系统性问题：`usr/sbin/httpd` 有结论 → 文件级 100% PASS，但它 **2923 个函数只精读了 5 个、167 个 CGI handler 一个没读**，漏掉一条认证后 root 命令注入（`ipv6_disable.cgi` → nvram `wan_ifname` → `system("ifconfig %s mtu %d")`）。为此新增三条门禁，把风险单位从「文件」提升到「入口 / 断言 / 类型」。
+
+**G4 入口级覆盖**（`--entrypoints <entrypoints.json>`）
+
+- 适用：**T1 且 `text_kb > 200` 的服务型可执行**（`bin|sbin|usr/bin|usr/sbin` 下的 ELF，排除 `.so`）。阈值用 `--text-kb-threshold` 调。
+- 每条记录：`handler_table_count`（权威派发表条目数）+ `handlers[]`（每条含 `name` / `addr` / `conclusion`）。
+- 判据：①有记录；②`len(handlers) ≥ handler_table_count`；③**每个入口 `conclusion` 非空**（finding id / `NOT_FOUND` / `待动态验证`）；④全局入口审计率 ≥ `--entrypoint-audit-min`（默认 100%）。
+- 豁免只有两条且留痕：文件级 `waiver{reason}`，或 `entrypoints:"none"` + `reason`（CLI 工具是 sink 不是 source）。
+- 显式给了 `--entrypoints` 却找不到文件 → **判失败**（不交枚举不能比交了不全更容易过）。
+- 骨架生成：`scripts/entrypoints_init.py --tiering 02-tiering.json --out entrypoints.json --merge entrypoints.json`。
+
+**G5 绕过矩阵完备**（`--bypass-check`，扫 `30-findings-verified.md`）
+
+- 触发：任一章节正文出现**防护断言**——`已鉴权/已认证/已过滤/已验签/已限长/有防护/已做校验/存在性校验/白名单校验/长度校验/字符校验/不可利用`（前置否定词 `未/无/不/非` 会排除「未鉴权」「无过滤」）。
+- 「修复建议」行是建议不是断言，扫描时剔除。
+- 要求：该章节须出现 `bypass_matrix` 或 ≥10 个 `B1..B12` 条目号。
+- 语义：**「有防护」≠「防护有效」**——这正是 B1–B12（§3.1）的机械化落点。
+
+**类型 → DKTSS Base 命中**（`--type-base`，默认告警 / `--type-base-strict` 硬门禁）
+
+- 报告里每个 `类型:` 标签（用 `/`、`、`、`,` 拆分，去掉 CWE 括注）须能经 `BASE_SYNONYM` 关键词归一到 Base 表某一行；不能则须写「映射依据」，否则列出。
+- 噪声控制：实测 RAXE500 报告 17 个标签仅 3 个未命中（`更新流程降级`、`MITM`、`不安全临时文件`）→ 这 3 个正是 Base 表的真实落空点，已补 2 行（`传输安全降级 / MITM`、`不安全临时文件 / 本地提权`）。
+
+三条门禁**默认不启用**（保持既有流程可复现）；Phase 5 的标准命令应显式带上。回归由 `scripts/selftest.py` 的 `[8/10]`–`[10/10]` 覆盖。
+
 
 ### 5.2 审阅清单的写法
 
