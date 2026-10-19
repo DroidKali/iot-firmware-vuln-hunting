@@ -421,7 +421,11 @@ G2 的 waiver 落在 `25-review-list.md` 的 `## WAIVER` 段，格式：
 - 报告里每个 `类型:` 标签（用 `/`、`、`、`,` 拆分，去掉 CWE 括注）须能经 `BASE_SYNONYM` 关键词归一到 Base 表某一行；不能则须写「映射依据」，否则列出。
 - 噪声控制：实测 RAXE500 报告 17 个标签仅 3 个未命中（`更新流程降级`、`MITM`、`不安全临时文件`）→ 这 3 个正是 Base 表的真实落空点，已补 2 行（`传输安全降级 / MITM`、`不安全临时文件 / 本地提权`）。
 
-四条门禁**默认不启用**（保持既有流程可复现）；Phase 5 的标准命令应显式带上。回归由 `scripts/selftest.py` 的深度门禁用例覆盖。
+**门禁档位**：上面四条高阶门禁（`--entrypoints` / `--bypass-check` / `--cross-request` / `--type-base-strict`）在 `standard` 档位下仍是**按需开启**，但只要没开，检查项在 `gate-config.json` 里就是 `SKIPPED` 而不是 `PASS`——**「没跑」和「通过」必须能区分**，只读退出码是分不出来的。
+
+要一次全开用 `--profile strict`：四条高阶门禁全部强制启用，且**未执行的必需检查项直接判失败**（`required SKIPPED → FAIL`）。Phase 5 的标准命令即带 `--profile strict`。复现性由 `gate-config.json` 承担——它记录档位、`GATE_VERSION`、各项阈值、各项 `status`，以及全部输入文件的 sha256，事后可校验「当时的判定是在什么输入上、用什么口径做出来的」。
+
+回归由 `scripts/selftest.py` 的 `[13/14] 扫描完整性与门禁严格性` 组覆盖（含 standard vs strict 的 SKIPPED 行为差异）；**文档与 CLI 的一致性**由 `[14/14]` 组对拍——它把 `README.md` / `SKILL.md` / `references/` / `assets/` 里每条 `scripts/*.py` 示例命令的 `--flag` 与脚本 `--help` 逐一对齐，并检查布尔开关没被当成带值参数（历史缺陷：`--tier` 是 `store_true`，文档却写成 `--tier <rootfs>`，照抄即报错，而单元测试全绿）。
 
 
 ### 5.2 审阅清单的写法

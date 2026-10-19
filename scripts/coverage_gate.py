@@ -62,6 +62,24 @@ RECOMMEND_LINE = re.compile(r"^\s*[-*]*\s*\*{0,2}(?:修复建议|建议|加固�
 BYPASS_ITEM = re.compile(r"\bB(?:1[0-2]|[1-9])\b")
 BYPASS_MIN_ITEMS = 10          # 一张完整 B1–B12 矩阵至少应出现 10 个条目号
 
+GATE_VERSION = "1.4"           # 门禁语义版本：判据变化时递增，便于复算历史结论
+
+# ── 候选处置状态枚举（封闭集合）─────────────────────────────────────────────
+# 「文本里提过这个 ID」不等于「这条候选被处置过」。只有落在枚举内的结构化
+# status 才算实质处置；没有 status 的旧格式只能靠文本匹配，strict 下不认。
+CAND_STATUS = {
+    "hypothesis",                  # 仍是假设，未验证
+    "confirmed",                   # 已验证成立（必须带 evidence）
+    "not_reproduced",              # 验证后未复现
+    "not_applicable",              # 不适用（代码不存在 / 配置不可达）
+    "pending_static_analysis",     # 待静态分析
+    "pending_dynamic_validation",  # 待动态验证
+    "blocked_by_environment",      # 环境受限（QEMU 起不来 / 缺 NVRAM）
+    # 兼容既有写法
+    "validated",
+    "not_found",
+}
+
 # ── G6：跨请求污点溯源（高阶漏洞，Bridge / IEEE S&P'26）───────────────────────
 # 对抗「只审单请求数据流」。污点常经 NVRAM / 运行时文件 等**持久化存储**跨请求传递：
 # 请求 1 写入存储，请求 2 读出并触发 sink（RAXE500 F-012/F-013 即此形态）。
@@ -134,6 +152,21 @@ def is_pathish(tok: str) -> bool:
 def read(path: str) -> str:
     with open(path, encoding="utf-8", errors="replace") as f:
         return f.read()
+
+
+def _sha256_file(path: Optional[str]) -> Optional[str]:
+    """输入文件指纹：让「同样的输入 + 同样的版本」可被复核是同一件事。"""
+    if not path or not os.path.isfile(path):
+        return None
+    import hashlib
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for blk in iter(lambda: f.read(1 << 20), b""):
+                h.update(blk)
+    except OSError:
+        return None
+    return h.hexdigest()
 
 
 def parse_plan(path: str) -> List[Dict[str, str]]:
@@ -329,7 +362,8 @@ def check_entrypoints(path: str, idx: Dict[str, Any], text_kb_threshold: float,
     out["required"] = sorted(qualifying)
 
     if not path or not os.path.isfile(path):
-        out["skipped"] = f"entrypoints.json 不存在: {path}"
+        out["skipped"] = ("未提供 --entrypoints（入口枚举未提交）" if not path
+                          else f"entrypoints.json 不存在: {path}")
         return out
     out["exists"] = True
     try:
@@ -462,6 +496,8 @@ def check_cross_request(report_path: str) -> Dict[str, Any]:
             end = i
             break
     if start is None:
+        # 没有漏洞条目就无从判断跨请求污点，标为未执行而不是「0 违规」。
+        out["checked"] = False
         out["skipped"] = "未找到「漏洞详情」区块"
         return out
 
@@ -572,6 +608,129 @@ def check_type_base(report_path: str, base_path: str) -> Dict[str, Any]:
     return out
 
 
+def check_candidates(cand_path: Optional[str], text: str, strict: bool,
+                     allow_empty: bool = False) -> Dict[str, Any]:
+    """候选处置校验（结构化优先，文本匹配仅作降级）。
+
+    旧实现的三个漏洞（改进计划 §4）：
+      1. 用 `cid in text` 子串匹配判定处置——报告里只要出现过这个 ID 就算
+         「已处置」，哪怕写的是「C-001 已记录，待进一步检查」；
+      2. `cand_total == 0` 直接判 PASS——没给候选文件、文件不存在、清单为空
+         三种完全不同的情况全都静默通过；
+      3. 子串匹配还会把 `C-001` 误命中 `C-0010`。
+
+    本实现要求候选自带结构化 `status`（固定枚举），并对重复 ID、未知状态、
+    CONFIRMED 缺证据分别报错。没有 status 的旧格式只允许文本匹配，
+    并在 strict 下判为不合格。
+    """
+    out: Dict[str, Any] = {
+        "checked": False, "exists": False, "total": 0, "disposed": 0,
+        "unresolved": [], "duplicates": [], "bad_status": [],
+        "missing_evidence": [], "weak": [], "mode": "structured",
+        "skipped": None, "ok": False,
+    }
+    if not cand_path:
+        out["skipped"] = "未提供 --candidates（候选处置未被评估）"
+        return out
+    if not os.path.isfile(cand_path):
+        out["skipped"] = f"候选文件不存在: {cand_path}"
+        out["checked"] = True          # 显式给了却没落地 → 是缺口，不是「跳过」
+        out["ok"] = False
+        out["unresolved"] = ["<候选文件缺失>"]
+        return out
+
+    out["checked"] = True
+    out["exists"] = True
+    rows: List[Dict[str, Any]] = []
+    try:
+        with open(cand_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    c = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(c, dict):
+                    rows.append(c)
+    except OSError as exc:
+        out["skipped"] = f"候选文件读取失败: {exc}"
+        out["ok"] = False
+        return out
+
+    if not rows:
+        out["skipped"] = "候选清单为空（0 条）"
+        # 空清单 ≠ 没有候选这回事：只有调用方显式声明「本次确实无候选」才算通过
+        out["ok"] = bool(allow_empty) and not strict
+        if strict and not allow_empty:
+            out["unresolved"] = ["<空候选清单：strict 需显式 --allow-empty-candidates>"]
+        return out
+
+    out["total"] = len(rows)
+    seen: Dict[str, int] = {}
+    unresolved: List[str] = []
+    weak: List[str] = []
+
+    for c in rows:
+        cid = str(c.get("id") or c.get("candidate_id") or "").strip()
+        if not cid:
+            out["duplicates"].append("<缺失 id>")
+            unresolved.append("<缺失 id 的候选行>")
+            continue
+        seen[cid] = seen.get(cid, 0) + 1
+
+        status = str(c.get("status") or "").strip().lower()
+        if not status:
+            disp = c.get("disposition")
+            if isinstance(disp, dict):
+                status = str(disp.get("type") or "").strip().lower()
+        if not status:
+            # 无结构化状态：降级为文本匹配，并标记为弱证据
+            out["mode"] = "text"
+            if _id_in_text(cid, text):
+                out["disposed"] += 1
+                weak.append(cid)
+            else:
+                unresolved.append(cid)
+            continue
+
+        if status not in CAND_STATUS:
+            out["bad_status"].append({"id": cid, "status": status,
+                                      "allowed": sorted(CAND_STATUS)[:8]})
+            unresolved.append(cid)
+            continue
+
+        if status == "confirmed" and not _has_evidence(c):
+            out["missing_evidence"].append(cid)
+            unresolved.append(cid)
+            continue
+        out["disposed"] += 1
+
+    out["duplicates"] = [f"{k} ×{v}" for k, v in seen.items() if v > 1]
+    out["unresolved"] = unresolved
+    out["weak"] = weak
+    out["ok"] = (not unresolved and not out["duplicates"]
+                 and not out["bad_status"] and not out["missing_evidence"]
+                 and (strict is False or out["mode"] == "structured"))
+    return out
+
+
+def _id_in_text(cid: str, text: str) -> bool:
+    """按 ID 边界匹配，避免 `C-001` 被 `C-0010` 这类更长 ID 误判为已提及。"""
+    pat = re.compile(r"(?<![A-Za-z0-9_-])" + re.escape(cid) + r"(?![A-Za-z0-9_-])")
+    return bool(pat.search(text))
+
+
+def _has_evidence(c: Dict[str, Any]) -> bool:
+    ev = c.get("evidence")
+    if isinstance(ev, list):
+        return any(str(x).strip() for x in ev)
+    if isinstance(ev, str):
+        return bool(ev.strip())
+    return bool(c.get("evidence_ref") or c.get("evidence_path"))
+
+
 def plan_auto_recover(rdiff: Dict[str, Any], round_no: int, max_rounds: int,
                       enabled: bool) -> Dict[str, Any]:
     """G1/G2/G3 的修复路径分流（自动 vs 人工）。
@@ -625,7 +784,8 @@ def check_report_fields(report_path: str) -> Dict[str, Any]:
     标题不得含评级括注（如 `(Critical)`）。
     """
     out: Dict[str, Any] = {"checked": False, "findings": 0, "incomplete": [],
-                           "hypothesis_no_gap": [], "bad_title": [], "skipped": None}
+                           "hypothesis_no_gap": [], "bad_title": [],
+                           "skipped": None, "section_missing": False}
     if not report_path or not os.path.isfile(report_path):
         out["skipped"] = f"报告不存在: {report_path}"
         return out
@@ -647,7 +807,9 @@ def check_report_fields(report_path: str) -> Dict[str, Any]:
             end = i
             break
     if start is None:
-        out["skipped"] = "未找到「漏洞详情」区块"
+        # 整块缺失是结构性缺陷：不能因为「0 条待检查」就判通过。
+        out["section_missing"] = True
+        out["skipped"] = "未找到「漏洞详情」区块（报告结构不完整）"
         return out
 
     # 按 ### F-xxx 切分
@@ -875,7 +1037,27 @@ def main() -> int:
     ap.add_argument("--t2-threshold", type=float, default=95.0)
     ap.add_argument("--lenient", action="store_true",
                     help="额外用子串匹配兜底（会把出现路径名当作已覆盖）")
+    ap.add_argument("--profile", choices=("light", "standard", "strict"),
+                    default="standard",
+                    help="门禁档位：light=只查覆盖率；standard=当前默认；"
+                         "strict=必需输入齐全 + 高级检查全部启用 + 未执行即失败")
+    ap.add_argument("--allow-empty-candidates", action="store_true",
+                    help="显式声明本次审计确实没有候选（空清单不再判失败）")
+    ap.add_argument("--gate-config",
+                    help="输出 gate-config.json 的路径（记录执行了哪些检查与版本）")
     args = ap.parse_args()
+
+    PROFILE = args.profile
+    STRICT = PROFILE == "strict"
+
+    # strict：高级检查全部默认开启，并用单一入口统一管理，
+    # 避免「调用方漏写一个 flag，门禁就静默少跑一项检查」。
+    if STRICT:
+        args.bypass_check = True
+        args.cross_request = True
+        args.type_base = True
+        args.type_base_strict = True
+        args.require_entrypoints = True
 
     for p in (args.plan, args.verified):
         if not os.path.isfile(p):
@@ -929,25 +1111,10 @@ def main() -> int:
         tot = by_tier_total.get(t, 0)
         return 100.0 if tot == 0 else round(by_tier_cov.get(t, 0) * 100.0 / tot, 2)
 
-    # 候选处置率
-    cand_total = cand_disposed = 0
-    cand_missing: List[str] = []
-    if args.candidates and os.path.isfile(args.candidates):
-        with open(args.candidates, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    c = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                cand_total += 1
-                cid = str(c.get("id", ""))
-                if cid and cid in text:
-                    cand_disposed += 1
-                else:
-                    cand_missing.append(cid or line[:60])
+    # 候选处置率（结构化优先；文本匹配降级并标记）
+    cand = check_candidates(args.candidates, text, STRICT,
+                            allow_empty=args.allow_empty_candidates)
+    cand_missing: List[str] = list(cand["unresolved"])
 
     # promotions 跟进
     promo_missing: List[str] = []
@@ -1015,12 +1182,24 @@ def main() -> int:
          f"{pct('T1')}%（{by_tier_cov.get('T1',0)}/{by_tier_total.get('T1',0)}）"),
         ("T2 覆盖率 ≥ %.0f%%" % args.t2_threshold, pct("T2") >= args.t2_threshold,
          f"{pct('T2')}%（{by_tier_cov.get('T2',0)}/{by_tier_total.get('T2',0)}）"),
-        ("候选处置率 100%", (cand_total == 0 or cand_disposed == cand_total),
-         f"{cand_disposed}/{cand_total}"),
         ("promotions 跟进 100%", not promo_missing,
          f"缺失 {len(promo_missing)} 项"),
         ("无未审文件", not missing, f"缺失 {len(missing)} 个"),
     ]
+    # 候选处置：只有「真的评估过、且每条都有结构化状态」才算 PASS；
+    # 未提供文件 / 文件不存在 / 空清单 一律进 SKIPPED 或 FAIL，不允许静默通过。
+    if cand["checked"] and cand["total"] > 0:
+        checks.append((
+            "候选处置率 100%",
+            cand["ok"],
+            f"{cand['disposed']}/{cand['total']} 已处置"
+            + (f"；未处置 {len(cand['unresolved'])}、重复 {len(cand['duplicates'])}、"
+               f"未知状态 {len(cand['bad_status'])}、确认但缺证据 {len(cand['missing_evidence'])}"
+               if not cand["ok"] else "")
+            + ("；**含文本匹配降级项**" if cand["mode"] == "text" else "")))
+    elif cand["checked"]:
+        checks.append(("候选处置率 100%", cand["ok"],
+                       cand["skipped"] or "空/无效候选清单"))
     if rdiff["available"]:
         if recover["enabled"] and not rdiff["ok"]:
             note = (f"；自动修复第 {recover['round']}/{recover['max_rounds']} 轮"
@@ -1046,11 +1225,15 @@ def main() -> int:
     fields_bad = (len(fields["incomplete"]) + len(fields["hypothesis_no_gap"])
                   + len(fields["bad_title"]))
     if fields["checked"]:
-        checks.append((
-            "漏洞条目 9 字段完整",
-            fields_bad == 0,
-            f"{fields['findings']} 条，{fields_bad} 处问题"
-            if fields_bad else f"{fields['findings']} 条全部完整"))
+        if fields.get("section_missing"):
+            checks.append(("漏洞条目 9 字段完整", False, fields["skipped"]))
+        else:
+            checks.append((
+                "漏洞条目 9 字段完整",
+                fields_bad == 0,
+                f"{fields['findings']} 条，{fields_bad} 处问题" if fields_bad
+                else (f"{fields['findings']} 条全部完整" if fields["findings"]
+                      else "报告未包含 finding 条目（0 条）")))
     if cve["checked"]:
         checks.append((
             "CVE 命中未被当作可利用漏洞",
@@ -1092,18 +1275,68 @@ def main() -> int:
                 bad == 0,
                 f"Base {tbase['base_rows']} 行；报告 {tbase['report_labels']} 个类型标签，"
                 f"未命中 {bad} 个"))
-    failed = [c for c in checks if not c[1]]
+    # ── 未执行的检查：必须显式登记，不能从列表里消失 ────────────────────────
+    # 「脚本具备某项检查」≠「本次审计执行了它」≠「它通过了」。
+    # 旧实现只在 checked 时 append，导致没启用的高级检查在报告里完全不可见，
+    # 退出码 0 被误读为「所有质量约束都过了」。
+    skipped_checks: List[Tuple[str, str, bool]] = []
+    if not cand["checked"]:
+        skipped_checks.append(("候选处置率 100%",
+                               cand["skipped"] or "未评估候选处置", True))
+    if not rdiff["available"]:
+        skipped_checks.append(("审阅清单与结论一致",
+                               "未提供 --review-list", True))
+    if not fields["checked"]:
+        skipped_checks.append(("漏洞条目 9 字段完整",
+                               fields.get("skipped") or "未提供 --report", True))
+    if not cve["checked"]:
+        skipped_checks.append(("CVE 命中未被当作可利用漏洞",
+                               cve.get("skipped") or "未提供 --report", True))
+    if not epres["checked"]:
+        skipped_checks.append(("入口级覆盖（G4）",
+                               epres.get("skipped") or "未提供 --entrypoints", True))
+    if not byp["checked"]:
+        skipped_checks.append(("绕过矩阵完备（G5）",
+                               byp.get("skipped") or "未启用 --bypass-check", True))
+    if not xreq["checked"]:
+        skipped_checks.append(("跨请求污点溯源（G6）",
+                               xreq.get("skipped") or "未启用 --cross-request", False))
+    if not tbase["checked"]:
+        skipped_checks.append(("报告类型命中 Base 表",
+                               tbase.get("skipped") or "未启用 --type-base", False))
+
+    ROWS = [{"name": n, "status": "PASS" if ok else "FAIL", "detail": d,
+             "required": True, "executed": True} for n, ok, d in checks]
+    ROWS += [{"name": n, "status": "SKIPPED", "detail": r,
+              "required": req, "executed": False} for n, r, req in skipped_checks]
+
+    failed = [r for r in ROWS if r["status"] == "FAIL"]
+    if STRICT:
+        # strict 下「必需检查没跑」按失败处理——这是整个 profile 的意义所在
+        failed += [r for r in ROWS if r["status"] == "SKIPPED" and r["required"]]
+
+    n_pass = sum(1 for r in ROWS if r["status"] == "PASS")
+    n_skip = sum(1 for r in ROWS if r["status"] == "SKIPPED")
 
     lines = [
         "# 覆盖率门禁报告（40-coverage.md）",
         "",
+        f"> 档位 **{PROFILE}**　·　PASS {n_pass} / FAIL "
+        f"{len([r for r in ROWS if r['status'] == 'FAIL'])} / SKIPPED {n_skip}",
+        ">",
+        "> `SKIPPED` 表示该检查**本次没有执行**，不等于通过。"
+        + ("strict 档位下必需检查的 SKIPPED 判为失败。" if STRICT else
+           "standard 档位下仅提示；正式审计请用 `--profile strict`。"),
+        "",
         "## 判据",
         "",
-        "| 检查项 | 结果 | 数值 |",
+        "| 检查项 | 结果 | 数值 / 原因 |",
         "|---|---|---|",
     ]
-    for name, ok, val in checks:
-        lines.append("| %s | %s | %s |" % (name, "PASS" if ok else "**FAIL**", val))
+    for r in ROWS:
+        mark = {"PASS": "PASS", "FAIL": "**FAIL**",
+                "SKIPPED": "SKIPPED", "ERROR": "**ERROR**"}[r["status"]]
+        lines.append("| %s | %s | %s |" % (r["name"], mark, r["detail"]))
 
     lines += ["", "## 分层覆盖率", "",
               "| Tier | 计划文件 | 已覆盖 | 覆盖率 | 门禁要求 |",
@@ -1126,8 +1359,31 @@ def main() -> int:
         lines.append("无。所有计划内文件均有审计结论。")
 
     if cand_missing:
-        lines += ["", "## 未处置的候选（必须升为 validated / 降为 NOT_FOUND / 标注待动态验证）", ""]
+        lines += ["", "## 未处置的候选（必须落到 status 枚举里的合法状态）", "",
+                  "合法状态：" + "、".join(f"`{s}`" for s in sorted(CAND_STATUS)), ""]
         for c in cand_missing:
+            lines.append(f"- `{c}`")
+
+    if cand["duplicates"]:
+        lines += ["", "## 候选 ID 重复（每条候选必须有唯一稳定 ID）", ""]
+        for c in cand["duplicates"]:
+            lines.append(f"- `{c}`")
+
+    if cand["bad_status"]:
+        lines += ["", "## 候选状态不在枚举内", ""]
+        for b in cand["bad_status"]:
+            lines.append(f"- `{b['id']}`：`{b['status']}`")
+
+    if cand["missing_evidence"]:
+        lines += ["", "## 标记为 confirmed 但缺证据", ""]
+        for c in cand["missing_evidence"]:
+            lines.append(f"- `{c}`")
+
+    if cand["weak"]:
+        lines += ["", "## 仅凭文本提及判定的候选（弱证据）", "",
+                  "这些候选在结论里出现过 ID，但没有结构化 `status`。"
+                  "standard 档位下接受，strict 档位下不认。", ""]
+        for c in cand["weak"]:
             lines.append(f"- `{c}`")
 
     if promo_missing:
@@ -1298,10 +1554,14 @@ def main() -> int:
     lines += ["", "## 结论", ""]
     if failed:
         lines += ["**门禁未通过，不得输出最终报告。** 请按上方待补审清单补齐后重跑本检查。", ""]
-        for name, _ok, val in failed:
-            lines.append(f"- 未通过：{name}（{val}）")
+        for r in failed:
+            tag = "未通过" if r["status"] == "FAIL" else "未执行（strict 视为失败）"
+            lines.append(f"- {tag}：{r['name']}（{r['detail']}）")
     else:
-        lines += ["门禁通过，可进入 Phase 5.2 规则沉淀与 5.3 报告生成。", ""]
+        lines += [f"门禁通过（{PROFILE} 档位），可进入 Phase 5.2 规则沉淀与 5.3 报告生成。", ""]
+        if n_skip:
+            lines += [f"> 注意：仍有 {n_skip} 项检查未执行（见上表 SKIPPED）。"
+                      "若需「所有必需检查均已执行」的结论，请用 `--profile strict`。", ""]
 
     out_text = "\n".join(lines) + "\n"
     if args.out:
@@ -1327,17 +1587,69 @@ def main() -> int:
     else:
         print(out_text)
 
-    for name, ok, val in checks:
-        print(f"  {'PASS' if ok else 'FAIL'}  {name}: {val}")
+    # ── gate-config.json：本次门禁到底执行了什么 ──────────────────────────────
+    # 只记录「通过/失败」是不够的：同一份产物用不同档位跑会得到不同结论，
+    # 所以要把档位、输入哈希、每项检查的执行状态和版本一起落盘，才能复算。
+    cfg_path = args.gate_config
+    if not cfg_path and STRICT and args.out:
+        cfg_path = os.path.splitext(args.out)[0] + ".gate-config.json"
+    if cfg_path:
+        cfg = {
+            "schema_version": "gate-config/1.0",
+            "profile": PROFILE,
+            "gate_version": GATE_VERSION,
+            "strict": STRICT,
+            "thresholds": {"t1": args.t1_threshold, "t2": args.t2_threshold,
+                           "entrypoint_audit_min": args.entrypoint_audit_min,
+                           "text_kb_threshold": args.text_kb_threshold},
+            "flags": {
+                "candidates": bool(args.candidates),
+                "entrypoints": bool(args.entrypoints),
+                "require_entrypoints": bool(args.require_entrypoints),
+                "bypass_check": bool(args.bypass_check),
+                "cross_request": bool(args.cross_request),
+                "type_base_strict": bool(args.type_base_strict),
+                "review_list": bool(args.review_list),
+                "report": bool(args.report),
+            },
+            "inputs": {
+                k: {"path": v, "sha256": _sha256_file(v)}
+                for k, v in (("plan", args.plan), ("verified", args.verified),
+                             ("candidates", args.candidates),
+                             ("review_list", args.review_list),
+                             ("tiering", args.tiering),
+                             ("report", args.report),
+                             ("entrypoints", ep_path))
+            },
+            "checks": ROWS,
+            "summary": {
+                "pass": n_pass,
+                "fail": sum(1 for r in ROWS if r["status"] == "FAIL"),
+                "skipped": n_skip,
+                "error": sum(1 for r in ROWS if r["status"] == "ERROR"),
+                "executed": sum(1 for r in ROWS if r["executed"]),
+                "total": len(ROWS),
+            },
+            "result": "fail" if failed else "pass",
+        }
+        d = os.path.dirname(os.path.abspath(cfg_path))
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(cfg_path, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        print(f"[ok] 门禁配置 → {cfg_path}")
+
+    for r in ROWS:
+        print(f"  {r['status']:<7} {r['name']}: {r['detail']}")
     if tbase["checked"] and tbase["unmapped"]:
         tag = "FAIL" if args.type_base_strict else "WARN"
         print(f"  {tag}  报告类型命中 Base 表: {len(tbase['unmapped'])} 个未命中"
               f"（{'--type-base-strict 已判失败' if args.type_base_strict else '仅告警'}）",
               file=sys.stderr)
     if failed:
-        print(f"[gate] 未通过（{len(failed)} 项）", file=sys.stderr)
+        print(f"[gate] 未通过（{len(failed)} 项，档位 {PROFILE}）", file=sys.stderr)
         return 1
-    print("[gate] 通过")
+    print(f"[gate] 通过（档位 {PROFILE}；PASS {n_pass} / SKIPPED {n_skip}）")
     return 0
 
 

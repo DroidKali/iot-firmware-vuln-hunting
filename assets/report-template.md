@@ -278,11 +278,14 @@ uv run scripts/fw_triage.py <firmware.bin> --out 00-metrics.json
 unblob --report 01-manifest.json -e 01-extract <firmware.bin>
 mithril -j 01-extract > mithril.json
 # Phase 2
-uv run scripts/fw_triage.py --rootfs 01-extract --tier --budget 800 --out 02-tiering.json
+uv run scripts/fw_triage.py --rootfs 01-extract --tier --budget 800 --out 02-tiering.json --plan 03-audit-plan.md
 # Phase 3
 uv run scripts/sink_scan.py 01-extract --rules assets/sink-rules.json --json 10-layer1-sinks.json
-# Phase 5
-uv run scripts/coverage_gate.py --plan 03-audit-plan.md --verified 30-findings-verified.md --tiering 02-tiering.json --out 40-coverage.md
+# Phase 5（正式审计一律 strict 档位：全开高级检查，未执行即失败）
+uv run scripts/coverage_gate.py --profile strict \
+    --plan 03-audit-plan.md --verified 30-findings-verified.md \
+    --candidates 20-findings-candidates.jsonl --tiering 02-tiering.json \
+    --report report.md --out 40-coverage.md
 ```
 
 ### 规则文件

@@ -296,8 +296,12 @@ Agent 数 = ceil(EALB / 800)      # 单 Agent 预算 800 EALB 单位，可按上
 
 ```bash
 uv run scripts/fw_triage.py --rootfs fw-audit/<target>/01-extract \
-    --tier --budget 800 --out fw-audit/<target>/02-tiering.json
+    --tier --budget 800 \
+    --out  fw-audit/<target>/02-tiering.json \
+    --plan fw-audit/<target>/03-audit-plan.md
 ```
+
+`--rootfs` 是路径参数、`--tier` 是布尔开关、`--plan` 才会写出计划文件——三者缺一个都拿不到预期的 `03-audit-plan.md`。
 
 产出 `03-audit-plan.md`：每个 Agent 分到的文件清单（绝对路径 + Tier + text_KB），一条一行，便于逐项打勾。
 
@@ -361,7 +365,7 @@ uv run scripts/coverage_gate.py \
 4. **自动修复只补产物，不编结论。** 结论仍由人/模型基于证据写，机器不得替它生成 finding。
 5. **G2 走 waiver 的，waiver 必须出现在最终报告「未覆盖项 + 理由」里。**
 
-> **实现现状**：`coverage_gate.py` 目前**只检出不修复**。落地需新增 `--auto-recover [--max-rounds N]` 开关（默认关闭＝保守），详见 `references/methodology.md` §5.1.1。
+> **实现现状**：`coverage_gate.py --auto-recover` **已实现「出计划」，不实现「代执行」**——它按上面的边界把缺口转成 `40-coverage.auto-recover.json`（缺口类型 / 文件 / 轮次 / 是否超限），并在 `40-coverage.md` 写 `auto_recovered` 段留痕；**真正重派 shard、重跑补审仍由编排方（Agent）执行**，脚本不替它改产物、更不替它编结论。`--recover-round N` 与 `--max-rounds 2` 控制轮次，超限即回硬门禁。详见 `references/methodology.md` §5.1.1。
 
 ---
 
@@ -382,6 +386,8 @@ uv run scripts/sink_scan.py fw-audit/<target>/01-extract \
 - **P3**：信息泄露面（版本串、内部 IP、被注释掉的凭据）
 
 排噪规则（必须生效，否则规则库会被噪声淹没）：跳过 R0 目录；二进制文件里只报「字符串命中」不报「代码命中」（代码层交给 Layer 3 反汇编）；同一文件同一规则只报首个命中并给出计数；跳过 import/注释行。
+
+**扫描完整性（`scan_integrity`）**：二进制按 `--read-chunk-mb`（默认 4 MiB）分块流式读取，跨块边界的字符串用 carry 缓冲拼接，**不会因为分块而漏检**；文本超过 `--max-lines`（默认 40 万行）或文件超过 `--max-file-mb`（默认 96 MB）时会如实标记。输出里的四类跳过原因必须分开看：`skip-dir`（设计如此）/ `excluded`（调用方排除）/ `too-large`（能力边界）/ `stat-failed`（异常）。**`complete: false` 时报告里不得写「已完整扫描」**，把 `scan_integrity` 贴进附录即可——这是「扫描了什么、哪些没扫」的唯一可信来源。
 
 **脚本 / web 目标的二次过滤（可选增强）**：正则在脚本类目标上分不清「代码」与「注释/字符串」——`# eval "$x"`、`echo "system(id)"`、`// system($x)` 都会误报。对 P0/P1 的 script/web 规则，`sink-rules.json` 里带 `structural` 字段的会用 `ast-grep` 在**正则已命中的文件上**做结构确认：结构否定即判为误报丢弃；引擎缺失或语言不可判则**自动回退正则并记录进 `engine_status.fallbacks`**。判据与铁律见 `references/atomic-capabilities.md` §3.3，实现见 §5.2。三条要点：**① 只作二次过滤、不作候选生成器；② 对剥离符号的 ELF 不适用；③ 不要把反编译伪代码喂给它**（IDA 伪代码不是合法 C，解析器会产垃圾 AST）。
 
@@ -694,17 +700,23 @@ Phase 4 不只服务自研 finding，也是 **⑥ 组件风险（未验证）** 
 
 #### 5.1 覆盖率门禁（硬性）
 
+正式审计一律用 **strict 档位**——它强制启用全部高级检查，并且**任何必需检查未执行都判失败**：
+
 ```bash
-uv run scripts/coverage_gate.py \
+uv run scripts/coverage_gate.py --profile strict \
     --plan fw-audit/<target>/03-audit-plan.md \
     --verified fw-audit/<target>/30-findings-verified.md \
+    --candidates fw-audit/<target>/20-findings-candidates.jsonl \
     --review-list fw-audit/<target>/25-review-list.md \
     --tiering fw-audit/<target>/02-tiering.json \
     --entrypoints fw-audit/<target>/entrypoints.json \
     --report fw-audit/<target>/report.md \
-    --bypass-check --cross-request --type-base \
     --out fw-audit/<target>/40-coverage.md
 ```
+
+三个档位：`light`（只查覆盖率）/ `standard`（默认，未执行的高级检查以 `SKIPPED` 列出但不判失败）/ `strict`（需齐全输入 + 未执行即失败）。
+
+**每项检查输出 `PASS` / `FAIL` / `SKIPPED` 三态。** `SKIPPED` 的含义是「本次没有执行」，不是「通过」——旧版把未启用的检查从判据表里直接删掉，于是 `exit 0` 被误读成「G5 也通过了」。同时写 `40-coverage.gate-config.json`：档位、各项输入 SHA-256、每项检查状态、门禁版本，换机也能复算同一次判定。
 
 `--report` 触发 **CVE 纪律检查**（铁律 7 的机械化落实）：扫描报告里是否把版本命中的组件 CVE 写成了漏洞断言（V1）、是否混进了「漏洞统计」表（V2）、是否被打了 P0-P3/CVSS（V3）、**同一 `CVE-ID` 是否同时出现在 ④ 与 ⑥（V4：应是「移动」而非「复制」）**、以及有没有单列「组件风险（未验证）」区块（V0）。命中即为门禁失败，退出码 1。
 
@@ -715,10 +727,10 @@ uv run scripts/coverage_gate.py \
 门禁判据（任一不满足则**不得出报告**，先补审）：
 - T1 文件覆盖率 **100%**（每个文件必须有审计结论或明确的 `NOT_FOUND`）
 - T2 文件覆盖率 ≥ 95%，未审文件必须列出理由
-- 每条 `candidate` 必须有明确处置：升 `validated` / 降 `NOT_FOUND` / 标记「证据不足，待动态验证」
+- 每条 `candidate` 必须有**结构化 `status`**，取值来自固定枚举：`hypothesis` / `confirmed` / `not_reproduced` / `not_applicable` / `pending_static_analysis` / `pending_dynamic_validation` / `blocked_by_environment`（另兼容旧写法 `validated` / `not_found`）。**「结论正文里出现过这个 ID」不算处置**；重复 ID、未知状态、`confirmed` 但缺 `evidence` 都判失败；候选清单为空需显式 `--allow-empty-candidates`，文件缺失直接判失败
 - 所有 `promotions` 都要有对应的升级后分析
 - 审阅清单一致：无 G1（声明未勾）/ G2（计划未声明）/ G3（勾选无结论）
-- 报告完整性：9 个必填字段齐全（见 5.3）
+- 报告完整性：9 个必填字段齐全（见 5.3）；**缺整个「漏洞详情」区块判失败**（不能因为「0 条待检查」而空集通过）
 - 入口级覆盖（G4）：适用文件须有完整入口枚举 + 逐入口结论
 - 绕过假设（G5）：凡「有防护 / 不可利用」断言必须附 B1–B12 矩阵
 - 跨请求溯源（G6）：持久化存储来源的 finding 必须声明写入面
@@ -844,9 +856,9 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 |---|---|
 | `scripts/fw_triage.py` | Phase 0 / 2：固件度量、熵扫描、ELF 加固画像、SUID 面、Tier 分层、EALB 预算 |
 | `scripts/sink_scan.py` | Phase 3 Layer 1：多语言危险模式扫描（数据驱动规则） |
-| `scripts/coverage_gate.py` | Phase 5：覆盖率门禁校验 + **CVE 纪律检查**（`--report`）+ **审阅清单三方对齐**（`--review-list`）+ **G4 入口级覆盖**（`--entrypoints`）+ **G5 绕过矩阵**（`--bypass-check`）+ **G6 跨请求污点溯源**（`--cross-request`）+ **类型→Base 命中**（`--type-base`）+ **自动修复计划**（`--auto-recover`） |
+| `scripts/coverage_gate.py` | Phase 5：覆盖率门禁校验 + **CVE 纪律检查**（`--report`）+ **审阅清单三方对齐**（`--review-list`）+ **G4 入口级覆盖**（`--entrypoints`）+ **G5 绕过矩阵**（`--bypass-check`）+ **G6 跨请求污点溯源**（`--cross-request`）+ **类型→Base 命中**（`--type-base`）+ **自动修复计划**（`--auto-recover`）+ **`--profile {light,standard,strict}` 档位与 `gate-config.json` 执行台账** |
 | `scripts/entrypoints_init.py` | Phase 3/5：从 `02-tiering.json` 生成入口枚举骨架 `entrypoints.json`（G4 的输入） |
-| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证上面脚本的判据（10 组） |
+| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证上面脚本的判据，并把**文档示例命令与 CLI 参数表对拍**（14 组 / 101 条断言，结尾自报总数） |
 
 脚本都只用 Python 标准库，无第三方依赖，Windows / Linux / macOS 均可运行。用 `uv` 管理环境（`uv run` 自动建临时环境；无 `uv` 时直接 `python scripts/xxx.py` 亦可）。安装后建议先跑一次自检：
 

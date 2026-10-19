@@ -5,7 +5,7 @@
   <img alt="python" src="https://img.shields.io/badge/python-3.8%2B%20stdlib%20only-3776AB.svg?logo=python\&logoColor=white">  
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg">  
   <img alt="files" src="https://img.shields.io/badge/package-19%20files%20%C2%B7%208883%20lines-informational.svg">  
-  <img alt="selftest" src="https://img.shields.io/badge/selftest-108%20assertions%20passing-brightgreen.svg">  
+  <img alt="selftest" src="https://img.shields.io/badge/selftest-101%20assertions%20passing-brightgreen.svg">  
   <img alt="agent" src="https://img.shields.io/badge/type-Agent%20Skill-7B42BC.svg">  
 </p>
 
@@ -187,7 +187,9 @@ npx skills add https://github.com/DroidKali/iot-firmware-vuln-hunting --agent '*
 uv run scripts/selftest.py
 ```
 
-脚本会用纯 Python 手工构造合法 ELF64 与合成 rootfs，端到端跑通另外四个脚本，覆盖 **12 组 / 108 条断言**，其中包含「门禁必须拦下坏报告」的负向用例。看到全绿即安装成功。
+脚本会用纯 Python 手工构造合法 ELF64 与合成 rootfs，端到端跑通另外四个脚本，覆盖 **14 组 / 101 条断言**，其中包含「门禁必须拦下坏报告」的负向用例。断言总数由脚本自己在结尾打印，不需要去数日志。看到全绿即安装成功。
+
+最后一组 `[14/14]` 把**文档当被测对象**：抓出 `README.md` / `SKILL.md` / `references/` / `assets/` 里每条 `scripts/*.py` 示例命令，逐个核对命令里出现的 `--flag` 是否真存在于脚本 `--help`，并检查布尔开关后面没跟取值。这条守卫来自一次真实事故——文档把 `store_true` 的 `--tier` 写成 `--tier <rootfs>`，照抄必然报错，而所有单元测试都是绿的。
 
 ### 2. 一次完整审计
 
@@ -205,8 +207,12 @@ moria -e fw-audit/$TARGET/01-extract firmware.bin     # 命中 squashfs/UBI/JFFS
 #   无法识别时兜底：unblob --report 01-manifest.json -e fw-audit/$TARGET/01-extract firmware.bin
 
 # Phase 2 — 分层与分配（Tier 规则 + EALB 预算）
-uv run scripts/fw_triage.py --tier fw-audit/$TARGET/01-extract \
-    --out fw-audit/$TARGET/02-tiering.json
+# 注意：--rootfs 才是路径参数，--tier 是布尔开关；--plan 才会产出 03-audit-plan.md
+uv run scripts/fw_triage.py \
+    --rootfs fw-audit/$TARGET/01-extract \
+    --tier --budget 800 \
+    --out  fw-audit/$TARGET/02-tiering.json \
+    --plan fw-audit/$TARGET/03-audit-plan.md
 
 # Phase 3 Layer 1 — 机器扫广度（不使用 LLM）
 uv run scripts/sink_scan.py fw-audit/$TARGET/01-extract \
@@ -215,17 +221,22 @@ uv run scripts/sink_scan.py fw-audit/$TARGET/01-extract \
 
 #   …… Phase 3 Layer 2/3、Phase 4 动态验证详见 SKILL.md ……
 
-# Phase 5 — 覆盖率门禁 + CVE 纪律检查
+# Phase 5 — 正式审计门禁（strict 档位）
 uv run scripts/coverage_gate.py \
+    --profile     strict \
     --plan        fw-audit/$TARGET/03-audit-plan.md \
     --verified    fw-audit/$TARGET/30-findings-verified.md \
+    --candidates  fw-audit/$TARGET/20-findings-candidates.jsonl \
     --review-list fw-audit/$TARGET/25-review-list.md \
     --tiering     fw-audit/$TARGET/02-tiering.json \
+    --entrypoints fw-audit/$TARGET/entrypoints.json \
     --report      fw-audit/$TARGET/report.md \
     --out         fw-audit/$TARGET/40-coverage.md
 ```
 
 **退出码 0 = 可出报告；非 0 = 有缺口**，缺口清单写入 `40-coverage.md` 的「待补审」节，回去补审再跑。
+
+`--profile strict` 会强制启用全部高级检查（G4/G5/G6/Base），并要求 `--candidates`、`--review-list`、`--report`、`--entrypoints` 齐全；**任何必需检查未执行都判失败**，并在 `40-coverage.gate-config.json` 里记录本次到底跑了哪些检查、输入哈希与版本。
 
 ---
 
@@ -236,10 +247,10 @@ uv run scripts/coverage_gate.py \
 | 脚本                         | 行数   | 用途                                                              |
 | -------------------------- | ---- | --------------------------------------------------------------- |
 | `scripts/fw_triage.py`     | 852  | Phase 0 / 2：固件度量、熵扫描、ELF 加固画像、SUID 面、Tier 分层、EALB 预算            |
-| `scripts/coverage_gate.py` | 1345 | Phase 5：覆盖率门禁 + CVE 纪律检查（`--report`，V0–V4）+ 审阅清单三方对齐（`--review-list`）+ G4 入口级覆盖 + G5 绕过矩阵 + **G6 跨请求污点溯源** + 类型→Base + 自动修复计划 |
-| `scripts/sink_scan.py`     | 540  | Phase 3 Layer 1：多语言危险模式扫描（正则初筛 + ast-grep 结构级二次过滤；引擎缺失自动回退并记录）                               |
-| `scripts/entrypoints_init.py` | 139 | Phase 2/5：从 `02-tiering.json` 生成 `entrypoints.json` 骨架（`--merge` 保留已手填数据） |
-| `scripts/selftest.py`      | 642  | 安装自检：合成固件与 rootfs，端到端验证上面四个脚本的判据（12 组 / 108 条断言）                 |
+| `scripts/coverage_gate.py` | 1657 | Phase 5：覆盖率门禁 + CVE 纪律检查（`--report`，V0–V4）+ 审阅清单三方对齐（`--review-list`）+ G4 入口级覆盖 + G5 绕过矩阵 + **G6 跨请求污点溯源** + 类型→Base + 自动修复计划 + **`--profile strict` 档位** + **`gate-config.json` 执行台账** |
+| `scripts/sink_scan.py`     | 726  | Phase 3 Layer 1：多语言危险模式扫描（正则初筛 + ast-grep 结构级二次过滤；引擎缺失自动回退并记录；**分块流式读取 + `scan_integrity` 完整性台账**）                               |
+| `scripts/entrypoints_init.py` | 139 | Phase 3 / 5：从 `02-tiering.json` 生成 `entrypoints.json` 骨架（`--merge` 保留已手填数据） |
+| `scripts/selftest.py`      | 883  | 安装自检：合成固件与 rootfs，端到端验证上面四个脚本的判据 + **文档与 CLI 一致性**（14 组 / 101 条断言，结尾自报总数）                 |
 
 ### 覆盖率门禁判据
 
@@ -247,7 +258,7 @@ uv run scripts/coverage_gate.py \
 
 - T1 文件覆盖率 **100%**（每个文件必须有审计结论或明确的 `NOT_FOUND`）
 - T2 文件覆盖率 **≥ 95%**，未审文件必须列出理由
-- 每条 `candidate` 必须有明确处置：升 `validated` / 降 `NOT_FOUND` / 标记「证据不足，待动态验证」
+- 每条 `candidate` 必须有**结构化 `status`**，取值来自固定枚举：`hypothesis` / `confirmed` / `not_reproduced` / `not_applicable` / `pending_static_analysis` / `pending_dynamic_validation` / `blocked_by_environment`（另兼容旧写法 `validated` / `not_found`）。**「结论里提到过这个 ID」不算处置**；重复 ID、未知状态、`confirmed` 却无 `evidence` 均判失败；空清单需显式 `--allow-empty-candidates`
 - 所有 `promotions`（Tier 动态提升）都要有对应的升级后分析
 - 审阅清单一致：无 G1（声明未勾）/ G2（计划未声明）/ G3（勾选无结论）
 - **G4 入口级覆盖**（`--entrypoints`）：服务型大二进制的 handler 需枚举完整，且每个入口有处置结论
@@ -257,6 +268,18 @@ uv run scripts/coverage_gate.py \
 - 报告完整性：9 个必填字段齐全
 
 `--report` 另外触发 CVE 纪律检查 **V0–V4**：缺「组件风险（未验证）」区块（V0）/ 版本命中写成漏洞断言（V1）/ CVE 混进「漏洞统计」表（V2）/ 未验证的组件 CVE 被打了 P0–P3 或 CVSS（V3）/ **同一 CVE-ID 同时出现在 ④ 与 ⑥（V4：应「移动」而非「复制」）**。
+
+### 门禁档位与 SKIPPED 语义
+
+| 档位 | 必需输入 | SKIPPED 的处理 |
+| --- | --- | --- |
+| `light` | `--plan --verified` | 仅提示 |
+| `standard`（默认） | 同上 | 仅提示，**但报告里逐项列出** |
+| `strict` | 另需 `--candidates --review-list --report --entrypoints` | **必需检查的 SKIPPED 判为失败** |
+
+每项检查输出 `PASS` / `FAIL` / `SKIPPED` 三态，且 `SKIPPED` 明确表示「本次没有执行」而不是「通过」。
+
+> **为什么不只看退出码。** `exit 0` 曾经只意味着「已执行的检查都过了」——高级检查没启用时它们根本不出现在报告里，于是「脚本支持 G5」被误读成「本次跑了 G5 且通过了」。现在未执行的检查一律以 `SKIPPED` 出现在判据表里，`strict` 还会把它们判失败。`gate-config.json` 同步记录档位、输入 SHA-256、每项检查状态与门禁版本，换台机器也能复算同一次判定。
 
 ### 静态扫描规则库
 
@@ -274,6 +297,26 @@ uv run scripts/coverage_gate.py \
 > **二进制规则与源码规则严格分离。** 剥离符号的 ELF `.dynstr` 里只有裸符号名（`system` 而非 `system(`），套用源码正则 `system\s*\(` 会**系统性漏检所有 PLT 调用**。因此单开一套 `P0-B-*` 规则用词边界匹配，并在输出里把命中类型标为 `binary-string`——它只说明「二进制里有这个字符串」，不等于「代码调用了它并传了用户输入」。
 
 > **脚本 / web 目标的二次过滤（v1.2 起）。** 正则分不清「代码」与「注释 / 字符串」（`# eval "$x"`、`echo "system(id)"`、`// system($x)` 都会误报）。P0/P1 的 script/web 规则额外带 `structural` 字段：对**正则已命中**的文件用 `ast-grep` 按语法树确认，结构否定即判为误报丢弃。引擎缺失或语言不可判时**自动回退正则，并记录进 `engine_status.fallbacks`**（不静默）。三条要点：只作二次过滤、对剥离符号的 ELF **不适用**、**不要把反编译伪代码喂给它**（IDA 伪代码不是合法 C）。判据见 `references/atomic-capabilities.md` §3.3，实现见 §5.2。
+
+### 扫描完整性（`scan_integrity`）
+
+`sink_scan.py` 不再「读个文件头就当扫完」。二进制按 `--read-chunk-mb`（默认 4 MiB）**分块流式读取**，跨块边界的字符串用 carry 缓冲拼接、不会漏检；每次输出都带完整性台账：
+
+```json
+"scan_integrity": {
+  "complete": false,
+  "files_scanned": 41, "files_skipped": 2, "files_partial": 1,
+  "skip_reason_counts": {"too-large": 2},
+  "skipped_files": [{"file": "usr/sbin/httpd", "reason": "too-large",
+                     "bytes_total": 20971520, "limit_bytes": 100663296}],
+  "partial_files": [{"file": "www/big.js", "truncation_reason": "line-limit",
+                     "lines_total": 400001, "lines_scanned": 400000}]
+}
+```
+
+四类跳过原因分开记：`skip-dir`（设计如此）/ `excluded`（调用方排除）/ `too-large`（能力边界）/ `stat-failed`（异常）。**`complete: false` 时不得在报告里声称「已完整扫描」**——直接把 `scan_integrity` 贴进报告附录即可。
+
+> 旧实现只 `f.read(8 << 20)`，20 MB 的 CGI 二进制后半段一个字符串都扫不到，输出里还看不出来。回归测试 `[13/14]` 用 9.5 MiB 偏移与跨块边界两个样本把这条钉死。
 
 ---
 

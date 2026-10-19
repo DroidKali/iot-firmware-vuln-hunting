@@ -14,9 +14,11 @@ selftest.py — 自检：生成合成固件 + 合成 rootfs，端到端验证三
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import random
+import re
 import shutil
 import struct
 import subprocess
@@ -26,9 +28,13 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 FAILS: list = []
+TOTAL = 0          # 实际执行的断言数：由脚本自己报，避免文档里的数字靠数日志漂移
+NGROUPS = 14       # 组数：与各处 [N/14] 表头一致，末尾会自校验，防止「13 组」再次漂移
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
+    global TOTAL
+    TOTAL += 1
     print(("  PASS  " if ok else "  FAIL  ") + name + (f"  ({detail})" if detail else ""))
     if not ok:
         FAILS.append(name)
@@ -164,6 +170,66 @@ def run(args: list) -> subprocess.CompletedProcess:
     return subprocess.run([PY] + args, capture_output=True, text=True)
 
 
+# ------------------------------------------------- 文档 ↔ CLI 一致性（第 14 组）
+# 动机：文档里的示例命令曾把布尔开关 `--tier` 当作路径参数传（`--tier <rootfs>`），
+# 命令照抄就报错，而单元测试全绿——二进制判据测不出「文档写错了」。
+# 这里把文档当被测对象：命令里出现的开关必须在脚本 CLI 里真实存在，
+# 且布尔开关后面不得跟取值。
+
+CLI_FLAG_RE = re.compile(r"(?<![\w-])(--[a-z0-9][a-z0-9-]*)")
+
+
+def cli_flags(script: str) -> set:
+    """从脚本的 --help 抽取它真正支持的 --flag 集合。"""
+    return set(CLI_FLAG_RE.findall(run([script, "--help"]).stdout or ""))
+
+
+def bool_flags(script: str) -> set:
+    """静态抽取 action=store_true / store_false 的开关——这类开关不接取值。"""
+    try:
+        tree = ast.parse(open(script, encoding="utf-8").read())
+    except (OSError, SyntaxError):
+        return set()
+    out = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "add_argument"):
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Constant):
+            continue
+        flag = node.args[0].value
+        if not isinstance(flag, str) or not flag.startswith("--"):
+            continue
+        for kw in node.keywords:
+            if (kw.arg == "action" and isinstance(kw.value, ast.Constant)
+                    and kw.value.value in ("store_true", "store_false")):
+                out.add(flag)
+    return out
+
+
+def doc_commands() -> list:
+    """抽出所有文档里 invoke scripts/*.py 的行（续行符已拼接）。"""
+    root = os.path.dirname(HERE)
+    paths = [os.path.join(root, "README.md"), os.path.join(root, "SKILL.md")]
+    for sub in ("references", "assets"):
+        d = os.path.join(root, sub)
+        if os.path.isdir(d):
+            paths += [os.path.join(d, f) for f in sorted(os.listdir(d))
+                      if f.endswith(".md")]
+    out = []
+    for p in paths:
+        if not os.path.isfile(p):
+            continue
+        text = open(p, encoding="utf-8").read()
+        for block in re.findall(r"```bash\n(.*?)```", text, re.S):
+            for line in re.sub(r"\\\n\s*", " ", block).splitlines():
+                m = re.search(r"scripts/([A-Za-z0-9_]+\.py)", line)
+                if m:
+                    out.append((os.path.basename(p), m.group(1), line))
+    return out
+
+
 def _template_clean() -> bool:
     """报告模板本身不应触发 CVE 纪律违规（防误报）。"""
     tpl = os.path.join(os.path.dirname(HERE), "assets", "report-template.md")
@@ -210,7 +276,7 @@ def main() -> int:
         with open(p, "w", encoding="utf-8", newline="\n") as f:
             f.write(txt)
 
-    print("\n[1/12] fw_triage.py — 度量 / 加固画像 / 分层")
+    print("\n[1/14] fw_triage.py — 度量 / 加固画像 / 分层")
     r = run([os.path.join(HERE, "fw_triage.py"), img, "--rootfs", root, "--tier",
              "--budget", "800", "--out", metrics, "--plan", plan, "--pretty"])
     check("fw_triage 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
@@ -238,7 +304,7 @@ def main() -> int:
     check("T3 含 www/index.html", "www/index.html" in set(t["t3_list"]))
     check("EALB > 0", t["ealoc_total"] > 0, str(t["ealoc_total"]))
 
-    print("\n[2/12] sink_scan.py — Layer 1 危险模式扫描")
+    print("\n[2/14] sink_scan.py — Layer 1 危险模式扫描")
     r = run([os.path.join(HERE, "sink_scan.py"), root, "--json", sinks])
     check("sink_scan 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
     if r.returncode != 0:
@@ -252,19 +318,19 @@ def main() -> int:
     check("etc/passwd 不再误报 P1-S-020", ("P1-S-020", "etc/passwd") not in key)
     check("文档目录被跳过", not any(f["file"].startswith("usr/share/doc") for f in sd["findings"]))
 
-    print("\n[3/12] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
+    print("\n[3/14] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vpart, "--tiering", tiering])
     check("不完整输入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
 
-    print("\n[4/12] coverage_gate.py — 覆盖率门禁（完整应通过）")
+    print("\n[4/14] coverage_gate.py — 覆盖率门禁（完整应通过）")
     out = os.path.join(base, "40-coverage.md")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vfull, "--tiering", tiering, "--out", out])
     check("完整输入 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("门禁报告已生成", os.path.isfile(out))
 
-    print("\n[5/12] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
+    print("\n[5/14] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
     bad_rep = os.path.join(base, "report-bad.md")
     with open(bad_rep, "w", encoding="utf-8") as fh:
         fh.write(
@@ -288,6 +354,17 @@ def main() -> int:
         fh.write(
             "## 1. 执行摘要\n\n### 漏洞统计\n\n| 优先级 | confirmed |\n|---|---|\n"
             "| P0 | 1 |\n\n- 组件风险（未验证，不计入合计）：cve-hit 1 条\n\n"
+            "## 4. 漏洞详情\n\n"
+            "### F-001 · CGI 未认证命令注入\n\n"
+            "- 类型: 命令注入\n"
+            "- 位置: usr/sbin/httpd @0x2a30\n"
+            "- 优先级: P0\n"
+            "- 置信度: CONFIRMED\n"
+            "- CVSS 3.1: 9.8\n"
+            "- Source: HTTP GET /cgi-bin/ping?ip=\n"
+            "- Sink: system() @0x2a30\n"
+            "- 完整调用链: do_ping -> sprintf -> system\n"
+            "- 证据: 0x2a30 bl system\n\n"
             "## 6. 组件风险（未验证）\n\n"
             "> 本节不是漏洞清单，措辞统一为「疑似…尚未验证可达性」。\n\n"
             "| CVE | 组件@版本 | 待验证项 |\n|---|---|---|\n"
@@ -341,7 +418,7 @@ def main() -> int:
     check("⑥ 保留指针行（移动语义）→ 退出码 0", r.returncode == 0,
           r.stdout.strip()[-200:])
 
-    print("\n[6/12] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
+    print("\n[6/14] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
     review_bad = os.path.join(base, "25-review-list.md")
     with open(review_bad, "w", encoding="utf-8") as fh:
         fh.write("- [x] `www/cgi-bin/ping.cgi`\n"     # 有结论 → OK
@@ -373,7 +450,7 @@ def main() -> int:
     check("审阅清单一致 → 退出码 0", r.returncode == 0,
           r.stdout.strip()[-160:])
 
-    print("\n[7/12] coverage_gate.py — 报告 9 必填字段校验")
+    print("\n[7/14] coverage_gate.py — 报告 9 必填字段校验")
     f_bad = os.path.join(base, "report-fields-bad.md")
     with open(f_bad, "w", encoding="utf-8") as fh:
         fh.write(
@@ -409,7 +486,7 @@ def main() -> int:
     check("9 字段齐全 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("报告模板字段不误报", _template_fields_clean())
 
-    print("\n[8/12] coverage_gate.py — G4 入口级覆盖（文件级 100% ≠ 入口级 100%）")
+    print("\n[8/14] coverage_gate.py — G4 入口级覆盖（文件级 100% ≠ 入口级 100%）")
     tj_g4 = os.path.join(base, "02-tiering-g4.json")
     with open(tj_g4, "w", encoding="utf-8") as fh:
         json.dump({"rootfs_analysis": {"tiering": {"shards": [{"items": [
@@ -451,7 +528,7 @@ def main() -> int:
              "--entrypoints", ep_ok, "--out", os.path.join(base, "40-g4c.md")])
     check("入口枚举 + 全部处置 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
 
-    print("\n[9/12] coverage_gate.py — G5 绕过矩阵（「有防护」≠「防护有效」）")
+    print("\n[9/14] coverage_gate.py — G5 绕过矩阵（「有防护」≠「防护有效」）")
     vp_bad = os.path.join(base, "30-claim-bad.md")
     with open(vp_bad, "w", encoding="utf-8") as fh:
         fh.write("# 结论\n\n## F-001 · x\n\n- 影响: 已鉴权，不可利用\n")
@@ -481,7 +558,7 @@ def main() -> int:
     check("G5 端到端接入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
     check("检出绕过矩阵缺失", "绕过矩阵完备（G5）" in open(out_g5, encoding="utf-8").read())
 
-    print("\n[10/12] coverage_gate.py — G6 跨请求污点溯源（持久化来源须声明写入面）")
+    print("\n[10/14] coverage_gate.py — G6 跨请求污点溯源（持久化来源须声明写入面）")
     _F = ("- **类型**：命令注入\n- **位置**：`usr/sbin/httpd:0x1`\n- **优先级**：P1\n"
           "- **置信度**：CONFIRMED\n- **CVSS 3.1**：`AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H` = 9.8\n"
           "{src}- **Sink**：system()\n- **完整调用链**：1. a @0x1\n- **证据**：`[E1]` disasm\n")
@@ -516,7 +593,7 @@ def main() -> int:
              os.path.join(base, "40-g6b.md")])
     check("声明写入面端到端 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
 
-    print("\n[11/12] coverage_gate.py — G1/G2/G3 自动修复 + 类型→Base 命中")
+    print("\n[11/14] coverage_gate.py — G1/G2/G3 自动修复 + 类型→Base 命中")
     out_rec = os.path.join(base, "40-recover.md")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vpart, "--tiering", tiering,
@@ -550,7 +627,7 @@ def main() -> int:
     check("可映射类型 → 不报",
           not _cg.check_type_base(rep_mapped, base_md)["unmapped"])
 
-    print("\n[12/12] sink_scan.py — 结构级二次过滤（正则初筛 → 结构确认 / 否定 / 回退）")
+    print("\n[12/14] sink_scan.py — 结构级二次过滤（正则初筛 → 结构确认 / 否定 / 回退）")
     if HERE not in sys.path:
         sys.path.insert(0, HERE)
     import sink_scan as _ss  # noqa
@@ -581,7 +658,9 @@ def main() -> int:
     has_eng = {"ast-grep": os.path.join(sf, "fake-engine"), "semgrep": None}
 
     def sfile(path: str, rel: str, rules, engines, enabled, fb, st):
-        return _ss.scan_file(path, rel, rules, thr, [], [], 2, engines, fb, st, enabled, 5)
+        res, _rec = _ss.scan_file(path, rel, rules, thr, [], [], 2, engines, fb, st,
+                                  enabled, 5)
+        return res
 
     a = sfile(p_real, "real.sh", rs, no_eng, False, [], {})
     b = sfile(p_fake, "fake.sh", rs, no_eng, False, [], {})
@@ -626,11 +705,173 @@ def main() -> int:
     finally:
         _ss.structural_match = _orig_sm
 
+    # ── 13. 扫描完整性 + 门禁严格性（改进计划 §3 / §4 / §6 的回归）──────────
+    print("\n[13/14] 扫描完整性与门禁严格性")
+
+    sz = os.path.join(base, "scanint")
+    os.makedirs(sz, exist_ok=True)
+    with open(os.path.join(sz, "big.bin"), "wb") as fh:
+        fh.write(b"\x00" * (9 * 1024 * 1024 + 512 * 1024))   # 8 MiB 之后
+        fh.write(b"\x00system\x00strcpy\x00")
+        fh.write(b"\x00" * 1024)
+    with open(os.path.join(sz, "cross.bin"), "wb") as fh:
+        fh.write(b"\x00" * (4 * 1024 * 1024 - 3))            # 起点距 4 MiB 边界 3 字节
+        fh.write(b"strcpy\x00")
+        fh.write(b"\x00" * 4096)
+
+    sj = os.path.join(sz, "out.json")
+    run([os.path.join(HERE, "sink_scan.py"), sz, "--json", sj])
+    sd = json.load(open(sj, encoding="utf-8"))
+    files = {f["file"] for f in sd["findings"]}
+    check("sink_scan：8 MiB 之后的危险串仍被扫到", "big.bin" in files, sorted(files))
+    check("sink_scan：跨块边界的字符串不漏检", "cross.bin" in files)
+    check("sink_scan：完整扫描时 complete=true",
+          sd["scan_integrity"]["complete"] is True,
+          json.dumps(sd["scan_integrity"]["skip_reason_counts"], ensure_ascii=False))
+
+    sj2 = os.path.join(sz, "out2.json")
+    run([os.path.join(HERE, "sink_scan.py"), sz, "--max-file-mb", "1",
+         "--json", sj2])
+    si = json.load(open(sj2, encoding="utf-8"))["scan_integrity"]
+    check("sink_scan：超大文件跳过记入 too-large",
+          si["skip_reason_counts"].get("too-large") == 2,
+          json.dumps(si["skip_reason_counts"], ensure_ascii=False))
+    check("sink_scan：不完整扫描不声称 complete", si["complete"] is False)
+
+    # ── 13.2 候选处置：结构化 vs 文本 ────────────────────────────────────────
+    gd = os.path.join(base, "gatev2")
+    os.makedirs(gd, exist_ok=True)
+
+    def _gw(name: str, text: str) -> str:
+        p = os.path.join(gd, name)
+        with open(p, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        return p
+
+    gplan = _gw("plan.md", "# 计划\n\n### A\n\n| 状态 | 文件 | Tier |\n|---|---|---|\n"
+                           "| [ ] | `usr/sbin/httpd` | T1 |\n"
+                           "| [ ] | `etc/init.d/rcS` | T1 |\n")
+    gver = _gw("verified.md", "# 结论\n\n## F-001 · x\n\n- 文件: `usr/sbin/httpd`\n\n"
+                             "## NOT_FOUND · y\n\n- 文件: `etc/init.d/rcS`\n")
+    gbase = ["--plan", gplan, "--verified", gver]
+
+    ok_cand = _gw("ok.jsonl", json.dumps(
+        {"id": "C-001", "status": "confirmed", "evidence": ["0x2a30"]}) + "\n")
+    dup_cand = _gw("dup.jsonl", json.dumps(
+        {"id": "C-001", "status": "confirmed", "evidence": ["x"]}) + "\n"
+        + json.dumps({"id": "C-001", "status": "not_applicable"}) + "\n")
+    bad_cand = _gw("bad.jsonl", json.dumps(
+        {"id": "C-009", "status": "looks-fine"}) + "\n")
+    noev_cand = _gw("noev.jsonl", json.dumps(
+        {"id": "C-010", "status": "confirmed"}) + "\n")
+    empty_cand = _gw("empty.jsonl", "")
+
+    check("候选：结构化合法 → 通过",
+          run([os.path.join(HERE, "coverage_gate.py")] + gbase
+              + ["--candidates", ok_cand]).returncode == 0)
+    check("候选：重复 ID → 拒绝",
+          run([os.path.join(HERE, "coverage_gate.py")] + gbase
+              + ["--candidates", dup_cand]).returncode != 0)
+    check("候选：未知状态 → 拒绝",
+          run([os.path.join(HERE, "coverage_gate.py")] + gbase
+              + ["--candidates", bad_cand]).returncode != 0)
+    check("候选：confirmed 无证据 → 拒绝",
+          run([os.path.join(HERE, "coverage_gate.py")] + gbase
+              + ["--candidates", noev_cand]).returncode != 0)
+    check("候选：空清单 → 拒绝",
+          run([os.path.join(HERE, "coverage_gate.py")] + gbase
+              + ["--candidates", empty_cand]).returncode != 0)
+    check("候选：空清单 + 显式 --allow-empty-candidates → 通过",
+          run([os.path.join(HERE, "coverage_gate.py")] + gbase
+              + ["--candidates", empty_cand,
+                 "--allow-empty-candidates"]).returncode == 0)
+    check("候选：文件不存在 → 拒绝（不按零候选放过）",
+          run([os.path.join(HERE, "coverage_gate.py")] + gbase
+              + ["--candidates", os.path.join(gd, "nope.jsonl")]).returncode != 0)
+
+    # ── 13.3 profile：未执行的检查必须可见 ───────────────────────────────────
+    gmd = os.path.join(gd, "40.md")
+    r = run([os.path.join(HERE, "coverage_gate.py")] + gbase + ["--out", gmd])
+    txt = open(gmd, encoding="utf-8").read()
+    check("standard：未给 --candidates 时 exit 0 但标 SKIPPED",
+          r.returncode == 0 and "SKIPPED" in txt)
+    check("standard：结论明确提示仍有检查未执行",
+          "未执行" in txt or "SKIPPED" in txt)
+    check("strict：必需检查未执行 → 失败",
+          run([os.path.join(HERE, "coverage_gate.py")] + gbase
+              + ["--profile", "strict"]).returncode != 0)
+
+    # ── 13.4 报告缺「漏洞详情」区块不得空集通过 ──────────────────────────────
+    nos = _gw("report-nosection.md", "# 报告\n\n## 1. 摘要\n\n无。\n")
+    check("报告缺「漏洞详情」区块 → 拒绝",
+          run([os.path.join(HERE, "coverage_gate.py")] + gbase
+              + ["--report", nos]).returncode != 0)
+
+    # ── 13.5 gate-config.json 记录执行清单 ──────────────────────────────────
+    cfg = os.path.join(gd, "gate-config.json")
+    run([os.path.join(HERE, "coverage_gate.py")] + gbase
+        + ["--candidates", ok_cand, "--out", gmd, "--gate-config", cfg])
+    gc = json.load(open(cfg, encoding="utf-8")) if os.path.isfile(cfg) else {}
+    check("gate-config.json 生成并含档位与检查清单",
+          gc.get("profile") == "standard" and len(gc.get("checks") or []) >= 10,
+          f"{len(gc.get('checks') or [])} 项")
+    check("gate-config.json 记录输入哈希",
+          bool((gc.get("inputs") or {}).get("plan", {}).get("sha256")))
+    check("gate-config.json 区分 executed 与 total",
+          (gc.get("summary") or {}).get("executed", -1)
+          < (gc.get("summary") or {}).get("total", -1))
+
+    # ── 14. 文档 ↔ CLI 一致性：文档里的命令必须真能跑 ────────────────────────
+    print(f"\n[14/{NGROUPS}] 文档 ↔ CLI 一致性（命令里出现的开关必须真实存在）")
+    cmds = doc_commands()
+    root = os.path.dirname(HERE)
+
+    missing_script = sorted({s for _, s, _ in cmds
+                             if not os.path.isfile(os.path.join(HERE, s))})
+    check("文档引用的 scripts/*.py 全部存在", not missing_script,
+          f"{len(cmds)} 条命令" if not missing_script else str(missing_script))
+
+    flag_cache: dict = {}
+    bad_flags = []
+    for doc, script, line in cmds:
+        if script not in flag_cache:
+            flag_cache[script] = cli_flags(os.path.join(HERE, script))
+        unknown = set(CLI_FLAG_RE.findall(line)) - flag_cache[script]
+        if unknown:
+            bad_flags.append(f"{doc}:{script} {sorted(unknown)}")
+    check("文档里的 --flag 均存在于对应脚本 CLI", not bad_flags,
+          "" if not bad_flags else "; ".join(bad_flags[:3]))
+
+    SHELL_TOKENS = {"&&", "||", "|", ";", "\\", ">", "<", ">>"}
+    misused = []
+    for doc, script, line in cmds:
+        script_path = os.path.join(HERE, script)
+        bl = bool_flags(script_path)
+        toks = line.split()
+        for i, t in enumerate(toks):
+            if t in bl and i + 1 < len(toks):
+                nxt = toks[i + 1]
+                if not nxt.startswith("-") and nxt not in SHELL_TOKENS:
+                    misused.append(f"{doc}: {t} {nxt}")
+    check("布尔开关未被当成带值参数（如 --tier <path>）", not misused,
+          "" if not misused else "; ".join(misused[:3]))
+
+    for name in ("README.md", "SKILL.md"):
+        t = open(os.path.join(root, name), encoding="utf-8").read() \
+            if os.path.isfile(os.path.join(root, name)) else ""
+        check(f"{name}：Phase 5 门禁示例用 --profile strict",
+              "--profile strict" in t)
+        check(f"{name}：分层示例同时给出 --rootfs / --tier / --plan",
+              all(k in t for k in ("--rootfs", "--tier", "--plan")))
+
+    n_hdr = len(re.findall(r'print\(\s*f?"\\n\[', open(__file__, encoding="utf-8").read()))
+    check("组数常量与表头数量一致", n_hdr == NGROUPS, f"表头 {n_hdr} / 常量 {NGROUPS}")
+
     print()
     if FAILS:
-        print(f"[selftest] 失败 {len(FAILS)} 项: {FAILS}")
+        print(f"[selftest] 失败 {len(FAILS)}/{TOTAL} 项: {FAILS}")
     else:
-        print("[selftest] 全部通过")
+        print(f"[selftest] 全部通过（{TOTAL} 条断言 / {NGROUPS} 组）")
     if not args.keep and not args.workdir:
         shutil.rmtree(base, ignore_errors=True)
     else:
