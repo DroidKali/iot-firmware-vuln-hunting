@@ -1,0 +1,280 @@
+{
+  "schema": "ipc-functions/1.0",
+  "version": "1.0",
+  "description": "Linux 物联网固件的进程间通信（IPC）原语表——跨请求/跨进程污点分析的词表。按『机制』分组，每种机制声明写端（set）、读端（get）、键/值的参数位置、是否承载控制消息（control）以及是否为持久化存储（persistent）。表来源：Bridge（IEEE S&P'26）artifact 的 IPC_control_set_function_dict / IPC_control_get_function_dict 与 SecurityCheck.sinks，并用各厂商公开固件的符号补齐。用法见 references/high-order-taint.md。判据要点：键的位置（key_arg）决定能否把『写』与『读』配成一对；同一个键在写端与读端的字面量不一致（含拼接生成）时必须先做常量恢复，否则配对失败——这就是 Bridge 用 OD-ICP 解决的问题。",
+  "conventions": {
+    "arg_index_base": 0,
+    "note": "arg_map 中的数字是参数下标（0 起）。'key' 为存储键/端口/IP，'value' 为被写入的用户可控数据，'int' 为被写入的整数。不确定处标 null 并给出 reason，不要猜。"
+  },
+  "mechanisms": {
+    "nvram": {
+      "persistent": true,
+      "control": true,
+      "description": "非易失性存储。最常见的跨请求污点载体：请求 1 写键，请求 2 读键进 sink。不同厂商的 nvram_set 参数顺序不一致，需按 store_type 区分。",
+      "store_type_variants": {
+        "nvram_0": "nvram_set(key, value)——Realtek/D-Link 常见",
+        "nvram_1": "nvram_set(index, key, value)——部分 Broadcom 衍生实现",
+        "apmib": "Broadcom 私有 API：apmib_set(id, void*)，键为整型 id + 偏移，需用 apmib_get 的同一 id 配对"
+      },
+      "write": [
+        {"name": "nvram_safe_set", "key": 0, "value": 1},
+        {"name": "nvram_set", "key": 0, "value": 1, "variant": "nvram_0"},
+        {"name": "nvram_set", "key": 1, "value": 2, "variant": "nvram_1"},
+        {"name": "nvram_set_int", "key": 0, "value": 1, "value_type": "int"},
+        {"name": "nvram_bufset", "key": 1, "value": 2, "note": "参数 0 为 index/offset"},
+        {"name": "nvram_bcm_set", "key": 0, "value": 1},
+        {"name": "apcli_nvram_set", "key": 0, "value": 1},
+        {"name": "acosNvramConfig_set", "key": 0, "value": 1, "vendor": "ASUS"},
+        {"name": "acosNvramConfig_write", "key": 0, "value": 1, "vendor": "ASUS"},
+        {"name": "SetValue", "key": 0, "value": 1, "vendor": "Realtek SDK"},
+        {"name": "prod_cfm_set_val", "key": 0, "value": 1},
+        {"name": "WRSConfigSet", "key": 0, "value": 1}
+      ],
+      "read": [
+        {"name": "nvram_safe_get", "key": 0},
+        {"name": "nvram_get", "key": 0, "variant": "nvram_0"},
+        {"name": "nvram_get", "key": 1, "variant": "nvram_1"},
+        {"name": "nvram_get_int", "key": 0},
+        {"name": "nvram_bufget", "key": 1, "note": "参数 0 为 index/offset"},
+        {"name": "acosNvramConfig_get", "key": 0, "vendor": "ASUS"},
+        {"name": "acosNvramConfig_match", "key": 0, "vendor": "ASUS"},
+        {"name": "GetValue", "key": 0, "vendor": "Realtek SDK"}
+      ],
+      "concentration_threshold": 10,
+      "threshold_note": "写同一键的 action handler 数 ≥ 该阈值才可能是『控制消息』（Bridge 用 10，并以 find_interval 做相对阈值二次过滤）。低于阈值的键按数据键处理，仍要做数据流配对，只是不参与控制流推断。"
+    },
+    "apmib": {
+      "persistent": true,
+      "control": true,
+      "description": "Broadcom 的配置库。键不是字符串而是整型 id（如 0x2a 起的一片结构体），因此『键一致』退化为『同一 id + 同一偏移』；读端与写端必须用同一个 id 常量配对，否则会系统性地配不上。",
+      "write": [
+        {"name": "apmib_set", "key": null, "value": null, "reason": "首参为整型 id，value 为指向结构体的指针，具体字段偏移需按 id 反查；Bridge 以 apmib_set_caller_sites 的形式按 id 归并"}
+      ],
+      "read": [
+        {"name": "apmib_get", "key": null, "reason": "首参为整型 id，输出写入指针参数"}
+      ],
+      "concentration_threshold": 10
+    },
+    "uci": {
+      "persistent": true,
+      "control": true,
+      "description": "OpenWrt 系配置（uci_set / uci_set_confdir / uci_commit）。字符串键为『包.节.选项』三元组，常由多次 snprintf 拼出——是 OD-ICP 的典型目标。",
+      "write": [
+        {"name": "uci_set", "key": 1, "value": 3},
+        {"name": "uci_set_confdir", "key": 2, "value": 4},
+        {"name": "uci_add_section", "key": 1, "value": 2},
+        {"name": "uci_commit", "key": 1}
+      ],
+      "read": [
+        {"name": "uci_lookup_option_string", "key": 2},
+        {"name": "uci_get", "key": 1}
+      ],
+      "concentration_threshold": 10
+    },
+    "socket": {
+      "persistent": false,
+      "control": true,
+      "description": "套接字 IPC。键是 (IP, port) 二元组而非字符串；写端为 sendto/connect，读端为 bind+listen+recvfrom。Bridge 用符号执行在 sockaddr_in 上恢复具体 IP/端口（不可恢复时记为 symbolic）。",
+      "write": [
+        {"name": "sendto", "key": "dest_addr->sin_addr/sin_port", "value": 1},
+        {"name": "connect", "key": "addr->sin_addr/sin_port", "value": null},
+        {"name": "sendmsg", "key": "msg_name", "value": 1},
+        {"name": "send", "key": null, "reason": "需先解析 socket() 的 peer，靠调用图推断"}
+      ],
+      "read": [
+        {"name": "recvfrom", "key": "peer", "value": 1},
+        {"name": "recv", "key": "peer", "value": 1},
+        {"name": "recvmsg", "key": "peer", "value": 1},
+        {"name": "bind", "key": "addr->sin_addr/sin_port", "value": null},
+        {"name": "listen", "key": null}
+      ],
+      "concentration_threshold": 10
+    },
+    "fileloc": {
+      "persistent": true,
+      "control": true,
+      "description": "经文件/目录的进程间通信：写端 fopen/fwrite，读端 opendir/readdir/fopen。路径即键。与『静态配置』必须区分——镜像内已存在的 .conf 不算运行时写入（见 SKILL.md G6）。",
+      "write": [
+        {"name": "fwrite", "key": null, "reason": "键是 fp 对应的路径，需回溯 fopen 的实参"},
+        {"name": "fopen", "key": 0, "mode": "w/a"},
+        {"name": "rename", "key": 0},
+        {"name": "symlink", "key": 1},
+        {"name": "mkdir", "key": 0}
+      ],
+      "read": [
+        {"name": "opendir", "key": 0},
+        {"name": "readdir", "key": null},
+        {"name": "fopen", "key": 0, "mode": "r"}
+      ],
+      "concentration_threshold": 10
+    },
+    "signal": {
+      "persistent": false,
+      "control": true,
+      "description": "信号。写端 kill/raise + 信号号即控制值，读端为 signal/sigaction 注册的固定处理函数——Bridge 把这类归为『固定 handler』，无需推断。",
+      "write": [
+        {"name": "kill", "key": 1, "value": null},
+        {"name": "raise", "key": 0},
+        {"name": "sigqueue", "key": 1}
+      ],
+      "read": [
+        {"name": "signal", "key": 0, "note": "信号号→处理函数，直接在符号表配对"},
+        {"name": "sigaction", "key": 0}
+      ],
+      "concentration_threshold": 10
+    },
+    "process_call": {
+      "persistent": false,
+      "control": true,
+      "keyed": false,
+      "description": "显式进程调用（system/popen/exec 族）。控制值是命令行参数，目标二进制由命令串首个词决定；命令行里可能继续调 shell 脚本，因此需要用 AST 解析脚本（Bridge 用 bashlex + BashCFG）恢复跨脚本的控制值。注意：本机制的『参数』是命令串而不是存储键，keyed=false —— 它是 ADG 的边，不是 BDG 的键，不要把它当写端键去配对。",
+      "write": [
+        {"name": "system", "key": 0, "value": null},
+        {"name": "popen", "key": 0, "value": null},
+        {"name": "execl", "key": null},
+        {"name": "execlp", "key": null},
+        {"name": "execle", "key": null},
+        {"name": "execv", "key": 0},
+        {"name": "execvp", "key": 0},
+        {"name": "execve", "key": 0},
+        {"name": "posix_spawn", "key": null},
+        {"name": "_system", "key": 0},
+        {"name": "SYSTEM", "key": 0},
+        {"name": "doSystem", "key": 0},
+        {"name": "doSystemCmd", "key": 0},
+        {"name": "twsystem", "key": 0, "vendor": "D-Link"},
+        {"name": "FCGI_popen", "key": 0, "vendor": "D-Link"},
+        {"name": "CsteSystem", "key": 0, "vendor": "TOTOLINK"},
+        {"name": "RunSystemCmd", "key": 0, "vendor": "TOTOLINK"},
+        {"name": "getCmdStr", "key": 0, "vendor": "TOTOLINK"},
+        {"name": "getCmdVal", "key": 0, "vendor": "TOTOLINK"},
+        {"name": "RunCmd", "key": 0},
+        {"name": "DoCmd", "key": 0},
+        {"name": "_eval", "key": 0},
+        {"name": "_eval_daemon", "key": 0},
+        {"name": "_xstart", "key": 0},
+        {"name": "COMMAND", "key": 0}
+      ],
+      "read": [],
+      "concentration_threshold": 0,
+      "threshold_note": "显式控制无需集中性判定：命令串本身指明目标程序。"
+    },
+    "rc_service": {
+      "persistent": true,
+      "control": true,
+      "description": "Realtek/ASUS 系的 rc 服务总线：前端 notify_rc(service) 发事件，rc 进程按服务名分发。这是 Bridge 动机样例（SetVLAN → notify_rc(\"start_vlanall\") → rc 内 handler）的核心机制，必须单独建模，否则整条高阶链会在 notify_rc 处断开。",
+      "write": [
+        {"name": "notify_rc", "key": 0},
+        {"name": "notify_rc_and_wait", "key": 0},
+        {"name": "rc_service", "key": 0, "vendor": "Realtek"},
+        {"name": "_notify_rc", "key": 0}
+      ],
+      "read": [
+        {"name": "nvram_safe_get", "key": 0, "note": "rc 侧读配置属于该机制的下游，键仍按 nvram 配"},
+        {"name": "recvmsg", "key": "peer"}
+      ],
+      "concentration_threshold": 10
+    },
+    "pipeline_queue_shm": {
+      "persistent": false,
+      "control": true,
+      "description": "管道 / 消息队列 / 共享内存。固件里出现频率低于前几类，但一旦出现同样是跨进程污点通道；键分别为 FIFO 路径、msgget 的 key、shmget 的 key。",
+      "write": [
+        {"name": "write", "key": null, "reason": "fd 需回溯到 pipe/mkfifo 的实参"},
+        {"name": "msgsnd", "key": 0},
+        {"name": "shmat", "key": 0}
+      ],
+      "read": [
+        {"name": "read", "key": null},
+        {"name": "msgrcv", "key": 0}
+      ],
+      "concentration_threshold": 10
+    }
+  },
+  "sinks": {
+    "weak_copy": {
+      "description": "定长栈缓冲区拷贝/格式化——污点长度未校验即溢出（Bridge 统计为 buffer_overflow，含长度约束分析）。",
+      "functions": ["strcpy", "strncpy", "memcpy", "memmove", "sprintf", "snprintf", "sscanf", "strcat", "strncat", "wcscpy", "lstrcpyA", "strlcpy"],
+      "note": "snprintf/strlcpy 通常安全，但若目标缓冲区小于格式串展开长度、或截断后又按未截断长度处理，仍可溢出——不要只凭函数名放过。"
+    },
+    "command_exec": {
+      "description": "命令执行——污点进入 shell 即命令注入。",
+      "functions": ["system", "popen", "execve", "execl", "execlp", "execle", "execv", "execvp", "_system", "doSystem", "twsystem", "SYSTEM", "FCGI_popen", "CsteSystem", "getCmdStr", "getCmdVal", "getCmdResult", "Cal_file_md5", "COMMAND"]
+    },
+    "format_string": {
+      "description": "格式化串本身可控（非定长拷贝型），可读栈/写内存。",
+      "functions": ["printf", "fprintf", "syslog", "snprintf", "sprintf"],
+      "note": "只有『格式串参数』被污点污染才成立；作为参数值的污点不算。"
+    },
+    "path_traversal": {
+      "description": "路径拼接后用于文件操作，污点可逃出预期目录。",
+      "functions": ["fopen", "open", "unlink", "rename", "opendir", "system"],
+      "note": "必须同时看到路径拼接（sprintf/strcat/asprintf）与『无 ../ 归一化』两个条件。"
+    }
+  },
+  "ipf_libc_sources": {
+    "description": "用户可控输入解析的库函数（Bridge 的 lib_taint_source_functions + 常见 Web/CGI 取值接口）。命中即视为污点源；返回值为污点。",
+    "functions": {
+      "websGetVar": {"return": "taint", "note": "Goahead 系"},
+      "websGetVarInt": {"return": "taint"},
+      "cgiFormString": {"return": "taint", "note": "cgiForm 库"},
+      "cgiFormStringNoNewlines": {"return": "taint"},
+      "mxmlFindElement": {"return": "taint", "note": "首次出现处起为 XML 内容"},
+      "json_object_get_string": {"return": "taint"},
+      "cJSON_GetObjectItem": {"return": "taint"},
+      "recv": {"return": "taint"},
+      "recvfrom": {"return": "taint"},
+      "read": {"return": "taint"},
+      "fgets": {"return": "taint"},
+      "getenv": {"return": "taint", "note": "环境变量也可能被上游写入"},
+      "sscanf": {"return": "taint"},
+      "strtok": {"return": "taint", "note": "常被用作逐字段解析"}
+    }
+  },
+  "aeh_patterns": {
+    "description": "动作入口处理器（Action Entry Handler）的三种落地形态。识别优先级：callback_key > func_table > strcmp_like。",
+    "callback_key": {
+      "shape": "注册函数 + (常量字符串, 函数指针) 同调",
+      "examples": ["websFormDefine(\"GetWanSettings\", sub_45D714)", "aspDefine(\"SetVLAN\", handler)"],
+      "threshold": "与前端动作名匹配数 ≥ 10（Bridge border_binary_infer）",
+      "false_positive": "qsort/signal/scandir 等 libc 回调也会传函数指针，必须要求同调『常量字符串 + 函数指针』"
+    },
+    "func_table": {
+      "shape": ".data 段成对的（字符串指针, 函数指针）表",
+      "examples": [".data:00120AB0 DCD aUpgradeCgi ; .data:00120AB4 DCD sub_304C8"],
+      "threshold": "与前端动作名匹配数 ≥ 20（表里通常还有文件名等噪声，需按后缀过滤）",
+      "false_positive": "表里混有静态资源文件名（.js/.css/.png），必须过滤"
+    },
+    "strcmp_like": {
+      "shape": "嵌套 if-else + strcmp/strncmp/strcasecmp/memcmp/strstr",
+      "identification": [
+        "函数内某基本块入度 ≥ 10 —— 该块是嵌套链的汇聚点（nested sink）",
+        "同一函数内某个 strcmp 类函数被调用 ≥ 10 次",
+        "候选比较块：块内调用点恰好 1 个且为 strcmp 类",
+        "链形状：头节点可多入度，中间节点 1 入 2 出"
+      ],
+      "handler_delimit": "取比较块的后继中能到达 nested sink 的那一支，handler = descendants(该支) ∩ descendants(reverse(sink))；若两支都不在链上，则回落到函数 exit_block"
+    }
+  },
+  "ucse_defaults": {
+    "description": "欠约束符号执行的默认参数（Bridge IPC_SE 实测值），用于判定『这个 handler 是靠什么恢复出来的』。",
+    "loop_bound": 2,
+    "exit_time_seconds": 600,
+    "concretization": "SimConcretizationStrategyNorepeatsRange(min=0x400, granularity=0x400)",
+    "string_max_len": 256,
+    "timeout_policy": "超时即丢弃该 (binary, key) 的结果，不得以部分块集充当完整 handler",
+    "arch_support": ["MIPS32", "MIPS64", "ARMEL", "ARMHF", "AMD64"],
+    "arch_note": "MIPS 需把 ra 设为哨兵返回地址、t9 设为函数地址并跳过 prologue；ARM 设 lr"
+  },
+  "provenance": {
+    "primary": "Bridge: High-Order Taint Vulnerabilities Detection in Linux-based IoT Firmware, IEEE S&P 2026, pp. 3320-3339",
+    "artifact": "https://zenodo.org/records/17232400 (pjqwudi123/bridge:1.0)",
+    "derived_from": [
+      "action_transfer_paper.py: IPC_control_set_function_dict / IPC_control_get_function_dict / border_binary_infer / threshold 常量",
+      "dataflow/security_check.py: SecurityCheck.sinks",
+      "action_handler_infer.py: infer_callback_keys_in_text / infer_nested_comparison_keys_in_text",
+      "IPC_SE/*: 欠约束符号执行与 socket 角色恢复"
+    ],
+    "caution": "本表是『词表 + 判据』，不是对 Bridge 实现的复刻。Bridge 依赖 IDA Pro、angr 与 40 核并行；本表面向人工/半自动审计，字段语义与论文一致，覆盖度按厂商符号人工补齐，遇到表外包装函数应先用调用图确认真实原语再补进本表。"
+  }
+}

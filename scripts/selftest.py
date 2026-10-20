@@ -29,7 +29,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 FAILS: list = []
 TOTAL = 0          # 实际执行的断言数：由脚本自己报，避免文档里的数字靠数日志漂移
-NGROUPS = 14       # 组数：与各处 [N/14] 表头一致，末尾会自校验，防止「13 组」再次漂移
+NGROUPS = 15       # 组数：与各处 [N/15] 表头一致，末尾会自校验，防止「13 组」再次漂移
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -180,8 +180,19 @@ CLI_FLAG_RE = re.compile(r"(?<![\w-])(--[a-z0-9][a-z0-9-]*)")
 
 
 def cli_flags(script: str) -> set:
-    """从脚本的 --help 抽取它真正支持的 --flag 集合。"""
-    return set(CLI_FLAG_RE.findall(run([script, "--help"]).stdout or ""))
+    """从脚本的 --help 抽取它真正支持的 --flag 集合。
+
+    有子命令的脚本（如 `taint_graph.py build|recover|stats`）顶层 --help 只列子命令名，
+    子命令自己的开关要逐个进去问，否则会把合法用法误判成"文档写错"。"""
+    head = run([script, "--help"]).stdout or ""
+    out = set(CLI_FLAG_RE.findall(head))
+    for group in re.findall(r"\{([a-z0-9_,\-]+)\}", head):
+        for sub in group.split(","):
+            sub = sub.strip()
+            if not sub or sub in ("-h", "--help"):
+                continue
+            out |= set(CLI_FLAG_RE.findall(run([script, sub, "--help"]).stdout or ""))
+    return out
 
 
 def bool_flags(script: str) -> set:
@@ -276,7 +287,7 @@ def main() -> int:
         with open(p, "w", encoding="utf-8", newline="\n") as f:
             f.write(txt)
 
-    print("\n[1/14] fw_triage.py — 度量 / 加固画像 / 分层")
+    print("\n[1/15] fw_triage.py — 度量 / 加固画像 / 分层")
     r = run([os.path.join(HERE, "fw_triage.py"), img, "--rootfs", root, "--tier",
              "--budget", "800", "--out", metrics, "--plan", plan, "--pretty"])
     check("fw_triage 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
@@ -304,7 +315,7 @@ def main() -> int:
     check("T3 含 www/index.html", "www/index.html" in set(t["t3_list"]))
     check("EALB > 0", t["ealoc_total"] > 0, str(t["ealoc_total"]))
 
-    print("\n[2/14] sink_scan.py — Layer 1 危险模式扫描")
+    print("\n[2/15] sink_scan.py — Layer 1 危险模式扫描")
     r = run([os.path.join(HERE, "sink_scan.py"), root, "--json", sinks])
     check("sink_scan 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
     if r.returncode != 0:
@@ -318,19 +329,19 @@ def main() -> int:
     check("etc/passwd 不再误报 P1-S-020", ("P1-S-020", "etc/passwd") not in key)
     check("文档目录被跳过", not any(f["file"].startswith("usr/share/doc") for f in sd["findings"]))
 
-    print("\n[3/14] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
+    print("\n[3/15] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vpart, "--tiering", tiering])
     check("不完整输入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
 
-    print("\n[4/14] coverage_gate.py — 覆盖率门禁（完整应通过）")
+    print("\n[4/15] coverage_gate.py — 覆盖率门禁（完整应通过）")
     out = os.path.join(base, "40-coverage.md")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vfull, "--tiering", tiering, "--out", out])
     check("完整输入 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("门禁报告已生成", os.path.isfile(out))
 
-    print("\n[5/14] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
+    print("\n[5/15] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
     bad_rep = os.path.join(base, "report-bad.md")
     with open(bad_rep, "w", encoding="utf-8") as fh:
         fh.write(
@@ -418,7 +429,7 @@ def main() -> int:
     check("⑥ 保留指针行（移动语义）→ 退出码 0", r.returncode == 0,
           r.stdout.strip()[-200:])
 
-    print("\n[6/14] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
+    print("\n[6/15] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
     review_bad = os.path.join(base, "25-review-list.md")
     with open(review_bad, "w", encoding="utf-8") as fh:
         fh.write("- [x] `www/cgi-bin/ping.cgi`\n"     # 有结论 → OK
@@ -450,7 +461,7 @@ def main() -> int:
     check("审阅清单一致 → 退出码 0", r.returncode == 0,
           r.stdout.strip()[-160:])
 
-    print("\n[7/14] coverage_gate.py — 报告 9 必填字段校验")
+    print("\n[7/15] coverage_gate.py — 报告 9 必填字段校验")
     f_bad = os.path.join(base, "report-fields-bad.md")
     with open(f_bad, "w", encoding="utf-8") as fh:
         fh.write(
@@ -486,7 +497,7 @@ def main() -> int:
     check("9 字段齐全 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("报告模板字段不误报", _template_fields_clean())
 
-    print("\n[8/14] coverage_gate.py — G4 入口级覆盖（文件级 100% ≠ 入口级 100%）")
+    print("\n[8/15] coverage_gate.py — G4 入口级覆盖（文件级 100% ≠ 入口级 100%）")
     tj_g4 = os.path.join(base, "02-tiering-g4.json")
     with open(tj_g4, "w", encoding="utf-8") as fh:
         json.dump({"rootfs_analysis": {"tiering": {"shards": [{"items": [
@@ -528,7 +539,7 @@ def main() -> int:
              "--entrypoints", ep_ok, "--out", os.path.join(base, "40-g4c.md")])
     check("入口枚举 + 全部处置 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
 
-    print("\n[9/14] coverage_gate.py — G5 绕过矩阵（「有防护」≠「防护有效」）")
+    print("\n[9/15] coverage_gate.py — G5 绕过矩阵（「有防护」≠「防护有效」）")
     vp_bad = os.path.join(base, "30-claim-bad.md")
     with open(vp_bad, "w", encoding="utf-8") as fh:
         fh.write("# 结论\n\n## F-001 · x\n\n- 影响: 已鉴权，不可利用\n")
@@ -558,7 +569,7 @@ def main() -> int:
     check("G5 端到端接入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
     check("检出绕过矩阵缺失", "绕过矩阵完备（G5）" in open(out_g5, encoding="utf-8").read())
 
-    print("\n[10/14] coverage_gate.py — G6 跨请求污点溯源（持久化来源须声明写入面）")
+    print("\n[10/15] coverage_gate.py — G6 跨请求污点溯源（持久化来源须声明写入面）")
     _F = ("- **类型**：命令注入\n- **位置**：`usr/sbin/httpd:0x1`\n- **优先级**：P1\n"
           "- **置信度**：CONFIRMED\n- **CVSS 3.1**：`AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H` = 9.8\n"
           "{src}- **Sink**：system()\n- **完整调用链**：1. a @0x1\n- **证据**：`[E1]` disasm\n")
@@ -593,7 +604,7 @@ def main() -> int:
              os.path.join(base, "40-g6b.md")])
     check("声明写入面端到端 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
 
-    print("\n[11/14] coverage_gate.py — G1/G2/G3 自动修复 + 类型→Base 命中")
+    print("\n[11/15] coverage_gate.py — G1/G2/G3 自动修复 + 类型→Base 命中")
     out_rec = os.path.join(base, "40-recover.md")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vpart, "--tiering", tiering,
@@ -627,7 +638,7 @@ def main() -> int:
     check("可映射类型 → 不报",
           not _cg.check_type_base(rep_mapped, base_md)["unmapped"])
 
-    print("\n[12/14] sink_scan.py — 结构级二次过滤（正则初筛 → 结构确认 / 否定 / 回退）")
+    print("\n[12/15] sink_scan.py — 结构级二次过滤（正则初筛 → 结构确认 / 否定 / 回退）")
     if HERE not in sys.path:
         sys.path.insert(0, HERE)
     import sink_scan as _ss  # noqa
@@ -706,7 +717,7 @@ def main() -> int:
         _ss.structural_match = _orig_sm
 
     # ── 13. 扫描完整性 + 门禁严格性（改进计划 §3 / §4 / §6 的回归）──────────
-    print("\n[13/14] 扫描完整性与门禁严格性")
+    print("\n[13/15] 扫描完整性与门禁严格性")
 
     sz = os.path.join(base, "scanint")
     os.makedirs(sz, exist_ok=True)
@@ -866,6 +877,144 @@ def main() -> int:
 
     n_hdr = len(re.findall(r'print\(\s*f?"\\n\[', open(__file__, encoding="utf-8").read()))
     check("组数常量与表头数量一致", n_hdr == NGROUPS, f"表头 {n_hdr} / 常量 {NGROUPS}")
+
+    # ── 15. 高阶污点图：写面/读面必须分属不同 action ──────────────────────────
+    print("\n[15/15] taint_graph.py — 跨请求污点图（BDG/ADG）与 G7 门禁")
+    tg = os.path.join(base, "tg")
+    os.makedirs(tg, exist_ok=True)
+    TG = os.path.join(HERE, "taint_graph.py")
+
+    def _facts(name: str, actions: list, target: str = "demo") -> str:
+        p = os.path.join(tg, name)
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump({"schema": "taint-facts/1.0", "target": target,
+                       "store_type": "nvram_0", "actions": actions}, fh,
+                      ensure_ascii=False)
+        return p
+
+    W1 = {"key": "lan0_management_link", "func": "nvram_safe_set", "addr": "0x43b57c",
+          "evidence": "prog.cgi:0x43b57c nvram_safe_set(\"lan0_management_link\", v)"}
+    R1 = {"key": "lan0_management_link", "func": "nvram_safe_get", "addr": "0x430d1c",
+          "evidence": "prog.cgi:0x430d1c nvram_safe_get(...)",
+          "sink": {"name": "system", "addr": "0x4312cc"}}
+    hops = _facts("facts-ho.json", [
+        {"id": "SetNetworkSettings", "binary": "prog.cgi", "writes": [dict(W1)],
+         "ipc_control": [{"func": "notify_rc", "value": "start_vlanall",
+                          "target_action": "restart_lan", "target_binary": "rc",
+                          "evidence": "prog.cgi:0x430f00 notify_rc(...)"}]},
+        {"id": "SetRouterLanSettings", "binary": "prog.cgi", "reads": [dict(R1)]},
+        {"id": "restart_lan", "binary": "rc", "reads": [dict(R1)]},
+    ])
+    g_ho = os.path.join(tg, "graph-ho.json")
+    r = run([TG, "build", "--facts", hops, "--out", g_ho, "--strict"])
+    g = json.load(open(g_ho, encoding="utf-8"))
+    check("BDG 构图：跨 action 写读 → 2 条高阶链",
+          r.returncode == 0 and g["summary"]["high_order_chains"] == 2
+          and g["summary"]["first_order_chains"] == 0,
+          f"rc={r.returncode} high={g['summary']['high_order_chains']}")
+    check("ADG 边（notify_rc → 目标 action）入图",
+          len(g.get("adg") or []) == 1
+          and g["adg"][0]["to"]["action"] == "restart_lan")
+
+    same = _facts("facts-first.json", [
+        {"id": "SetSame", "binary": "prog.cgi", "writes": [dict(W1)], "reads": [dict(R1)]}])
+    g_first = os.path.join(tg, "graph-first.json")
+    run([TG, "build", "--facts", same, "--out", g_first])
+    gf = json.load(open(g_first, encoding="utf-8"))
+    check("同一 action 内读写 → 判为一阶而非高阶",
+          gf["summary"]["high_order_chains"] == 0
+          and gf["summary"]["first_order_chains"] == 1)
+
+    noev = json.load(open(hops, encoding="utf-8"))
+    del noev["actions"][0]["writes"][0]["evidence"]
+    noev_p = os.path.join(tg, "facts-noev.json")
+    json.dump(noev, open(noev_p, "w", encoding="utf-8"), ensure_ascii=False)
+    g_noev = os.path.join(tg, "graph-noev.json")
+    r = run([TG, "build", "--facts", noev_p, "--out", g_noev, "--strict"])
+    check("缺 evidence 的链 → 判失败", r.returncode == 1, f"rc={r.returncode}")
+
+    unre = _facts("facts-unre.json", [
+        {"id": "SetX", "binary": "prog.cgi",
+         "writes": [{"func": "nvram_safe_set", "addr": "0x10", "evidence": "e"}]}])
+    g_unre = os.path.join(tg, "graph-unre.json")
+    r = run([TG, "build", "--facts", unre, "--out", g_unre, "--strict"])
+    gu = json.load(open(g_unre, encoding="utf-8"))
+    check("键未恢复 → defect 且判失败",
+          r.returncode == 1
+          and any(d["kind"] == "key-unrecovered" for d in gu["defects"]))
+
+    # OD-ICP 轻量版：四条常量恢复规则
+    dec = os.path.join(tg, "decomp")
+    os.makedirs(dec, exist_ok=True)
+    with open(os.path.join(dec, "prog_cgi.c"), "w", encoding="utf-8") as fh:
+        fh.write(
+            'int SetA(int a1, char *a2)\n{\n'
+            '  nvram_safe_set("lit_key", a2);\n'
+            '  return 0;\n}\n\n'
+            'int SetB(int a1, char *a2)\n{\n'
+            '  char *k = "local_key";\n'
+            '  char buf[64];\n'
+            '  char *v = nvram_safe_get(k);\n'
+            '  system(v);\n'
+            '  snprintf(buf, 64, "%s_%s", "lan0", "link");\n'
+            '  nvram_safe_set(buf, a2);\n'
+            '  nvram_safe_set(v9, a2);\n'
+            '  return 0;\n}\n')
+    f_rec = os.path.join(tg, "facts-rec.json")
+    r = run([TG, "recover", "--src", dec, "--out", f_rec, "--target", "demo"])
+    fr = json.load(open(f_rec, encoding="utf-8"))
+    wl = [w.get("key") for a in fr["actions"] for w in a["writes"]]
+    rl = [x.get("key") for a in fr["actions"] for x in a["reads"]]
+    check("常量恢复：字面量 + 局部常量 + 缓冲区填充",
+          r.returncode == 0 and "lit_key" in wl and "lan0_link" in wl
+          and "local_key" in rl, f"W={wl} R={rl}")
+    check("常量恢复：拼不出来的记为 unknown（不猜）",
+          any(u["func"] == "nvram_safe_set" for u in fr["unrecovered"]))
+    check("常量恢复：不再把 process_call 当存储键",
+          all(w["func"] != "system" for a in fr["actions"] for w in a["writes"]))
+    check("常量恢复：read 的候选 sink 只作提示不入链",
+          any(x.get("sink_candidates") for a in fr["actions"] for x in a["reads"])
+          and all("sink" not in x for a in fr["actions"] for x in a["reads"]))
+
+    # G7 端到端：好图通过 / 声称高阶却只有一阶 → 失败 / strict 缺图 → 失败
+    rep_ho = os.path.join(tg, "report-ho.md")
+    with open(rep_ho, "w", encoding="utf-8") as fh:
+        fh.write("## 4. 漏洞详情\n\n### F-001 · 高阶命令注入\n\n"
+                 "- **类型**：命令注入\n- **位置**：`prog.cgi:0x4312cc`\n"
+                 "- **优先级**：P1\n- **置信度**：CONFIRMED\n"
+                 "- **CVSS 3.1**：9.8\n"
+                 "- **Source**：nvram `lan0_management_link`（写入面 SetNetworkSettings）\n"
+                 "- **Sink**：system() @0x4312cc\n- **完整调用链**：写 → 读 → sink\n"
+                 "- **证据**：taint-graph H-001\n")
+    out_g7 = os.path.join(tg, "40-g7.md")
+    r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
+             "--verified", vfull, "--tiering", tiering,
+             "--taint-graph", g_ho, "--report", rep_ho, "--out", out_g7])
+    check("G7：跨 action 图 → 通过", r.returncode == 0, r.stdout.strip().splitlines()[-1] if r.stdout.strip() else "")
+    r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
+             "--verified", vfull, "--tiering", tiering,
+             "--taint-graph", g_first, "--report", rep_ho,
+             "--out", os.path.join(tg, "40-g7b.md")])
+    check("G7：报告声称高阶但只有一阶链 → 失败", r.returncode == 1,
+          f"rc={r.returncode}")
+    r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
+             "--verified", vfull, "--tiering", tiering,
+             "--taint-graph", g_noev, "--report", rep_ho,
+             "--out", os.path.join(tg, "40-g7c.md")])
+    check("G7：缺 evidence → 失败", r.returncode == 1, f"rc={r.returncode}")
+
+    cfg_g7 = os.path.join(tg, "gate-config.json")
+    r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
+             "--verified", vfull, "--tiering", tiering,
+             "--report", rep_ho, "--profile", "strict",
+             "--gate-config", cfg_g7,
+             "--out", os.path.join(tg, "40-g7d.md")])
+    rows = json.load(open(cfg_g7, encoding="utf-8"))["checks"] \
+        if os.path.isfile(cfg_g7) else []
+    row = next((x for x in rows if x["name"].startswith("跨请求污点图")), {})
+    check("strict：声称高阶但未给图 → G7 记为必需且未执行",
+          row.get("status") == "SKIPPED" and row.get("required") is True
+          and r.returncode != 0, f"{row.get('status')}/{row.get('required')}")
 
     print()
     if FAILS:

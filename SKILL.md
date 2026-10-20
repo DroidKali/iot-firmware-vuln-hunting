@@ -102,6 +102,8 @@ fw-audit/<target>/
 ├── 10-layer1-sinks.json         Layer 1 机器扫描结果
 ├── 20-findings-candidates.jsonl Layer 2 三轨候选（Track A/B/C）
 ├── 30-findings-verified.md      Layer 3 验证后结论（含 NOT_FOUND 台账）
+├── taint-facts.json             跨请求污点事实（写/读端点，Track C 产物）
+├── taint-graph.json             跨请求污点图（BDG + ADG，G7 的输入）
 ├── 40-coverage.md               覆盖率门禁报告
 ├── 50-rules/                    Phase 5 沉淀的 YARA / grep 规则
 └── report.md                    最终报告
@@ -423,7 +425,7 @@ strcpy(dst, user_buf) → user_buf 来自哪？ → recv() 的 socket？
 请求2: SetVLAN    → notify_rc("start_vlanall") → rc 进程 → nvram_safe_get(...) → system()  ← 读面 + sink
 ```
 
-职责：发现「单请求视角看不到的高阶污点漏洞」。**Track A 追的同请求 source→sink 在这里是断的**——httpd 读 `wan_ifname` 时，同一请求内根本没有它的写入点（RAXE500 `F-012` 就是这样被漏掉的：`wan_ifname` 在 httpd 内 20 处引用**全为读、零写**，真正的写面在上传恢复配置那条链路）。方法源自 Bridge（IEEE S&P'26）。
+职责：发现「单请求视角看不到的高阶污点漏洞」。**Track A 追的同请求 source→sink 在这里是断的**——httpd 读 `wan_ifname` 时，同一请求内根本没有它的写入点（RAXE500 `F-012` 就是这样被漏掉的：`wan_ifname` 在 httpd 内 20 处引用**全为读、零写**，真正的写面在上传恢复配置那条链路）。方法源自 Bridge（IEEE S&P'26），完整算法与阈值见 **`references/high-order-taint.md`**。
 
 **持久化存储的 4 类**（都可能成为跨请求污点通道）：
 
@@ -440,9 +442,27 @@ strcpy(dst, user_buf) → user_buf 来自哪？ → recv() 的 socket？
 2. **配对读面**：对每个写面，全量检索谁**读**了同一键 / 路径并送入 sink。**写入与读取常分属不同请求、不同进程**——这正是单请求 Track A 追不到的原因。
 3. **闭合溯源**：证明 sink 拿到的值由攻击者**可控地**写入——写面本身是否需认证？是否有键名白名单？（**无白名单的「恢复配置导入」= 任意键可控**，见 RAXE500 `F-012`/`F-013`。）
 
-> ⚠️ **门禁挂钩（G6）**：凡 finding 的 `Source` 指向运行时写入的持久化存储，**必须**声明**写入面**，否则 `coverage_gate.py --cross-request` 判 fail。这把「只审单请求」的错误在门禁层拦住。
+**把三步做成图（不是写成段落）**——报告里「由恢复配置导入」这种表述无法被复核，必须落成四元组：
+
+```
+write.action --key--> 存储 --key--> read.action --> sink
+```
+
+```bash
+# ① 从反编译产物恢复常量键（literal / local-const / fill-composed；拼不出来记 unknown）
+uv run scripts/taint_graph.py recover --src fw-audit/<t>/decomp \
+    --out fw-audit/<t>/taint-facts.json --target <t>
+# ② 补齐读写点与 sink 后构图，并自检 C1–C4
+uv run scripts/taint_graph.py build --facts fw-audit/<t>/taint-facts.json \
+    --out fw-audit/<t>/taint-graph.json --md fw-audit/<t>/taint-graph.md --strict
+```
+
+判据只有四条，但每条都能否决结论：**①写面与读面必须分属不同 action**（同一 action = 一阶，不许算高阶）；②键在两端字面一致；③读面到 sink 真实可达；④两端都有地址与证据。方法全貌（AEH 三形态与阈值、BDG 两段污点、OD-ICP 常量恢复、控制消息双约束、ADG 三类控制依赖、欠约束符号执行参数）见 **`references/high-order-taint.md`**；IPC 原语词表见 **`assets/ipc-functions.json`**。
+
+> ⚠️ **门禁挂钩（G6 + G7）**：G6 查**报告文字**——finding 的 `Source` 指向运行时写入的持久化存储时，必须声明**写入面**（`--cross-request`）。G7 查**图**——`--taint-graph` 校验上面四条判据；strict 档位下，报告一旦声称存在高阶漏洞，**没有图就直接失败**（只有结论没有链 = 不可复核）。
 >
-> ⚠️ **静态枚举的边界**：控制消息关键字可能被 `str_merge`/`snprintf` **动态拼接**（如 `"lan0_" + "management_link"`），纯字符串匹配会漏——必须按 Layer 3 反汇编回溯拼接点（Bridge 的 OD-ICP 思路）。
+> ⚠️ **静态枚举的边界**：控制消息关键字可能被 `str_merge`/`snprintf` **动态拼接**（如 `"lan0_" + "management_link"`），纯字符串匹配会漏——必须回溯拼接点。`taint_graph.py recover` 能覆盖「字面量 / 局部常量 / 缓冲区填充」三种，覆盖不了的**必须显式记 unknown**，不能用占位键蒙混（Bridge 用欠约束符号执行补这一段，代价是 600 s/键）。
+
 
 **按 Tier 的深度**：
 
@@ -710,9 +730,12 @@ uv run scripts/coverage_gate.py --profile strict \
     --review-list fw-audit/<target>/25-review-list.md \
     --tiering fw-audit/<target>/02-tiering.json \
     --entrypoints fw-audit/<target>/entrypoints.json \
+    --taint-graph fw-audit/<target>/taint-graph.json \
     --report fw-audit/<target>/report.md \
     --out fw-audit/<target>/40-coverage.md
 ```
+
+> 报告里只要出现「高阶 / high-order / 跨请求污点」这类声明，strict 档位就把 `--taint-graph` 变成**必需项**——声称高阶却没有图 = 不可复核 = 失败。没有高阶结论时可以不给，该项以 `SKIPPED` 列出且不判失败。
 
 三个档位：`light`（只查覆盖率）/ `standard`（默认，未执行的高级检查以 `SKIPPED` 列出但不判失败）/ `strict`（需齐全输入 + 未执行即失败）。
 
@@ -722,7 +745,7 @@ uv run scripts/coverage_gate.py --profile strict \
 
 `--review-list` 触发 **审阅清单三方对齐**（Phase 2.5 的机械化落实）：diff「计划 vs 声明 vs 实际结论」，报 G1/G2/G3 三类缺口。
 
-`--entrypoints` 触发 **G4 入口级覆盖**，`--bypass-check` 触发 **G5 绕过矩阵完备**，`--cross-request` 触发 **G6 跨请求污点溯源**，`--type-base` 触发 **类型 → DKTSS Base 命中**校验；`--auto-recover` 把 G1/G3 转为自动修复计划。分述见下。
+`--entrypoints` 触发 **G4 入口级覆盖**，`--bypass-check` 触发 **G5 绕过矩阵完备**，`--cross-request` 触发 **G6 跨请求污点溯源**，`--taint-graph` 触发 **G7 跨请求污点图**（写面/读面必须分属不同 action + 键一致 + 两端有地址与证据），`--type-base` 触发 **类型 → DKTSS Base 命中**校验；`--auto-recover` 把 G1/G3 转为自动修复计划。分述见下。
 
 门禁判据（任一不满足则**不得出报告**，先补审）：
 - T1 文件覆盖率 **100%**（每个文件必须有审计结论或明确的 `NOT_FOUND`）
@@ -734,6 +757,7 @@ uv run scripts/coverage_gate.py --profile strict \
 - 入口级覆盖（G4）：适用文件须有完整入口枚举 + 逐入口结论
 - 绕过假设（G5）：凡「有防护 / 不可利用」断言必须附 B1–B12 矩阵
 - 跨请求溯源（G6）：持久化存储来源的 finding 必须声明写入面
+- 跨请求污点图（G7，给出 `--taint-graph` 时）：写面与读面必须**分属不同 action**、键两端字面一致、两端有 addr+evidence、sink 类型已知；报告声称高阶时图中必须有高阶链
 
 脚本退出码非 0 表示未达标，缺口写入 `40-coverage.md` 的「待补审清单」，回去补。
 
@@ -843,6 +867,8 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 |---|---|
 | `references/atomic-capabilities.md` | **决策判据 + 原子能力**：Phase 1 提取选路（§3.1）、Phase 4 仿真选路（§3.2）、54 项原子能力清单与实现命令（§1–§9）、整链工具的合法定位（§10.2）、能力缺席时的替代路径（§11） |
 | `references/methodology.md` | 需要 Tier 规则细节、EALB 计算、三轨模型（Track A/B/C）、跨请求污点（§3.2）、门禁判据的完整定义 |
+| `references/high-order-taint.md` | **高一阶/高阶污点的完整方法**：AEH 三形态与阈值、IPF 三模型、BDG 两段污点与按键入 join、OD-ICP 常量恢复、控制消息双约束、ADG 三类控制依赖、欠约束符号执行参数与坑、`taint-graph.json` 与 G7 判据、无 IDA/angr 时的降级路径 |
+| `assets/ipc-functions.json` | IPC 原语词表（写/读端、键参数位置、控制/持久化标记、集中性阈值）+ sink 分类 + IPF 库函数 + AEH 识别模式 + SE 默认参数 |
 | `references/vuln-taxonomy.md` | 需要按攻击面/漏洞类型逐项核查（后门账号、命令注入、OTA、MQTT、U-Boot…） |
 | `references/vuln-conditions.md` | **Layer 3 / Phase 4**：候选要不要升 `CONFIRMED`？按漏洞类型逐条排除成立条件（固件版判定表） |
 | `references/sink-patterns.md` | 需要扩充或理解静态扫描规则，或手写 grep / YARA |
@@ -856,9 +882,10 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 |---|---|
 | `scripts/fw_triage.py` | Phase 0 / 2：固件度量、熵扫描、ELF 加固画像、SUID 面、Tier 分层、EALB 预算 |
 | `scripts/sink_scan.py` | Phase 3 Layer 1：多语言危险模式扫描（数据驱动规则） |
-| `scripts/coverage_gate.py` | Phase 5：覆盖率门禁校验 + **CVE 纪律检查**（`--report`）+ **审阅清单三方对齐**（`--review-list`）+ **G4 入口级覆盖**（`--entrypoints`）+ **G5 绕过矩阵**（`--bypass-check`）+ **G6 跨请求污点溯源**（`--cross-request`）+ **类型→Base 命中**（`--type-base`）+ **自动修复计划**（`--auto-recover`）+ **`--profile {light,standard,strict}` 档位与 `gate-config.json` 执行台账** |
+| `scripts/coverage_gate.py` | Phase 5：覆盖率门禁校验 + **CVE 纪律检查**（`--report`）+ **审阅清单三方对齐**（`--review-list`）+ **G4 入口级覆盖**（`--entrypoints`）+ **G5 绕过矩阵**（`--bypass-check`）+ **G6 跨请求污点溯源**（`--cross-request`）+ **G7 跨请求污点图**（`--taint-graph`）+ **类型→Base 命中**（`--type-base`）+ **自动修复计划**（`--auto-recover`）+ **`--profile {light,standard,strict}` 档位与 `gate-config.json` 执行台账** |
+| `scripts/taint_graph.py` | Phase 3/5：跨请求污点图（BDG/ADG 最小实现）——`recover` 从反编译产物恢复常量键（literal / local-const / fill-composed），`build` 构图并校验写读分属不同 action、键一致、两端有证据；产出 `taint-graph.json` 供 G7 消费 |
 | `scripts/entrypoints_init.py` | Phase 3/5：从 `02-tiering.json` 生成入口枚举骨架 `entrypoints.json`（G4 的输入） |
-| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证上面脚本的判据，并把**文档示例命令与 CLI 参数表对拍**（14 组 / 101 条断言，结尾自报总数） |
+| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证上面脚本的判据，并把**文档示例命令与 CLI 参数表对拍**（15 组 / 114 条断言，结尾自报总数） |
 
 脚本都只用 Python 标准库，无第三方依赖，Windows / Linux / macOS 均可运行。用 `uv` 管理环境（`uv run` 自动建临时环境；无 `uv` 时直接 `python scripts/xxx.py` 亦可）。安装后建议先跑一次自检：
 

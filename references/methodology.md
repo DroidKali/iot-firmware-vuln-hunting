@@ -241,10 +241,21 @@ upgraded_findings: [F-012, F-013]
 
 **静态枚举的边界**：控制消息关键字常被动态拼接（`str_merge` / `snprintf`，如 `"lan0_" + "management_link"`），纯字符串匹配会漏检——必须按 Layer 3 反编译回溯拼接点（即 Bridge 的 OD-ICP：按需过程间常量传播）。
 
-**门禁判定（G6）**：`coverage_gate.py --cross-request` 扫描报告每条 finding 的 `Source:`：
+**门禁判定（G6 / G7）**：
+
+`coverage_gate.py --cross-request`（G6）扫描报告每条 finding 的 `Source:`：
 
 - 命中 `CROSS_REQUEST_SOURCE`（`nvram`/`uci` 键，或 `/tmp`·`/var`·`/dev/shm`·`/mnt`·`/data`·`persist` 路径）→ 该 finding **必须**含 `WRITE_FACE` 标记（`写入面`/`写端`/`write-face`/`可写`/`被写入`/`由…写入`/`导入`/`restore`/`nvram_set`…）；
 - 缺 → **fail**。静态配置（镜像内 `.conf`/`.cfg`）**不触发**——避免把「版本内固定配置」误当跨请求污点。
+
+`coverage_gate.py --taint-graph`（G7）进一步查**图**是否成立。G6 只认文字，文字可以含糊（写一句「由恢复配置导入」就过了），所以必须再问四个问题：
+
+1. **写面与读面是不是同一个 action？** 相同 → 这条链是**一阶**，不得计入高阶（Bridge 的输出里 `set` 与 `get` 分列，正是为了强制区分）。
+2. **键在两端是不是同一个字面量？** 不一致 → 常量恢复没做（OD-ICP 缺环），配对无效。
+3. **读面到 sink 真实可达吗？** 「读到了」不等于漏洞——必须给出 sink 地址与类型。
+4. **两端有没有地址与证据？** 没有就无法复核，等于没做。
+
+图由 `scripts/taint_graph.py` 生成（`recover` 恢复常量键 → 补读写点 → `build` 构图），方法全貌见 **`references/high-order-taint.md`**。strict 档位下，报告一旦声称存在高阶漏洞，缺图即失败。
 
 **已验证范例（RAXE500）**：`wan_ifname` 在 httpd 内全量 xrefs **只读零写** → 唯一写面锁定到「上传恢复配置 → `shared_acos_nvram_restore_configuration` 无键名白名单导入」→ 读面 `sub_11133C`/`sub_1114D4` 的 `system("ifconfig %s …")` → `F-012`（同源 `F-013`）。这条链在只审单请求时被判为「不可控」而漏掉。
 
@@ -388,7 +399,7 @@ G2 的 waiver 落在 `25-review-list.md` 的 `## WAIVER` 段，格式：
 
 门禁与报告都要能读到 waiver，并把它计入「未覆盖项 + 理由」。
 
-### 5.1.2 四条深度门禁（G4 / G5 / G6 / 类型→Base）
+### 5.1.2 四条深度门禁（G4 / G5 / G6 / 类型→Base）+ 高阶链图（G7）
 
 覆盖率门禁原本只回答「**每个文件**有没有结论」。这在 2026-10 的 RAXE500 审计上暴露了系统性问题：`usr/sbin/httpd` 有结论 → 文件级 100% PASS，但它 **2923 个函数只精读了 5 个、167 个 CGI handler 一个没读**，漏掉一条认证后 root 命令注入（`ipv6_disable.cgi` → nvram `wan_ifname` → `system("ifconfig %s mtu %d")`）——而且这条链是**跨请求**的（写面在上传恢复配置、读面在 ipv6 CGI），单请求视角根本看不到（§3.2）。为此新增四条门禁，把风险单位从「文件」提升到「**入口 / 断言 / 跨请求来源 / 类型**」。
 
@@ -425,7 +436,7 @@ G2 的 waiver 落在 `25-review-list.md` 的 `## WAIVER` 段，格式：
 
 要一次全开用 `--profile strict`：四条高阶门禁全部强制启用，且**未执行的必需检查项直接判失败**（`required SKIPPED → FAIL`）。Phase 5 的标准命令即带 `--profile strict`。复现性由 `gate-config.json` 承担——它记录档位、`GATE_VERSION`、各项阈值、各项 `status`，以及全部输入文件的 sha256，事后可校验「当时的判定是在什么输入上、用什么口径做出来的」。
 
-回归由 `scripts/selftest.py` 的 `[13/14] 扫描完整性与门禁严格性` 组覆盖（含 standard vs strict 的 SKIPPED 行为差异）；**文档与 CLI 的一致性**由 `[14/14]` 组对拍——它把 `README.md` / `SKILL.md` / `references/` / `assets/` 里每条 `scripts/*.py` 示例命令的 `--flag` 与脚本 `--help` 逐一对齐，并检查布尔开关没被当成带值参数（历史缺陷：`--tier` 是 `store_true`，文档却写成 `--tier <rootfs>`，照抄即报错，而单元测试全绿）。
+回归由 `scripts/selftest.py` 的 `[13/15] 扫描完整性与门禁严格性` 组覆盖（含 standard vs strict 的 SKIPPED 行为差异）；**文档与 CLI 的一致性**由 `[14/15]` 组对拍——它把 `README.md` / `SKILL.md` / `references/` / `assets/` 里每条 `scripts/*.py` 示例命令的 `--flag` 与脚本 `--help` 逐一对齐，并检查布尔开关没被当成带值参数（历史缺陷：`--tier` 是 `store_true`，文档却写成 `--tier <rootfs>`，照抄即报错，而单元测试全绿）。
 
 
 ### 5.2 审阅清单的写法

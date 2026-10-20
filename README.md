@@ -5,7 +5,7 @@
   <img alt="python" src="https://img.shields.io/badge/python-3.8%2B%20stdlib%20only-3776AB.svg?logo=python\&logoColor=white">  
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg">  
   <img alt="files" src="https://img.shields.io/badge/package-19%20files%20%C2%B7%208883%20lines-informational.svg">  
-  <img alt="selftest" src="https://img.shields.io/badge/selftest-101%20assertions%20passing-brightgreen.svg">  
+  <img alt="selftest" src="https://img.shields.io/badge/selftest-114%20assertions%20passing-brightgreen.svg">  
   <img alt="agent" src="https://img.shields.io/badge/type-Agent%20Skill-7B42BC.svg">  
 </p>
 
@@ -187,9 +187,11 @@ npx skills add https://github.com/DroidKali/iot-firmware-vuln-hunting --agent '*
 uv run scripts/selftest.py
 ```
 
-脚本会用纯 Python 手工构造合法 ELF64 与合成 rootfs，端到端跑通另外四个脚本，覆盖 **14 组 / 101 条断言**，其中包含「门禁必须拦下坏报告」的负向用例。断言总数由脚本自己在结尾打印，不需要去数日志。看到全绿即安装成功。
+脚本会用纯 Python 手工构造合法 ELF64 与合成 rootfs，端到端跑通另外四个脚本，覆盖 **15 组 / 114 条断言**，其中包含「门禁必须拦下坏报告」的负向用例。断言总数由脚本自己在结尾打印，不需要去数日志。看到全绿即安装成功。
 
-最后一组 `[14/14]` 把**文档当被测对象**：抓出 `README.md` / `SKILL.md` / `references/` / `assets/` 里每条 `scripts/*.py` 示例命令，逐个核对命令里出现的 `--flag` 是否真存在于脚本 `--help`，并检查布尔开关后面没跟取值。这条守卫来自一次真实事故——文档把 `store_true` 的 `--tier` 写成 `--tier <rootfs>`，照抄必然报错，而所有单元测试都是绿的。
+`[14/15]` 把**文档当被测对象**：抓出 `README.md` / `SKILL.md` / `references/` / `assets/` 里每条 `scripts/*.py` 示例命令，逐个核对命令里出现的 `--flag` 是否真存在于脚本 `--help`（有子命令的会逐个进去问），并检查布尔开关后面没跟取值。这条守卫来自一次真实事故——文档把 `store_true` 的 `--tier` 写成 `--tier <rootfs>`，照抄必然报错，而所有单元测试都是绿的。
+
+`[15/15]` 用 DIR878 的动机样例（`SetNetwork` 写 `lan0_management_link`、`SetRouterLanSettings` 读进 `system`）跑通 BDG/ADG，并验证三条否决路径：同一 action 内读写必须判**一阶**、缺 evidence 必须失败、拼不出来的键必须记 `unknown` 而不是占位。
 
 ### 2. 一次完整审计
 
@@ -230,6 +232,7 @@ uv run scripts/coverage_gate.py \
     --review-list fw-audit/$TARGET/25-review-list.md \
     --tiering     fw-audit/$TARGET/02-tiering.json \
     --entrypoints fw-audit/$TARGET/entrypoints.json \
+    --taint-graph fw-audit/$TARGET/taint-graph.json \
     --report      fw-audit/$TARGET/report.md \
     --out         fw-audit/$TARGET/40-coverage.md
 ```
@@ -238,19 +241,22 @@ uv run scripts/coverage_gate.py \
 
 `--profile strict` 会强制启用全部高级检查（G4/G5/G6/Base），并要求 `--candidates`、`--review-list`、`--report`、`--entrypoints` 齐全；**任何必需检查未执行都判失败**，并在 `40-coverage.gate-config.json` 里记录本次到底跑了哪些检查、输入哈希与版本。
 
+`--taint-graph` 是「报告声称了高阶漏洞」时的**必需项**：只写结论不给链，strict 档位直接失败。
+
 ---
 
 ## 脚本
 
-五个脚本都**只用 Python 标准库**，无第三方依赖。
+六个脚本都**只用 Python 标准库**，无第三方依赖。
 
 | 脚本                         | 行数   | 用途                                                              |
 | -------------------------- | ---- | --------------------------------------------------------------- |
 | `scripts/fw_triage.py`     | 852  | Phase 0 / 2：固件度量、熵扫描、ELF 加固画像、SUID 面、Tier 分层、EALB 预算            |
-| `scripts/coverage_gate.py` | 1657 | Phase 5：覆盖率门禁 + CVE 纪律检查（`--report`，V0–V4）+ 审阅清单三方对齐（`--review-list`）+ G4 入口级覆盖 + G5 绕过矩阵 + **G6 跨请求污点溯源** + 类型→Base + 自动修复计划 + **`--profile strict` 档位** + **`gate-config.json` 执行台账** |
+| `scripts/coverage_gate.py` | 1781 | Phase 5：覆盖率门禁 + CVE 纪律检查（`--report`，V0–V4）+ 审阅清单三方对齐（`--review-list`）+ G4 入口级覆盖 + G5 绕过矩阵 + **G6 跨请求污点溯源** + **G7 跨请求污点图** + 类型→Base + 自动修复计划 + **`--profile strict` 档位** + **`gate-config.json` 执行台账** |
+| `scripts/taint_graph.py`   | 764  | Phase 3 / 5：跨请求污点图（BDG/ADG 最小实现）——`recover` 恢复动态拼接的键（literal / local-const / fill-composed），`build` 构图并校验「写读分属不同 action、键一致、两端有证据」，产出 `taint-graph.json` |
 | `scripts/sink_scan.py`     | 726  | Phase 3 Layer 1：多语言危险模式扫描（正则初筛 + ast-grep 结构级二次过滤；引擎缺失自动回退并记录；**分块流式读取 + `scan_integrity` 完整性台账**）                               |
 | `scripts/entrypoints_init.py` | 139 | Phase 3 / 5：从 `02-tiering.json` 生成 `entrypoints.json` 骨架（`--merge` 保留已手填数据） |
-| `scripts/selftest.py`      | 883  | 安装自检：合成固件与 rootfs，端到端验证上面四个脚本的判据 + **文档与 CLI 一致性**（14 组 / 101 条断言，结尾自报总数）                 |
+| `scripts/selftest.py`      | 1032 | 安装自检：合成固件与 rootfs，端到端验证上面四个脚本的判据 + **文档与 CLI 一致性**（15 组 / 114 条断言，结尾自报总数）                 |
 
 ### 覆盖率门禁判据
 
@@ -264,6 +270,7 @@ uv run scripts/coverage_gate.py \
 - **G4 入口级覆盖**（`--entrypoints`）：服务型大二进制的 handler 需枚举完整，且每个入口有处置结论
 - **G5 绕过矩阵**（`--bypass-check`）：写了「有防护 / 不可利用」的入口必须附 B1–B12 逐项证伪
 - **G6 跨请求污点溯源**（`--cross-request`）：Source 指向持久化存储（nvram/uci 键、/tmp·/var 可写路径）的漏洞必须声明**写入面**（污点跨请求传递，Bridge/IEEE S&P'26）
+- **G7 跨请求污点图**（`--taint-graph`）：把「写入面」这句话升级成四元组链——`write.action → 键 → read.action → sink`。四条判据：①写面与读面**必须分属不同 action**（同一 action = 一阶，不许算高阶）②键两端字面一致 ③读面到 sink 真实可达 ④两端有地址与证据。报告声称高阶却没给图 → strict 下失败
 - **类型 → DKTSS Base 命中**（`--type-base`）：报告里出现的类型必须能映射到 Base 表（`--type-base-strict` 下未命中即失败）
 - 报告完整性：9 个必填字段齐全
 
@@ -316,7 +323,7 @@ uv run scripts/coverage_gate.py \
 
 四类跳过原因分开记：`skip-dir`（设计如此）/ `excluded`（调用方排除）/ `too-large`（能力边界）/ `stat-failed`（异常）。**`complete: false` 时不得在报告里声称「已完整扫描」**——直接把 `scan_integrity` 贴进报告附录即可。
 
-> 旧实现只 `f.read(8 << 20)`，20 MB 的 CGI 二进制后半段一个字符串都扫不到，输出里还看不出来。回归测试 `[13/14]` 用 9.5 MiB 偏移与跨块边界两个样本把这条钉死。
+> 旧实现只 `f.read(8 << 20)`，20 MB 的 CGI 二进制后半段一个字符串都扫不到，输出里还看不出来。回归测试 `[13/15]` 用 9.5 MiB 偏移与跨块边界两个样本把这条钉死。
 
 ---
 
@@ -327,7 +334,8 @@ uv run scripts/coverage_gate.py \
 | 文件                                | 行数  | 何时读                                                  |
 | --------------------------------- | --- | ---------------------------------------------------- |
 | `references/atomic-capabilities.md` | 716 | **决策判据 + 原子能力**：Phase 1 提取选路（§3.1）、Phase 4 仿真选路（§3.2）、**Phase 3 Layer 1 引擎选路（§3.3）**、54 项原子能力清单与实现命令（§1–§9）、**结构级脚本扫描（§5.2）**、整链工具的合法定位（§10.2）、能力缺席时的替代路径（§11） |
-| `references/methodology.md`       | 491 | 需要 Tier 规则细节、EALB 计算、**三轨模型（Track A/B/C）**、跨请求污点（§3.2）、门禁判据的完整定义                  |
+| `references/methodology.md`       | 510 | 需要 Tier 规则细节、EALB 计算、**三轨模型（Track A/B/C）**、跨请求污点（§3.2）、门禁判据的完整定义                  |
+| `references/high-order-taint.md`  | 312 | **高阶污点专章**：AEH 三形态与阈值、IPF 三模型、BDG 两段污点、**OD-ICP 常量恢复**、控制消息双约束（集中性 10 + find_interval）、ADG 三类控制依赖、**欠约束符号执行参数与坑**、`taint-graph.json` 与 G7、无 IDA/angr 时的降级路径 |
 | `references/emulation-fuzzing.md` | 357 | Phase 4 需要模拟与模糊的具体做法、踩坑与替代方案                         |
 | `references/reporting.md`         | 353 | Phase 5 需要报告字段、评分表、脱敏规范、DKTSS、⑥↔④ 迁移规则、G6 写入面                              |
 | `references/vuln-conditions.md`   | 393 | **Layer 3 / Phase 4**：候选要不要升 `CONFIRMED`？按类型逐条排除成立条件 |
@@ -345,8 +353,9 @@ iot-firmware-vuln-hunting/
 ├── SKILL.md                      # 主入口：流水线 + 七条铁律 + 各 Phase 操作细节
 ├── README.md
 ├── LICENSE
-├── references/                   # 8 篇按需加载的知识库
+├── references/                   # 9 篇按需加载的知识库
 │   ├── methodology.md            # 方法论层：Tier 规则 / EALB / 三层审计（Track A/B/C）/ 门禁判据完整定义
+│   ├── high-order-taint.md       # 高阶污点专章：AEH/IPF/BDG/ADG + OD-ICP + 符号执行参数 + G7 判据
 │   ├── atomic-capabilities.md    # 判据层 + 原子能力层：Phase 1/4 选路树 + 54 项原子能力 + 替代路径矩阵
 │   ├── vuln-conditions.md        # 漏洞成立条件判定表（固件版）
 │   ├── vuln-taxonomy.md          # 漏洞分类学（按攻击面，13 类）
@@ -356,11 +365,13 @@ iot-firmware-vuln-hunting/
 │   └── resource-index.md         # 外部资源索引
 ├── assets/
 │   ├── sink-rules.json           # 38 条规则 / 15 类（数据驱动扫描，含 cross-request 跨请求污点与 structural 结构级二次过滤）
+│   ├── ipc-functions.json        # IPC 原语词表：写/读端、键参数位置、控制/持久化标记、集中性阈值、sink 分类、AEH 模式
 │   ├── tier-rules.json           # R0–R7 分层规则
 │   └── report-template.md        # 固定 7 区块报告模板
-└── scripts/                      # 5 个纯标准库 Python 脚本
+└── scripts/                      # 6 个纯标准库 Python 脚本
     ├── fw_triage.py
     ├── sink_scan.py
+    ├── taint_graph.py
     ├── coverage_gate.py
     ├── entrypoints_init.py
     └── selftest.py

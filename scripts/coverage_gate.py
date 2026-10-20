@@ -62,7 +62,7 @@ RECOMMEND_LINE = re.compile(r"^\s*[-*]*\s*\*{0,2}(?:修复建议|建议|加固�
 BYPASS_ITEM = re.compile(r"\bB(?:1[0-2]|[1-9])\b")
 BYPASS_MIN_ITEMS = 10          # 一张完整 B1–B12 矩阵至少应出现 10 个条目号
 
-GATE_VERSION = "1.4"           # 门禁语义版本：判据变化时递增，便于复算历史结论
+GATE_VERSION = "1.5"           # 门禁语义版本：判据变化时递增，便于复算历史结论
 
 # ── 候选处置状态枚举（封闭集合）─────────────────────────────────────────────
 # 「文本里提过这个 ID」不等于「这条候选被处置过」。只有落在枚举内的结构化
@@ -463,6 +463,83 @@ def check_bypass_matrix(verified_path: str) -> Dict[str, Any]:
         if not has_matrix:
             out["missing_matrix"].append({
                 "title": title[:80], "line": start + 1, "items_found": len(items)})
+    return out
+
+
+HIGH_ORDER_CLAIM = re.compile(
+    r"高阶|high[-_ ]?order|other_get|跨请求污点", re.I)
+# 「无高阶漏洞」「非高阶」这类否定表述不是声明，先剔掉再判
+HIGH_ORDER_NEG = re.compile(
+    r"(?:无|非|不属于|不涉及|未发现|未见|没有)\s*高阶"
+    r"|(?:无|非|不属于|不涉及|未发现|未见|没有)\s*跨请求污点", re.I)
+
+
+def report_claims_high_order(report_path: str) -> bool:
+    """报告是否**声称**了高阶（跨请求）漏洞。
+
+    只认「漏洞详情」区块内的 finding 正文，不认报告其它章节提到这些词——
+    否则一句「本次未发现高阶漏洞」也会被当成声明（否定表述会被 HIGH_ORDER_NEG 剔除）。"""
+    if not report_path or not os.path.isfile(report_path):
+        return False
+    lines = read(report_path).splitlines()
+    start = None
+    for i, ln in enumerate(lines):
+        m = re.match(r"^#{1,3}\s*(.+)$", ln.strip())
+        if m and "漏洞详情" in m.group(1):
+            start = i
+            break
+    body = "\n".join(lines[start:]) if start is not None else "\n".join(lines)
+    return bool(HIGH_ORDER_CLAIM.search(HIGH_ORDER_NEG.sub("", body)))
+
+
+def check_taint_graph(path: str, report_path: str = "") -> Dict[str, Any]:
+    """G7：跨请求污点图（taint-graph.json）——把「声明写入面」升级为「四元组闭合」。
+
+    G6 只要求报告**文字里**出现写入面。文字可以含糊：写成「由恢复配置导入」
+    就过了，但那个键到底由哪个 action 写、读它的又是哪个 action，仍可能是错的。
+    G7 要求把链写成图：
+
+        write.action --key--> 存储 --key--> read.action --> sink
+
+    并机械校验三条语义（与 Bridge 的高阶定义一致）：
+      1. 写面与读面**必须分属不同 action**，否则是一阶漏洞（不得计入高阶）
+      2. 键在两端**必须字面一致**（不一致说明常量恢复没做）
+      3. 每一端都要有 **addr + evidence**，sink 要归到已知类型
+    外加一条：报告声称了高阶漏洞，图里就必须真有高阶链——不能只有结论没有图。
+    """
+    out: Dict[str, Any] = {
+        "checked": False, "chains": 0, "first_order": 0, "violations": [],
+        "warnings": [], "summary": {}, "skipped": None,
+        "claims_high_order": report_claims_high_order(report_path),
+    }
+    if not path:
+        out["skipped"] = "未提供 --taint-graph"
+        return out
+    out["checked"] = True
+    if not os.path.isfile(path):
+        out["violations"].append(f"taint-graph 不存在: {path}")
+        return out
+    try:
+        g = json.load(open(path, encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        out["violations"].append(f"taint-graph 解析失败: {exc}")
+        return out
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    import taint_graph as tg  # noqa: E402
+
+    val = tg.validate_graph(g)
+    out["violations"].extend(val["violations"])
+    out["warnings"].extend(val["warnings"])
+    out["chains"] = len(g.get("chains") or [])
+    out["first_order"] = len(g.get("first_order") or [])
+    out["summary"] = g.get("summary") or {}
+
+    if out["claims_high_order"] and out["chains"] == 0:
+        out["violations"].append(
+            "报告声称存在高阶漏洞，但图里 0 条高阶链——"
+            "写面/读面没有配对，或写读落在同一 action（那种情况是一阶）")
     return out
 
 
@@ -1020,6 +1097,9 @@ def main() -> int:
                     help="G5：开启绕过矩阵完备校验（对 30-findings-verified.md）")
     ap.add_argument("--cross-request", action="store_true",
                     help="G6：开启跨请求污点溯源校验（持久化存储来源须声明写入面）")
+    ap.add_argument("--taint-graph",
+                    help="G7：跨请求污点图 taint-graph.json（由 taint_graph.py 生成）；"
+                         "校验『写面 action ≠ 读面 action + 键一致 + 两端有证据』")
     ap.add_argument("--auto-recover", action="store_true",
                     help="G1/G3 自动修复（G2 永不自动）；默认关闭")
     ap.add_argument("--max-rounds", type=int, default=2,
@@ -1170,6 +1250,9 @@ def main() -> int:
     xreq = check_cross_request(args.report) if args.cross_request else {
         "checked": False, "findings": 0, "violations": [], "skipped": "未启用 --cross-request"}
 
+    # G7 跨请求污点图（写面/读面/键/sink 四元组闭合）
+    tgraph = check_taint_graph(args.taint_graph, args.report)
+
     # 类型 → DKTSS Base 命中
     base_path = args.base_table or os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "..", "references", "reporting.md")
@@ -1266,6 +1349,15 @@ def main() -> int:
             not xreq["violations"],
             f"持久化存储来源 {xreq['findings']} 条，缺写入面 {len(xreq['violations'])} 条"))
 
+    # G7 跨请求污点图（高阶链必须四元组闭合）
+    if tgraph["checked"]:
+        checks.append((
+            "跨请求污点图（G7）",
+            not tgraph["violations"],
+            f"高阶链 {tgraph['chains']} 条 / 一阶 {tgraph['first_order']} 条；"
+            f"违规 {len(tgraph['violations'])} 条"
+            + (f"；报告声称高阶={tgraph['claims_high_order']}" if tgraph["claims_high_order"] else "")))
+
     # 类型 → DKTSS Base 命中
     if tbase["checked"]:
         bad = len(tbase["unmapped"])
@@ -1301,6 +1393,11 @@ def main() -> int:
     if not xreq["checked"]:
         skipped_checks.append(("跨请求污点溯源（G6）",
                                xreq.get("skipped") or "未启用 --cross-request", False))
+    if not tgraph["checked"]:
+        # 报告声称了高阶漏洞却没给图 → strict 下必须失败（「说自己是高阶」要有图兜底）
+        skipped_checks.append(("跨请求污点图（G7）",
+                               tgraph.get("skipped") or "未提供 --taint-graph",
+                               bool(STRICT and tgraph["claims_high_order"])))
     if not tbase["checked"]:
         skipped_checks.append(("报告类型命中 Base 表",
                                tbase.get("skipped") or "未启用 --type-base", False))
@@ -1541,6 +1638,31 @@ def main() -> int:
         lines += ["", "## 跨请求污点溯源（G6）", "",
                   f"通过。{xreq['findings']} 条持久化存储来源均已声明写入面。"]
 
+    # G7 明细
+    if tgraph["checked"] and (tgraph["violations"] or tgraph["warnings"]):
+        s = tgraph["summary"] or {}
+        lines += ["", "## 跨请求污点图（G7，高阶链四元组闭合）", "",
+                  f"图内：键 {s.get('keys', 0)} 个 / 高阶链 {tgraph['chains']} 条 / "
+                  f"一阶 {tgraph['first_order']} 条 / 控制键 {s.get('control_keys', 0)} 个 / "
+                  f"ADG 边 {s.get('adg_edges', 0)} 条。", ""]
+        if tgraph["violations"]:
+            lines += ["以下链不成立（写面 action ≠ 读面 action 才是高阶；键必须一致；"
+                      "两端都要 addr + evidence）：", ""]
+            for v in tgraph["violations"]:
+                lines.append(f"- {v}")
+        if tgraph["warnings"]:
+            lines += ["", "提示：", ""]
+            for w in tgraph["warnings"]:
+                lines.append(f"- {w}")
+        lines += ["", "生成方式：`scripts/taint_graph.py build --facts taint-facts.json`；"
+                  "常量键恢复：`scripts/taint_graph.py recover --src <反编译目录>`。"
+                  "方法见 `references/high-order-taint.md`。", ""]
+    elif tgraph["checked"]:
+        s = tgraph["summary"] or {}
+        lines += ["", "## 跨请求污点图（G7）", "",
+                  f"通过。高阶链 {tgraph['chains']} 条、一阶 {tgraph['first_order']} 条，"
+                  f"覆盖键 {s.get('keys', 0)} 个。"]
+
     # 类型 → Base 明细
     if tbase["checked"] and tbase["unmapped"]:
         lines += ["", "## 报告类型命中 DKTSS Base 表", "",
@@ -1608,6 +1730,7 @@ def main() -> int:
                 "require_entrypoints": bool(args.require_entrypoints),
                 "bypass_check": bool(args.bypass_check),
                 "cross_request": bool(args.cross_request),
+                "taint_graph": bool(args.taint_graph),
                 "type_base_strict": bool(args.type_base_strict),
                 "review_list": bool(args.review_list),
                 "report": bool(args.report),
@@ -1619,6 +1742,7 @@ def main() -> int:
                              ("review_list", args.review_list),
                              ("tiering", args.tiering),
                              ("report", args.report),
+                             ("taint_graph", args.taint_graph),
                              ("entrypoints", ep_path))
             },
             "checks": ROWS,
