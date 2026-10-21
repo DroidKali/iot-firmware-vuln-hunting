@@ -892,32 +892,75 @@ def main() -> int:
                       ensure_ascii=False)
         return p
 
+    # 夹具取自 DIR878 实测（vuln_result.txt 原文），地址与 action 名均非编造：
+    #   'lan0_management_link': other_get {prog.cgi: {SetRouterLanSettings: {restart_lan:
+    #        {('rc','430d1c'): {command_exec: ['4312cc']}}}, ...}}  set {prog.cgi: {SetNetworkSettings: {'43b57c': None}}}
     W1 = {"key": "lan0_management_link", "func": "nvram_safe_set", "addr": "0x43b57c",
           "evidence": "prog.cgi:0x43b57c nvram_safe_set(\"lan0_management_link\", v)"}
-    R1 = {"key": "lan0_management_link", "func": "nvram_safe_get", "addr": "0x430d1c",
-          "evidence": "prog.cgi:0x430d1c nvram_safe_get(...)",
-          "sink": {"name": "system", "addr": "0x4312cc"}}
+
+    def _read(key: str, addr: str, sink_addr: str, via: str, sink: str = "system",
+              binary: str = "rc", **extra) -> dict:
+        d = {"key": key, "func": "nvram_safe_get", "addr": addr, "binary": binary,
+             "evidence": f"{binary}:{addr} nvram_safe_get({key})",
+             "via_control": {"func": "notify_rc", "value": via} if via else None,
+             "sink": {"name": sink, "addr": sink_addr}}
+        d.update(extra)
+        return d
+
     hops = _facts("facts-ho.json", [
         {"id": "SetNetworkSettings", "binary": "prog.cgi", "writes": [dict(W1)],
-         "ipc_control": [{"func": "notify_rc", "value": "start_vlanall",
-                          "target_action": "restart_lan", "target_binary": "rc",
+         "ipc_control": [{"func": "notify_rc", "value": "start_vlanwanall",
+                          "target_action": "SetVLANSettings", "target_binary": "prog.cgi",
                           "evidence": "prog.cgi:0x430f00 notify_rc(...)"}]},
-        {"id": "SetRouterLanSettings", "binary": "prog.cgi", "reads": [dict(R1)]},
-        {"id": "restart_lan", "binary": "rc", "reads": [dict(R1)]},
+        {"id": "SetRouterLanSettings", "binary": "prog.cgi",
+         "reads": [_read("lan0_management_link", "0x430d1c", "0x4312cc", "restart_lan")]},
+        {"id": "SetVLANSettings", "binary": "prog.cgi",
+         "reads": [_read("lan0_management_link", "0x430d1c", "0x4312cc", "start_vlanwanall")]},
     ])
     g_ho = os.path.join(tg, "graph-ho.json")
     r = run([TG, "build", "--facts", hops, "--out", g_ho, "--strict"])
     g = json.load(open(g_ho, encoding="utf-8"))
-    check("BDG 构图：跨 action 写读 → 2 条高阶链",
+    check("BDG 构图：写请求 ≠ 触发读的请求 → 2 条高阶链",
           r.returncode == 0 and g["summary"]["high_order_chains"] == 2
           and g["summary"]["first_order_chains"] == 0,
           f"rc={r.returncode} high={g['summary']['high_order_chains']}")
+    check("读点落在别的进程（rc）且带 via_control → 链成立",
+          all(c["read"]["binary"] == "rc" and c["read"]["via_control"]["value"]
+              for c in g["chains"]))
     check("ADG 边（notify_rc → 目标 action）入图",
           len(g.get("adg") or []) == 1
-          and g["adg"][0]["to"]["action"] == "restart_lan")
+          and g["adg"][0]["to"]["action"] == "SetVLANSettings")
+
+    # 实测校正：SysLogRemote_IPAddress 是**一阶**——写与触发都是 SetSysLogSettings，
+    # 读点却在 rc（other_get 只说「读在别的二进制」，不等于高阶）
+    syslog = _facts("facts-syslog.json", [
+        {"id": "SetSysLogSettings", "binary": "prog.cgi",
+         "writes": [{"key": "SysLogRemote_IPAddress", "func": "nvram_safe_set",
+                     "addr": "0x436450", "evidence": "prog.cgi:0x436450 nvram_safe_set(...)"}],
+         "reads": [_read("SysLogRemote_IPAddress", "0x451f00", "0x451fc8",
+                         "restart_SystemLog")]}])
+    g_syslog = os.path.join(tg, "graph-syslog.json")
+    r = run([TG, "build", "--facts", syslog, "--out", g_syslog])
+    gs = json.load(open(g_syslog, encoding="utf-8"))
+    check("写与触发同一请求（即使读点在 rc）→ 判一阶",
+          r.returncode == 0 and gs["summary"]["high_order_chains"] == 0
+          and gs["summary"]["first_order_chains"] == 1,
+          f"high={gs['summary']['high_order_chains']} first={gs['summary']['first_order_chains']}")
+
+    # C5：跨进程读必须给 via_control，否则「请求 2 能到达读点」只是假设
+    novia = json.load(open(hops, encoding="utf-8"))
+    novia["actions"][1]["reads"][0].pop("via_control")
+    novia_p = os.path.join(tg, "facts-novia.json")
+    json.dump(novia, open(novia_p, "w", encoding="utf-8"), ensure_ascii=False)
+    g_novia = os.path.join(tg, "graph-novia.json")
+    r = run([TG, "build", "--facts", novia_p, "--out", g_novia, "--strict"])
+    check("跨进程读缺 via_control → 判失败（请求未证明能到达）",
+          r.returncode == 1, f"rc={r.returncode}")
 
     same = _facts("facts-first.json", [
-        {"id": "SetSame", "binary": "prog.cgi", "writes": [dict(W1)], "reads": [dict(R1)]}])
+        {"id": "SetSame", "binary": "prog.cgi", "writes": [dict(W1)],
+         "reads": [_read("lan0_management_link", "0x43c000", "0x43c100", "",
+                         binary="prog.cgi")]}])
     g_first = os.path.join(tg, "graph-first.json")
     run([TG, "build", "--facts", same, "--out", g_first])
     gf = json.load(open(g_first, encoding="utf-8"))

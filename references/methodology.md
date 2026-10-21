@@ -248,12 +248,13 @@ upgraded_findings: [F-012, F-013]
 - 命中 `CROSS_REQUEST_SOURCE`（`nvram`/`uci` 键，或 `/tmp`·`/var`·`/dev/shm`·`/mnt`·`/data`·`persist` 路径）→ 该 finding **必须**含 `WRITE_FACE` 标记（`写入面`/`写端`/`write-face`/`可写`/`被写入`/`由…写入`/`导入`/`restore`/`nvram_set`…）；
 - 缺 → **fail**。静态配置（镜像内 `.conf`/`.cfg`）**不触发**——避免把「版本内固定配置」误当跨请求污点。
 
-`coverage_gate.py --taint-graph`（G7）进一步查**图**是否成立。G6 只认文字，文字可以含糊（写一句「由恢复配置导入」就过了），所以必须再问四个问题：
+`coverage_gate.py --taint-graph`（G7）进一步查**图**是否成立。G6 只认文字，文字可以含糊（写一句「由恢复配置导入」就过了），所以必须再问五个问题：
 
-1. **写面与读面是不是同一个 action？** 相同 → 这条链是**一阶**，不得计入高阶（Bridge 的输出里 `set` 与 `get` 分列，正是为了强制区分）。
+1. **写它的请求与触发这次读的请求是不是同一个？** 相同 → **一阶**，不得计入高阶。⚠️ 注意比的是**触发 action**，不是读点的宿主进程——读点几乎总在 `rc`/`librcm.so`，拿它当「action」会把一阶全部算成高阶。DIR878 实测：`SysLogRemote_IPAddress` 与 `lan0_management_link` 都带 `other_get`、读点都在 `rc`，但前者 set 与 trigger 同为 `SetSysLogSettings`（一阶），后者是 `SetNetworkSettings` 写、`SetVLANSettings` 读（高阶）。
 2. **键在两端是不是同一个字面量？** 不一致 → 常量恢复没做（OD-ICP 缺环），配对无效。
 3. **读面到 sink 真实可达吗？** 「读到了」不等于漏洞——必须给出 sink 地址与类型。
 4. **两端有没有地址与证据？** 没有就无法复核，等于没做。
+5. **读点在别的进程时，哪个控制值把请求带过去？** 缺 `via_control` → 「请求 2 能到达读点」只是假设（ADG 边缺失）。
 
 图由 `scripts/taint_graph.py` 生成（`recover` 恢复常量键 → 补读写点 → `build` 构图），方法全貌见 **`references/high-order-taint.md`**。strict 档位下，报告一旦声称存在高阶漏洞，缺图即失败。
 

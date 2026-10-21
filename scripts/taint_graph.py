@@ -3,23 +3,32 @@
 """
 taint_graph.py — 跨请求（高阶）污点图：BDG/ADG 的最小可执行实现
 
-背景（方法来源：Bridge, IEEE S&P 2026）：
+背景（方法来源：Bridge, IEEE S&P 2026；已用其 artifact 在 DIR878 上实测复现）：
   一阶漏洞在一个请求内闭合：source → … → sink。
   高阶漏洞的链被**持久化存储**切断：
       请求 1（action A）：用户输入 → nvram_safe_set("k", v)
       请求 2（action B）：nvram_safe_get("k") → system(...)
   只审单请求时，B 里的 `k` **没有写入点**，A 里的 `v` **没有消费点**，两边都看
-  不出问题。要证明这类漏洞，必须显式构造一条**跨动作的四元组链**：
+  不出问题。要证明这类漏洞，必须显式构造一条**五元组链**：
 
-      write_action --key--> store --key--> read_action --> sink
+      write.action --key--> store --key--> read.trigger_action
+                                          └─ via(控制值) → read.binary:addr → sink
 
-本脚本把这四元组变成可执行产物 `taint-graph.json`：把散在报告正文里的
-「写入面 / 键 / 读面 / sink」抽取成图，做**机械可判**的一致性检查，供
-`coverage_gate.py --taint-graph` 消费。它回答三个问题：
+  注意两个「action」不是一回事（实测校正）：
+    · read.trigger_action = 前端发起、最终导致该次读取的 action（来自 ADG）
+    · read.binary:addr    = 真正执行读取的进程与地址（BDG 的 get 侧，常是 rc/librcm.so）
+  Bridge 的 `other_get` 只是说「读发生在另一个二进制」；**一阶/高阶的分界是
+  写它的请求与触发读的请求是否同一个**。DIR878 的 `SysLogRemote_IPAddress`
+  就是典型一阶：set 与 trigger 都是 SetSysLogSettings，但读点落在 rc。
 
-  1. 这个键到底被哪些 action 写过、被哪些 action 读过？（BDG）
-  2. 写与读**是不是同一个 action**？相同 → 一阶（不是高阶），必须降级标注。
+本脚本把五元组变成可执行产物 `taint-graph.json`：把散在报告正文里的
+「写入面 / 键 / 触发 action / 读点 / sink」抽取成图，做**机械可判**的一致性
+检查，供 `coverage_gate.py --taint-graph` 消费。它回答四个问题：
+
+  1. 这个键到底被哪些 action 写过、被哪些进程读过？（BDG）
+  2. 写它的请求与触发读的请求**是不是同一个**？相同 → 一阶，必须降级标注。
   3. 键两端**是否字面一致**？不一致 → 常量恢复没做（见 `recover`），配对无效。
+  4. 读点在别的进程时，**哪个控制值**把请求带过去？没有 → 只是假设（缺 ADG 边）。
 
 三种用法：
 
@@ -193,11 +202,18 @@ def build_graph(facts: Dict[str, Any], ipc: Dict[str, Any]) -> Dict[str, Any]:
                             "func": ep.get("func"), "detail": "读端键为空/未恢复"})
             continue
         rec = {
-            "action": aid, "binary": binary,
+            "action": aid,
+            # 读点的宿主进程可能不是触发 action 所在的二进制（rc / librcm.so 最常见），
+            # 端点级 `binary` 可覆盖，BDG 的 get 侧本来就是按进程记的。
+            "binary": ep.get("binary") or binary,
             "func": ep.get("func") or "",
             "addr": ep.get("addr") or "",
             "mechanism": ep.get("mechanism") or _mech_of(ep.get("func") or "", ipc, "read") or "",
             "evidence": ep.get("evidence") or "",
+            # 触发这次读取的**前端 action**（来自 ADG）；缺省退回宿主 action，
+            # 但跨二进制读取缺它就无法区分一阶/高阶，validate 会拦下。
+            "trigger_action": ep.get("trigger_action") or "",
+            "via_control": ep.get("via_control") or None,
         }
         sink = ep.get("sink")
         if isinstance(sink, dict) and (sink.get("name") or sink.get("addr")):
@@ -237,17 +253,26 @@ def build_graph(facts: Dict[str, Any], ipc: Dict[str, Any]) -> Dict[str, Any]:
         for w in keys[k]["writers"]:
             for r in keys[k]["readers"]:
                 seq += 1
-                same_action = (w["action"] == r["action"] and w["binary"] == r["binary"])
+                # 判据 C1（实测校正）：比的是**触发该次读取的前端 action**，不是读点的
+                # 宿主进程。读点常在别的进程（rc / librcm.so），拿它当 "action" 永远
+                # 判成高阶——Bridge 的 other_get 指「读发生在另一个二进制」，而一阶/
+                # 高阶的分界是「写它的请求」与「触发读的请求」是否同一个。
+                trig = r.get("trigger_action") or r["action"]
+                same_request = (w["action"] == trig)
                 chain = {
-                    "id": ("F-%03d" if same_action else "H-%03d") % seq,
-                    "order": "first" if same_action else "high",
+                    "id": ("F-%03d" if same_request else "H-%03d") % seq,
+                    "order": "first" if same_request else "high",
                     "key": k,
                     "write": {kk: w[kk] for kk in ("action", "binary", "func", "addr", "evidence")},
-                    "read": {kk: r[kk] for kk in ("action", "binary", "func", "addr", "evidence")},
+                    "read": {kk: r.get(kk) for kk in ("binary", "func", "addr", "evidence")},
                     "sink": dict(r["sink"]),
                     "mechanism": keys[k]["mechanism"],
                     "control_message": keys[k]["concentration"]["control_candidate"],
                 }
+                chain["read"]["action"] = trig
+                chain["read"]["host_action"] = r["action"]
+                if r.get("via_control"):
+                    chain["read"]["via_control"] = dict(r["via_control"])
                 missing = [f"{side}.evidence" for side in ("write", "read")
                            if not chain[side].get("evidence")]
                 if not chain["write"].get("addr") or not chain["read"].get("addr"):
@@ -256,7 +281,7 @@ def build_graph(facts: Dict[str, Any], ipc: Dict[str, Any]) -> Dict[str, Any]:
                     missing.append("sink.kind")
                 if missing:
                     chain["defects"] = missing
-                (first_order if same_action else chains).append(chain)
+                (first_order if same_request else chains).append(chain)
 
     # 控制流边（ADG）：action --ipc--> action
     adg: List[Dict[str, Any]] = []
@@ -323,14 +348,24 @@ def validate_graph(g: Dict[str, Any]) -> Dict[str, Any]:
         if c.get("order") != "high":
             v.append(f"{cid}: 出现在 chains 里但 order != high")
         wr, rd = c.get("write") or {}, c.get("read") or {}
-        # 核心语义：高阶 = 写面与读面不在同一个 action
-        if wr.get("action") == rd.get("action") and wr.get("binary") == rd.get("binary"):
-            v.append(f"{cid}: 写面与读面是同一 action（{wr.get('action')}），这是"
-                     f"一阶漏洞而不是高阶——不得计入 chains")
+        # 核心语义（实测校正）：高阶 = **写它的前端 action** ≠ **触发读的前端 action**。
+        # 读点本身常在另一个进程（rc / librcm.so），拿读点宿主进程当 action 会把
+        # 一阶误判成高阶（DIR878 的 SysLogRemote_IPAddress 就是这样：set 与 trigger
+        # 都是 SetSysLogSettings，读却发生在 rc）。
+        if wr.get("action") == rd.get("action"):
+            v.append(f"{cid}: 写面与读面的**触发 action** 相同（{wr.get('action')}），"
+                     f"这是一阶漏洞而不是高阶——不得计入 chains")
         if not c.get("key"):
             v.append(f"{cid}: 缺 key")
         if wr.get("key") and rd.get("key") and wr["key"] != rd["key"]:
             v.append(f"{cid}: 写读键不一致（{wr['key']} != {rd['key']}）")
+        # C5：读点在别的进程时，必须给出「哪个控制值把请求带过去」——
+        # 否则「请求 2 能到达读点」只是假设（Bridge 用 ADG 证明这一步）。
+        if rd.get("binary") and wr.get("binary") and rd["binary"] != wr["binary"]:
+            via = rd.get("via_control") or {}
+            if not via.get("value"):
+                v.append(f"{cid}: 读点在另一个进程（{rd['binary']}）却没有 via_control"
+                         f"——请求如何到达该进程未证明（缺 ADG 边）")
         for side in ("write", "read"):
             if not (c.get(side) or {}).get("evidence"):
                 v.append(f"{cid}: {side} 缺 evidence（跨请求链的每一端都要有落点）")
@@ -370,18 +405,19 @@ def render_markdown(g: Dict[str, Any], max_rows: int = 40) -> str:
     lines.append(f"- 键 {s.get('keys', 0)} 个；高阶链 {s.get('high_order_chains', 0)} 条；"
                  f"一阶链 {s.get('first_order_chains', 0)} 条；控制键 {s.get('control_keys', 0)} 个；"
                  f"ADG 边 {s.get('adg_edges', 0)} 条；缺陷 {s.get('defects', 0)} 处")
-    lines += ["", "## 高阶链（写面与读面分属不同 action）", "",
-              "| 链 | 键 | 写面（request 1） | 读面（request 2） | sink | 控制消息 |",
+    lines += ["", "## 高阶链（写请求 ≠ 触发读的请求）", "",
+              "| 链 | 键 | 写面（request 1） | 触发读的请求（request 2） | 读点 → sink | via（控制值） |",
               "|---|---|---|---|---|---|"]
     for c in (g.get("chains") or [])[:max_rows]:
         wr, rd = c.get("write") or {}, c.get("read") or {}
-        lines.append("| {id} | `{k}` | {wa} @ {wb} `{wc}` {waddr} | {ra} @ {rb} `{rc}` {raddr} | "
-                     "{sink} ({kind}) | {cm} |".format(
+        via = (rd.get("via_control") or {}).get("value") or "—"
+        lines.append("| {id} | `{k}` | {wa} @ {wb} `{wc}` {waddr} | {ra} | {rb} `{rc}` {raddr} → "
+                     "{sink} ({kind}) | {via} |".format(
                          id=c.get("id"), k=c.get("key"),
                          wa=wr.get("action"), wb=wr.get("binary"), wc=wr.get("func"), waddr=wr.get("addr"),
                          ra=rd.get("action"), rb=rd.get("binary"), rc=rd.get("func"), raddr=rd.get("addr"),
                          sink=(c.get("sink") or {}).get("name"), kind=(c.get("sink") or {}).get("kind"),
-                         cm="是" if c.get("control_message") else "否"))
+                         via=via))
     if not g.get("chains"):
         lines.append("| — | — | — | — | — | — |")
 

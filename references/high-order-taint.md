@@ -19,16 +19,38 @@
 请求 2（action B）：nvram_safe_get("k") → … → system(buf)  ← 读面 + sink
 ```
 
-由此得到**唯一可机械判定的定义**（Bridge 的输出也是这么组织的）：
+由此得到**可机械判定的五条判据**（Bridge 的输出也是这么组织的；C1/C5 已用其 artifact 在 DIR878 上实测校正）：
 
 | 判据 | 含义 | 不满足的后果 |
 |---|---|---|
-| **C1 写面与读面分属不同 action** | 同一 action 内读写同一键 = 一阶，不是高阶 | 不得计入高阶；报成高阶即虚增 |
+| **C1 写请求 ≠ 触发读的请求** | 比的是**前端 action**，不是读点的宿主进程 | 同一请求 → 一阶，不得计入高阶 |
 | **C2 键在两端字面一致** | 拼出来的键必须先恢复成常量子串 | 配不上对，链根本不存在 |
 | **C3 读面到 sink 真实可达** | 值被送进 `system` / 定长拷贝等 | 只是「读了」，不是漏洞 |
 | **C4 每一端有地址 + 证据** | 写点地址、读点地址、sink 地址 | 无法复核 = 无法证伪 |
+| **C5 跨进程读必须给控制值** | 读点在别的进程时，写明哪个控制值把请求带过去 | 「请求 2 能到达读点」只是假设（缺 ADG 边） |
 
-⚠️ **C1 是最容易被糊弄的一条。** 报告里写「Source: nvram `wan_ifname`（写入面为恢复配置导入）」看上去闭合了，但如果没有指明**写它的 action** 和**读它的 action 是哪一个**，就无法排除「其实是同一个 handler 里读自己刚写的值」——那种情况只是一阶，甚至可能是误报。
+⚠️ **C1 有个必须说清的陷阱：`other_get` ≠ 高阶。**
+
+Bridge 输出里的 `other_get` 只表示「**读发生在另一个二进制**」。而读点几乎从来不在边界二进制里（都在 `rc` / `librcm.so`），所以「读在别的进程」根本不能用来判高阶。真正的分界是**写它的请求**与**触发这次读的请求**是不是同一个：
+
+```
+'SysLogRemote_IPAddress'                       ← 实测：一阶
+  set:   SetSysLogSettings (prog.cgi 0x436450)
+  read:  触发者仍是 SetSysLogSettings，控制值 restart_SystemLog
+         → (rc, 0x451f00) → command_exec 0x451fc8
+         ↑ 同一个请求既写又触发 ⇒ 一阶
+
+'lan0_management_link'                         ← 实测：高阶
+  set:   SetNetworkSettings (prog.cgi 0x43b57c)
+  read:  触发者是 SetRouterLanSettings / SetVLANSettings（另一个请求），
+         控制值 restart_lan / start_vlanwanall
+         → (rc, 0x430d1c) → command_exec 0x4312cc
+         ↑ 请求 1 写、请求 2 读 ⇒ 高阶
+```
+
+所以链里必须区分两个「action」：**触发 action**（前端，来自 ADG）与**读点宿主**（进程+地址，来自 BDG）。只写后者，一阶会全部冒充高阶。
+
+⚠️ **C1 也最容易被糊弄。** 报告里写「Source: nvram `wan_ifname`（写入面为恢复配置导入）」看上去闭合了，但如果没有指明**写它的 action** 和**触发读的 action**，就无法排除「同一个 handler 里读自己刚写的值」——那种情况只是一阶，甚至可能是误报。
 
 ## 1. 三阶段流水线与本 skill 的对应物
 
@@ -36,7 +58,7 @@
 |---|---|---|---|
 | **① 入口点** | 识别 AEH（动作入口处理器）+ IPF（用户可控输入的解析函数） | `pre.txt`（边界二进制 / AEH / IPF） | Phase 2 动作关键字枚举 + Phase 3 Track A 的 source 识别；词表见 `assets/ipc-functions.json` |
 | **② BDG** | 以 IPF 为源、IPC 写为汇（第一段）；以 IPC 读为源、危险函数为汇（第二段）；按存储键 join | `BDG.txt` | `scripts/taint_graph.py` 的 `keys/chains` |
-| **③ ADG** | 跨二进制、跨库追踪 action handler 之间的**控制流**转移 | `action_result_maps.txt` | `taint_graph.py` 的 `adg` |
+| **③ ADG** | 跨二进制、跨库追踪 action handler 之间的**控制流**转移（它给出「哪个前端 action 触发了 rc 里的读」） | `action_result_maps.txt` | `taint_graph.py` 的 `adg` + facts 的 `trigger_action` / `via_control` |
 | **结论** | BDG × ADG ⇒ 高阶候选 | `vuln_result.txt` | `taint-graph.json` + 门禁 G7 |
 
 三者关系是**串行依赖**，不能跳：没有 AEH 就不知道「action A/B」是什么；没有 ADG 就不知道请求 2 是怎么被触发的（可能根本没有外部入口）。
@@ -266,20 +288,27 @@ facts 的最小形状：
   {"id":"SetNetworkSettings","binary":"prog.cgi",
    "writes":[{"key":"lan0_management_link","func":"nvram_safe_set","addr":"0x43b57c",
               "value_from":"DeviceName","evidence":"prog.cgi:0x43b57c nvram_safe_set(...)"}]},
-  {"id":"SetRouterLanSettings","binary":"prog.cgi",
-   "reads":[{"key":"lan0_management_link","func":"nvram_safe_get","addr":"0x430d1c",
-             "evidence":"...","sink":{"name":"system","addr":"0x4312cc"}}],
-   "ipc_control":[{"func":"notify_rc","value":"start_vlanall",
-                   "target_action":"restart_lan","target_binary":"rc","evidence":"..."}]}]}
+  {"id":"SetVLANSettings","binary":"prog.cgi",
+   "reads":[{"key":"lan0_management_link","func":"nvram_safe_get",
+             "binary":"rc","addr":"0x430d1c",
+             "via_control":{"func":"notify_rc","value":"start_vlanwanall"},
+             "evidence":"rc:0x430d1c nvram_safe_get(...)",
+             "sink":{"name":"system","addr":"0x4312cc"}}],
+   "ipc_control":[{"func":"notify_rc","value":"start_vlanwanall",
+                   "target_action":"SetVLANSettings","target_binary":"prog.cgi","evidence":"..."}]}]}
 ```
+
+> `reads[].binary` 是**读点宿主**（可省略，默认取 action 的 binary）；`reads[]` 所属的
+> action 是**触发 action**。这两个不同——这正是 C1 能成立的前提。
 
 门禁判据（G7，任一不满足即失败）：
 
-1. 每条链 `write.action ≠ read.action` 或 `write.binary ≠ read.binary`（**C1**）；相同则必须降级到 `first_order`。
+1. `write.action ≠ read.action`（**C1**，比的是触发 action）；相同则必须降级到 `first_order`。
 2. 写端键与读端键**字面一致**（**C2**）。
 3. `write`/`read` 各有 `addr` 与 `evidence`；`sink.kind` 必须归入已知类型（**C4**）。
-4. `defects` 中不得有 `key-unrecovered`（**C2** 未闭合）。
-5. 报告声称了高阶漏洞时，图中**必须存在**高阶链（只有结论没有图 = 失败）。
+4. `read.binary ≠ write.binary` 时必须给 `via_control.value`（**C5**，否则「请求 2 能到达读点」未证明）。
+5. `defects` 中不得有 `key-unrecovered`（**C2** 未闭合）。
+6. 报告声称了高阶漏洞时，图中**必须存在**高阶链（只有结论没有图 = 失败）。
 
 > G6 与 G7 的分工：**G6 查"报告文字有没有写写入面"，G7 查"这条链在图里成不成立"。** 二者不互相替代——文字可以含糊，图不能。
 
@@ -292,7 +321,7 @@ facts 的最小形状：
 | handler 定界 | 符号执行 | 用比较链的可达块集近似（§2.2），置信度降为 **HYPOTHESIS** |
 | socket 角色 | SE 恢复 `IP:port` | 读初始化脚本 / `netstat` 基线 / 配置里的默认端口，标 `inferred` |
 
-**降级不是可耻的事，含糊才是。** 凡是没做到 C1–C4 的，一律写成 `HYPOTHESIS` 并说明缺哪一环——`vuln-conditions.md` 的成立条件表就是为此存在的。
+**降级不是可耻的事，含糊才是。** 凡是没做到 C1–C5 的，一律写成 `HYPOTHESIS` 并说明缺哪一环——`vuln-conditions.md` 的成立条件表就是为此存在的。
 
 ## 11. 已知边界（照抄会踩的坑）
 
@@ -302,8 +331,45 @@ facts 的最小形状：
 4. **共享库里的 IPC 原语**：只查二进制的导入表会漏（`.so` 里包了一层）。必须先建跨库 CG。
 5. **超时/失败的结果不能用**：SE 超时返回空集，与"真的没有分支"不可区分——必须显式区分"空结果"和"执行失败"。
 6. **同一 action 读写同一键很常见**（先写后读回显）。这类是**一阶**，不要为了凑"高阶"数字把它们算进去。
+7. **读在别的进程 ≠ 高阶**：读点几乎总在 `rc`/`librcm.so`，所以 `other_get` 本身不构成高阶证据，必须比「触发读的请求」（§0 C1）。
 
-## 12. 参考
+## 12. 实测复现（DIR878_0day，4 核实跑）
+
+不是转述——是把 artifact 的镜像在 **4 核 / 15 GB** 的机器上真跑了一遍，三阶段全部走完。
+
+**环境**：`docker run -d --mac-address 08:00:27:9b:dd:e6 --cpus=4 pjqwudi123/bridge:1.0`；容器内 `source Bridge_venv/bin/activate && /entrypoint.sh &`（起 `lmadmin` 许可服务 + `jsparse` 前端服务）。
+
+| 阶段 | 耗时 | 关键产物 |
+|---|---|---|
+| 入口点 | **~33 min**（串行 IDA 分析 173 个 ELF） | `pre_result/DIR878_0day/pre.txt` |
+| BDG | **~9 min** | `BDG.txt`（120 个键） |
+| ADG | **~70 min**（其中符号执行占大头） | `action_result_maps.txt`、`vuln_result.txt` |
+
+`pre.txt` 三行原文（正好是本 skill 需要的那三样）：
+
+```
+['prog.cgi']                                                    # 边界二进制
+[('prog.cgi', 'callback_key', 'action', 128, 152, 'web')]       # AEH：形态 + 命中/总数
+{'prog.cgi': {'0x41a564': {'callsite_addr': 'all', 'model': 1, 'src_index': 1}}}  # IPF
+```
+
+`vuln_result.txt` 里动机样例的**逐字输出**（与本 skill 的 facts 夹具一一对应）：
+
+```
+'lan0_management_link': {'other_get': {'prog.cgi': {'SetRouterLanSettings': {'restart_lan': {('rc', '430d1c'): {'command_exec': ['4312cc']}}},
+                                                     'SetVLANSettings': {'start_vlanwanall': {('rc', '430d1c'): {'command_exec': ['4312cc']}}}}},
+                          'set': {'prog.cgi': {'SetNetworkSettings': {'43b57c': None}}}},
+```
+
+规模：`vuln_result.txt` **1188 个键**，其中带 `other_get` 的 **35 个**；BDG 节点 779 / 边 1347；`candidate_storage_vuln` 203 键；带 sink 的二进制 7 个（`prog.cgi`/`rc`/`timer`/`librcm.so`/`fota_config`/`fota_output`/`ralink_init`）。
+
+**这次跑出来三条文章里读不到的结论**：
+
+1. **`other_get` ≠ 高阶**（见 §0 的 C1）。`SysLogRemote_IPAddress` 也带 `other_get`，但写与触发都是 `SetSysLogSettings` → 一阶。
+2. **`set` 侧记的是 taint source 地址**，不是键值：`{'43b57c': None}` 里 `43b57c` 是 `nvram_safe_set` 调用点，值本身在 `BDG.txt` 里展开成 `['43afd8']`（`DeviceName` 的读取处）。
+3. **耗时全在 ADG**：入口点 33 min、BDG 9 min，ADG 却是 70 min 且单核串行（论文的 3.06 h/固件是 40 核并行）。这也解释了为什么本 skill 必须保留降级路径——没有这种机器就没法照抄全流程。
+
+## 13. 参考
 
 - 论文：IEEE S&P 2026, pp. 3320–3339（`conf/sp/PengLZCLYZ26`）
 - Artifact：<https://zenodo.org/records/17232400>（`10.5281/zenodo.17232400`，14.3 GB，含 44 个固件）

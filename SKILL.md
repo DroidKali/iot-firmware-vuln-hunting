@@ -442,24 +442,27 @@ strcpy(dst, user_buf) → user_buf 来自哪？ → recv() 的 socket？
 2. **配对读面**：对每个写面，全量检索谁**读**了同一键 / 路径并送入 sink。**写入与读取常分属不同请求、不同进程**——这正是单请求 Track A 追不到的原因。
 3. **闭合溯源**：证明 sink 拿到的值由攻击者**可控地**写入——写面本身是否需认证？是否有键名白名单？（**无白名单的「恢复配置导入」= 任意键可控**，见 RAXE500 `F-012`/`F-013`。）
 
-**把三步做成图（不是写成段落）**——报告里「由恢复配置导入」这种表述无法被复核，必须落成四元组：
+**把三步做成图（不是写成段落）**——报告里「由恢复配置导入」这种表述无法被复核，必须落成五元组：
 
 ```
-write.action --key--> 存储 --key--> read.action --> sink
+write.action --key--> 存储 --key--> read.trigger_action
+                                    └─ via(控制值) → read.binary:addr → sink
 ```
+
+`read.trigger_action` 是**前端发起、最终导致该次读取的 action**；`read.binary:addr` 是**真正执行读取的进程与地址**。两者不同：读点几乎总在 `rc`/`librcm.so`，只用后者会把一阶全部冒充成高阶（DIR878 实测：`SysLogRemote_IPAddress` 读在 `rc`，但写与触发同为 `SetSysLogSettings` → 一阶）。
 
 ```bash
 # ① 从反编译产物恢复常量键（literal / local-const / fill-composed；拼不出来记 unknown）
 uv run scripts/taint_graph.py recover --src fw-audit/<t>/decomp \
     --out fw-audit/<t>/taint-facts.json --target <t>
-# ② 补齐读写点与 sink 后构图，并自检 C1–C4
+# ② 补齐读写点、触发 action、via_control 与 sink 后构图，并自检 C1–C5
 uv run scripts/taint_graph.py build --facts fw-audit/<t>/taint-facts.json \
     --out fw-audit/<t>/taint-graph.json --md fw-audit/<t>/taint-graph.md --strict
 ```
 
-判据只有四条，但每条都能否决结论：**①写面与读面必须分属不同 action**（同一 action = 一阶，不许算高阶）；②键在两端字面一致；③读面到 sink 真实可达；④两端都有地址与证据。方法全貌（AEH 三形态与阈值、BDG 两段污点、OD-ICP 常量恢复、控制消息双约束、ADG 三类控制依赖、欠约束符号执行参数）见 **`references/high-order-taint.md`**；IPC 原语词表见 **`assets/ipc-functions.json`**。
+判据五条，每条都能否决结论：**①写它的请求 ≠ 触发读的请求**（同一请求 = 一阶，不许算高阶）；②键在两端字面一致；③读面到 sink 真实可达；④两端都有地址与证据；⑤读点在别的进程时必须给 `via_control`（哪个控制值把请求带过去），否则「能到达」只是假设。方法全貌（AEH 三形态与阈值、BDG 两段污点、OD-ICP 常量恢复、控制消息双约束、ADG 三类控制依赖、欠约束符号执行参数、**DIR878 实测复现**）见 **`references/high-order-taint.md`**；IPC 原语词表见 **`assets/ipc-functions.json`**。
 
-> ⚠️ **门禁挂钩（G6 + G7）**：G6 查**报告文字**——finding 的 `Source` 指向运行时写入的持久化存储时，必须声明**写入面**（`--cross-request`）。G7 查**图**——`--taint-graph` 校验上面四条判据；strict 档位下，报告一旦声称存在高阶漏洞，**没有图就直接失败**（只有结论没有链 = 不可复核）。
+> ⚠️ **门禁挂钩（G6 + G7）**：G6 查**报告文字**——finding 的 `Source` 指向运行时写入的持久化存储时，必须声明**写入面**（`--cross-request`）。G7 查**图**——`--taint-graph` 校验上面五条判据；strict 档位下，报告一旦声称存在高阶漏洞，**没有图就直接失败**（只有结论没有链 = 不可复核）。
 >
 > ⚠️ **静态枚举的边界**：控制消息关键字可能被 `str_merge`/`snprintf` **动态拼接**（如 `"lan0_" + "management_link"`），纯字符串匹配会漏——必须回溯拼接点。`taint_graph.py recover` 能覆盖「字面量 / 局部常量 / 缓冲区填充」三种，覆盖不了的**必须显式记 unknown**，不能用占位键蒙混（Bridge 用欠约束符号执行补这一段，代价是 600 s/键）。
 
@@ -757,7 +760,7 @@ uv run scripts/coverage_gate.py --profile strict \
 - 入口级覆盖（G4）：适用文件须有完整入口枚举 + 逐入口结论
 - 绕过假设（G5）：凡「有防护 / 不可利用」断言必须附 B1–B12 矩阵
 - 跨请求溯源（G6）：持久化存储来源的 finding 必须声明写入面
-- 跨请求污点图（G7，给出 `--taint-graph` 时）：写面与读面必须**分属不同 action**、键两端字面一致、两端有 addr+evidence、sink 类型已知；报告声称高阶时图中必须有高阶链
+- 跨请求污点图（G7，给出 `--taint-graph` 时）：**写它的请求 ≠ 触发读的请求**、键两端字面一致、两端有 addr+evidence、sink 类型已知、跨进程读给出 `via_control`；报告声称高阶时图中必须有高阶链
 
 脚本退出码非 0 表示未达标，缺口写入 `40-coverage.md` 的「待补审清单」，回去补。
 
@@ -883,9 +886,9 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 | `scripts/fw_triage.py` | Phase 0 / 2：固件度量、熵扫描、ELF 加固画像、SUID 面、Tier 分层、EALB 预算 |
 | `scripts/sink_scan.py` | Phase 3 Layer 1：多语言危险模式扫描（数据驱动规则） |
 | `scripts/coverage_gate.py` | Phase 5：覆盖率门禁校验 + **CVE 纪律检查**（`--report`）+ **审阅清单三方对齐**（`--review-list`）+ **G4 入口级覆盖**（`--entrypoints`）+ **G5 绕过矩阵**（`--bypass-check`）+ **G6 跨请求污点溯源**（`--cross-request`）+ **G7 跨请求污点图**（`--taint-graph`）+ **类型→Base 命中**（`--type-base`）+ **自动修复计划**（`--auto-recover`）+ **`--profile {light,standard,strict}` 档位与 `gate-config.json` 执行台账** |
-| `scripts/taint_graph.py` | Phase 3/5：跨请求污点图（BDG/ADG 最小实现）——`recover` 从反编译产物恢复常量键（literal / local-const / fill-composed），`build` 构图并校验写读分属不同 action、键一致、两端有证据；产出 `taint-graph.json` 供 G7 消费 |
+| `scripts/taint_graph.py` | Phase 3/5：跨请求污点图（BDG/ADG 最小实现）——`recover` 从反编译产物恢复常量键（literal / local-const / fill-composed），`build` 构图并校验「写请求 ≠ 触发读的请求、键一致、两端有证据、跨进程读带 via_control」；产出 `taint-graph.json` 供 G7 消费 |
 | `scripts/entrypoints_init.py` | Phase 3/5：从 `02-tiering.json` 生成入口枚举骨架 `entrypoints.json`（G4 的输入） |
-| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证上面脚本的判据，并把**文档示例命令与 CLI 参数表对拍**（15 组 / 114 条断言，结尾自报总数） |
+| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证上面脚本的判据，并把**文档示例命令与 CLI 参数表对拍**（15 组 / 117 条断言，结尾自报总数） |
 
 脚本都只用 Python 标准库，无第三方依赖，Windows / Linux / macOS 均可运行。用 `uv` 管理环境（`uv run` 自动建临时环境；无 `uv` 时直接 `python scripts/xxx.py` 亦可）。安装后建议先跑一次自检：
 
