@@ -4,7 +4,7 @@
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">  
   <img alt="python" src="https://img.shields.io/badge/python-3.8%2B%20stdlib%20only-3776AB.svg?logo=python\&logoColor=white">  
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg">  
-  <img alt="files" src="https://img.shields.io/badge/package-19%20files%20%C2%B7%208883%20lines-informational.svg">  
+  <img alt="files" src="https://img.shields.io/badge/package-24%20files%20%C2%B7%2011310%20lines-informational.svg">  
   <img alt="selftest" src="https://img.shields.io/badge/selftest-117%20assertions%20passing-brightgreen.svg">  
   <img alt="agent" src="https://img.shields.io/badge/type-Agent%20Skill-7B42BC.svg">  
 </p>
@@ -336,7 +336,7 @@ uv run scripts/coverage_gate.py \
 | `references/atomic-capabilities.md` | 716 | **决策判据 + 原子能力**：Phase 1 提取选路（§3.1）、Phase 4 仿真选路（§3.2）、**Phase 3 Layer 1 引擎选路（§3.3）**、54 项原子能力清单与实现命令（§1–§9）、**结构级脚本扫描（§5.2）**、整链工具的合法定位（§10.2）、能力缺席时的替代路径（§11） |
 | `references/methodology.md`       | 511 | 需要 Tier 规则细节、EALB 计算、**三轨模型（Track A/B/C）**、跨请求污点（§3.2）、门禁判据的完整定义                  |
 | `references/high-order-taint.md`  | 378 | **高阶污点专章**：AEH 三形态与阈值、IPF 三模型、BDG 两段污点、**OD-ICP 常量恢复**、控制消息双约束（集中性 10 + find_interval）、ADG 三类控制依赖、**欠约束符号执行参数与坑**、`taint-graph.json` 与 G7、无 IDA/angr 时的降级路径 |
-| `references/emulation-fuzzing.md` | 357 | Phase 4 需要模拟与模糊的具体做法、踩坑与替代方案                         |
+| `references/emulation-fuzzing.md` | 388 | Phase 4 需要模拟与模糊的具体做法、踩坑与替代方案                         |
 | `references/reporting.md`         | 353 | Phase 5 需要报告字段、评分表、脱敏规范、DKTSS、⑥↔④ 迁移规则、G6 写入面                              |
 | `references/vuln-conditions.md`   | 393 | **Layer 3 / Phase 4**：候选要不要升 `CONFIRMED`？按类型逐条排除成立条件 |
 | `references/sink-patterns.md`     | 257 | 需要扩充或理解静态扫描规则（含 `structural` 结构级规则 schema），或手写 grep / YARA                        |
@@ -413,7 +413,7 @@ fw-audit/<target>/
 
 工具生态取自：
 
-[moria](https://github.com/nmatt0/moria) · [mithril](https://github.com/nmatt0/mithril) · [unblob](https://github.com/onekey-sec/unblob) · [binwalk](https://github.com/ReFirmLabs/binwalk) · [firmware-analysis-toolkit](https://github.com/attify/firmware-analysis-toolkit) · [Qiling](https://github.com/qilingframework/qiling) · [AFL++](https://github.com/AFLplusplus/AFLplusplus) · [awesome-connected-things-sec](https://github.com/v33ru/awesome-connected-things-sec)
+[moria](https://github.com/nmatt0/moria) · [mithril](https://github.com/nmatt0/mithril) · [unblob](https://github.com/onekey-sec/unblob) · [binwalk](https://github.com/ReFirmLabs/binwalk) · [firmware-analysis-toolkit](https://github.com/attify/firmware-analysis-toolkit) · [Qiling](https://github.com/qilingframework/qiling) · [AFL++](https://github.com/AFLplusplus/AFLplusplus) · [awesome-connected-things-sec](https://github.com/V33RU/awesome-connected-things-sec)
 
 二进制逆向侧支持 [IDA Pro](https://hex-rays.com/ida-pro) + [ida-mcp](https://github.com/HexRaysSA/ida-mcp)（真语义）→ Ghidra 无头（批量语义）→ radare2 手工追链（可行但慢）→ `objdump` + `strings`（兜底）的四级取舍链，**证据等级不打折**。
 
