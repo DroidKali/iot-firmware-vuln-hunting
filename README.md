@@ -147,7 +147,7 @@ agents  = max(1, ceil(EALB / budget))                 # budget 默认 800
 
 ## 安装
 
-这是一个 **Agent Skill**，遵循开放的 Agent Skills 规范（`SKILL.md` + `references/` + `assets/` + `scripts/`），用 [`skills`](https://github.com/antfu/skills-cli) CLI 一行命令安装：
+这是一个 **Agent Skill**，遵循开放的 Agent Skills 规范（`SKILL.md` + `references/` + `assets/` + `scripts/`），用 [`skills`](https://github.com/vercel-labs/skills) CLI 一行命令安装：
 
 ```bash
 # 安装（自动探测本机已装的 Agent，装入其全局 skills 目录）
