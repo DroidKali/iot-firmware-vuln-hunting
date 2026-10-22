@@ -1,0 +1,57 @@
+{
+  "schema": "ealb-calibration/1.0",
+  "version": "1.0",
+  "updated": "2026-10-22",
+  "status": "heuristic",
+  "target": "人工复核工时（分钟）；token 成本仅为并列参考",
+  "model": {
+    "minutes_per_ealb": 0.18,
+    "intercept_minutes": 5,
+    "tokens_per_ealb": 260,
+    "formula": "minutes ~= 0.18 * EALB + 5；tokens ~= 260 * EALB",
+    "fitted_from": "经验估算（12 份历史任务的自评，未留原始记录）"
+  },
+  "samples": {
+    "total": 0,
+    "real": 0,
+    "synthetic": 0
+  },
+  "metrics": {
+    "minutes": {
+      "n": 0,
+      "mae": null,
+      "mape": null,
+      "rmse": null,
+      "zero_actual": 0
+    }
+  },
+  "thresholds": {
+    "min_samples_experimental": 20,
+    "min_samples_calibrated": 60,
+    "max_mape_calibrated": 0.3,
+    "warn_mape": 0.35
+  },
+  "status_rules": {
+    "heuristic": "真实样本 < 20 或全部为合成数据：只能用于相对排序",
+    "experimental": "真实样本 >= 20 但 < 60，或 MAPE > 0.30：可用于排期区间，不得承诺工期",
+    "calibrated": "真实样本 >= 60 且 MAPE <= 0.30：可用于工期承诺，仍需按季度复核"
+  },
+  "caveat": "当前为经验估算：不同架构（MIPS/ARM/x86）与固件规模的真实工时可能相差 2-4 倍，EALB 只表示相对工作量，不得当作承诺工期或报价依据。",
+  "reference_points": [
+    {
+      "ealb": 400,
+      "label": "小型固件 / 单一 Web 入口",
+      "expected_minutes": 77
+    },
+    {
+      "ealb": 1200,
+      "label": "中型固件 / Web + 若干服务",
+      "expected_minutes": 221
+    },
+    {
+      "ealb": 3000,
+      "label": "大型固件 / 多进程 + 内核模块",
+      "expected_minutes": 545
+    }
+  ]
+}

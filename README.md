@@ -4,8 +4,8 @@
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">  
   <img alt="python" src="https://img.shields.io/badge/python-3.8%2B%20stdlib%20only-3776AB.svg?logo=python\&logoColor=white">  
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg">  
-  <img alt="files" src="https://img.shields.io/badge/package-24%20files%20%C2%B7%2011310%20lines-informational.svg">  
-  <img alt="selftest" src="https://img.shields.io/badge/selftest-117%20assertions%20passing-brightgreen.svg">  
+  <img alt="files" src="https://img.shields.io/badge/package-53%20files%20%C2%B7%2018406%20lines-informational.svg">  
+  <img alt="selftest" src="https://img.shields.io/badge/selftest-165%20assertions%20passing-brightgreen.svg">  
   <img alt="agent" src="https://img.shields.io/badge/type-Agent%20Skill-7B42BC.svg">  
 </p>
 
@@ -59,7 +59,7 @@
 
 | 层 | 固化什么 | 承载位置 |
 |---|---|---|
-| **方法论层** | 决策逻辑、优先级、证据标准、降级策略、交付规范 | `SKILL.md`（七条铁律、Phase 0–5、EALB、三轨审计、G1–G6 门禁）· `references/methodology.md` · `references/reporting.md` |
+| **方法论层** | 决策逻辑、优先级、证据标准、降级策略、交付规范 | `SKILL.md`（七条铁律、Phase 0–5、EALB、三轨审计、G1–G7 门禁）· `references/methodology.md` · `references/reporting.md` |
 | **决策判据层** | **识别到什么特征 → 走哪条路**，以及失败反馈信号 | `references/atomic-capabilities.md` §3（Phase 1 提取选路树 / Phase 4 仿真选路树） |
 | **原子能力层** | **单个可调用的操作**：能力 / 实现方式 / 输入输出 | `references/atomic-capabilities.md` §1–§9（54 项：侦察、提取、内容扫描、文件系统侦察、二进制分析、动态验证、网络、硬件） |
 
@@ -119,6 +119,8 @@ text_units(f) =  ELF ?       section('.text').size / 1024
 weight  = {T1: 1.0, T2: 0.5, T3: 0.1, SKIP: 0}
 EALB    = Σ weight[tier(f)] * text_units(f)
 agents  = max(1, ceil(EALB / budget))                 # budget 默认 800
+
+> **校准状态**：当前 `assets/ealb-calibration.json` 的 `status` 是 `heuristic`——EALB 只表示**相对工作量**，用于排序和切分 Agent，不能当工期承诺。真实工时样本 ≥20 才进 `experimental`，≥60 且 MAPE ≤0.30 才进 `calibrated`；门槛与命令见 `scripts/ealb_calib.py`（`predict` / `evaluate` / `fit` / `check`）。
 ```
 
 `budget` 按模型上下文取值：32K → 300、128K → 800、200K+ → 1500。
@@ -165,13 +167,13 @@ npx skills add https://github.com/DroidKali/iot-firmware-vuln-hunting --agent '*
 
 常用管理命令：`npx skills list`（列出已装 Skill）、`npx skills update`（更新到最新）、`npx skills remove iot-firmware-vuln-hunting`（卸载）。
 
-**作为通用知识库使用** — 不安装也行：`git clone` 到任意位置，按 `SKILL.md` 的流程手工执行；五个脚本可独立运行。
+**作为通用知识库使用** — 不安装也行：`git clone` 到任意位置，按 `SKILL.md` 的流程手工执行；十个脚本可独立运行。
 
 ### 前置依赖
 
 | 类别     | 说明                                                                                                                                                    |
 | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Python | 3.8+，**五个脚本只用标准库**，无第三方依赖，三平台均可运行。推荐用 [`uv`](https://github.com/astral-sh/uv) 管理（`uv run` 自动建临时环境）                                                    |
+| Python | 3.8+，**十个脚本只用标准库**，无第三方依赖，三平台均可运行。推荐用 [`uv`](https://github.com/astral-sh/uv) 管理（`uv run` 自动建临时环境）                                                    |
 | 固件工具链  | 按判据**按需安装**，不必装齐：`unblob` / `binwalk` v3 / `moria` / `mithril` / `qemu-system-*` / `Qiling` / `AFL++` / `radare2`。Linux（Docker / WSL / Kali / AttifyOS）体验最好；Windows 宿主建议走 Docker |
 | 授权     | **只在获得书面授权（自有设备 / 客户授权 / SRC 范围）的目标上执行**，开工前把范围写进 `fw-audit/<target>/00-scope.md`                                                                     |
 
@@ -187,11 +189,13 @@ npx skills add https://github.com/DroidKali/iot-firmware-vuln-hunting --agent '*
 uv run scripts/selftest.py
 ```
 
-脚本会用纯 Python 手工构造合法 ELF64 与合成 rootfs，端到端跑通另外四个脚本，覆盖 **15 组 / 117 条断言**，其中包含「门禁必须拦下坏报告」的负向用例。断言总数由脚本自己在结尾打印，不需要去数日志。看到全绿即安装成功。
+脚本会用纯 Python 手工构造合法 ELF64 与合成 rootfs，端到端跑通其余九个脚本，覆盖 **20 组 / 165 条断言**，其中包含「门禁必须拦下坏报告」的负向用例。断言总数由脚本自己在结尾打印，不需要去数日志。看到全绿即安装成功。
 
-`[14/15]` 把**文档当被测对象**：抓出 `README.md` / `SKILL.md` / `references/` / `assets/` 里每条 `scripts/*.py` 示例命令，逐个核对命令里出现的 `--flag` 是否真存在于脚本 `--help`（有子命令的会逐个进去问），并检查布尔开关后面没跟取值。这条守卫来自一次真实事故——文档把 `store_true` 的 `--tier` 写成 `--tier <rootfs>`，照抄必然报错，而所有单元测试都是绿的。
+`[14/20]` 把**文档当被测对象**：抓出 `README.md` / `SKILL.md` / `references/` / `assets/` 里每条 `scripts/*.py` 示例命令，逐个核对命令里出现的 `--flag` 是否真存在于脚本 `--help`（有子命令的会逐个进去问），并检查布尔开关后面没跟取值。这条守卫来自一次真实事故——文档把 `store_true` 的 `--tier` 写成 `--tier <rootfs>`，照抄必然报错，而所有单元测试都是绿的。
 
-`[15/15]` 用 DIR878 的动机样例（`SetNetwork` 写 `lan0_management_link`、`SetRouterLanSettings` 读进 `system`）跑通 BDG/ADG，并验证三条否决路径：同一 action 内读写必须判**一阶**、缺 evidence 必须失败、拼不出来的键必须记 `unknown` 而不是占位。
+`[15/20]` 用 DIR878 的动机样例（`SetNetwork` 写 `lan0_management_link`、`SetRouterLanSettings` 读进 `system`）跑通 BDG/ADG，并验证三条否决路径：同一 action 内读写必须判**一阶**、缺 evidence 必须失败、拼不出来的键必须记 `unknown` 而不是占位。
+
+`[16/20]`–`[20/20]` 覆盖本轮整改新增的契约与边界：候选清单里**非法 JSON 行必须逐行上报**、strict 只接受带 schema 的 envelope；扫描完整性/阶段状态降级必须可见且可阻断；`contracts.py` 校验 FirmwareManifest / AuditTask 并核对镜像哈希；`sandbox_run.py` 在无隔离运行时 **fail-closed**（退出 3），绝不静默回退宿主机；`bench_eval.py` 用合成基准复算 precision/recall，并验证相对基线的召回暴跌会以退出码 3 阻断。
 
 ### 2. 一次完整审计
 
@@ -233,13 +237,18 @@ uv run scripts/coverage_gate.py \
     --tiering     fw-audit/$TARGET/02-tiering.json \
     --entrypoints fw-audit/$TARGET/entrypoints.json \
     --taint-graph fw-audit/$TARGET/taint-graph.json \
+    --layer1      fw-audit/$TARGET/10-layer1-sinks.json \
+    --stages      fw-audit/$TARGET/30-stages.json \
+    --manifest    fw-audit/$TARGET/00-manifest.json \
+    --audit-task  fw-audit/$TARGET/20-tasks.json \
+    --require-structural \
     --report      fw-audit/$TARGET/report.md \
     --out         fw-audit/$TARGET/40-coverage.md
 ```
 
 **退出码 0 = 可出报告；非 0 = 有缺口**，缺口清单写入 `40-coverage.md` 的「待补审」节，回去补审再跑。
 
-`--profile strict` 会强制启用全部高级检查（G4/G5/G6/Base），并要求 `--candidates`、`--review-list`、`--report`、`--entrypoints` 齐全；**任何必需检查未执行都判失败**，并在 `40-coverage.gate-config.json` 里记录本次到底跑了哪些检查、输入哈希与版本。
+`--profile strict` 会强制启用全部高级检查（G4/G5/G6/G7/Base），并要求 `--candidates`、`--review-list`、`--report`、`--entrypoints`、`--layer1`、`--manifest`、`--audit-task`、`--stages` 齐全；**任何必需检查未执行都判失败**，并在 `40-coverage.gate-config.json` 里记录本次到底跑了哪些检查、输入哈希与版本。扫描完整性、阶段状态、清单哈希、审计任务任一不一致都会写进 `blocked` 的机器可读原因码。
 
 `--taint-graph` 是「报告声称了高阶漏洞」时的**必需项**：只写结论不给链，strict 档位直接失败。
 
@@ -247,16 +256,20 @@ uv run scripts/coverage_gate.py \
 
 ## 脚本
 
-六个脚本都**只用 Python 标准库**，无第三方依赖。
+十个脚本都**只用 Python 标准库**，无第三方依赖。
 
 | 脚本                         | 行数   | 用途                                                              |
 | -------------------------- | ---- | --------------------------------------------------------------- |
 | `scripts/fw_triage.py`     | 852  | Phase 0 / 2：固件度量、熵扫描、ELF 加固画像、SUID 面、Tier 分层、EALB 预算            |
-| `scripts/coverage_gate.py` | 1781 | Phase 5：覆盖率门禁 + CVE 纪律检查（`--report`，V0–V4）+ 审阅清单三方对齐（`--review-list`）+ G4 入口级覆盖 + G5 绕过矩阵 + **G6 跨请求污点溯源** + **G7 跨请求污点图** + 类型→Base + 自动修复计划 + **`--profile strict` 档位** + **`gate-config.json` 执行台账** |
+| `scripts/sink_scan.py`     | 789  | Phase 3 Layer 1：多语言危险模式扫描（正则初筛 + ast-grep 结构级二次过滤；引擎缺失自动回退并记录；**分块流式读取 + `scan_integrity` 完整性台账 + `verdict`**）                               |
 | `scripts/taint_graph.py`   | 800  | Phase 3 / 5：跨请求污点图（BDG/ADG 最小实现）——`recover` 恢复动态拼接的键（literal / local-const / fill-composed），`build` 构图并校验「写请求 ≠ 触发读的请求、键一致、两端有证据、跨进程读带 via_control」，产出 `taint-graph.json` |
-| `scripts/sink_scan.py`     | 726  | Phase 3 Layer 1：多语言危险模式扫描（正则初筛 + ast-grep 结构级二次过滤；引擎缺失自动回退并记录；**分块流式读取 + `scan_integrity` 完整性台账**）                               |
+| `scripts/coverage_gate.py` | 2759 | Phase 5：覆盖率门禁 + CVE 纪律检查（`--report`，V0–V4）+ 审阅清单三方对齐（`--review-list`）+ G4 入口级覆盖 + G5 绕过矩阵 + **G6 跨请求污点溯源** + **G7 跨请求污点图** + 类型→Base + 自动修复计划 + **扫描完整性/结构引擎/阶段状态/清单/审计任务契约** + **`--profile strict` 档位** + **`gate-config.json` 执行台账** |
 | `scripts/entrypoints_init.py` | 139 | Phase 3 / 5：从 `02-tiering.json` 生成 `entrypoints.json` 骨架（`--merge` 保留已手填数据） |
-| `scripts/selftest.py`      | 1075 | 安装自检：合成固件与 rootfs，端到端验证上面四个脚本的判据 + **文档与 CLI 一致性**（15 组 / 117 条断言，结尾自报总数）                 |
+| `scripts/contracts.py`     | 489  | Phase 0–5：跨阶段数据契约校验（11 种 schema：FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest），`--list` 列版本、`--json` 出机器可读结果 |
+| `scripts/ealb_calib.py`    | 319  | Phase 2：用实测工时样本校准 EALB——未达样本量时只报 `heuristic`，达标才允许标 `calibrated` |
+| `scripts/sandbox_run.py`   | 1059 | Phase 4：不可信固件的一次性隔离执行（无运行时 **fail-closed**，退出 3；宿主机执行必须显式 `--mode host --i-understand-host-risk`） |
+| `scripts/bench_eval.py`    | 2473 | Phase 5 / 回归：合成基准集上的 precision / recall / F1 / FPR 评估，`--baseline` 检测召回暴跌与 FPR 上升（退出码 3） |
+| `scripts/selftest.py`      | 1571 | 安装自检：合成固件与 rootfs，端到端验证其余九个脚本的判据 + **文档与 CLI 一致性** + 基准回归（20 组 / 165 条断言，结尾自报总数）                 |
 
 ### 覆盖率门禁判据
 
@@ -272,6 +285,11 @@ uv run scripts/coverage_gate.py \
 - **G6 跨请求污点溯源**（`--cross-request`）：Source 指向持久化存储（nvram/uci 键、/tmp·/var 可写路径）的漏洞必须声明**写入面**（污点跨请求传递，Bridge/IEEE S&P'26）
 - **G7 跨请求污点图**（`--taint-graph`）：把「写入面」这句话升级成链——`write.action → 键 → read.trigger_action → (via 控制值) → read.binary:addr → sink`。五条判据：①**写它的请求 ≠ 触发读的请求**（同一请求 = 一阶，不许算高阶；`other_get` 只说「读在别的二进制」，不是高阶证据）②键两端字面一致 ③读面到 sink 真实可达 ④两端有地址与证据 ⑤跨进程读必须给 `via_control`。报告声称高阶却没给图 → strict 下失败
 - **类型 → DKTSS Base 命中**（`--type-base`）：报告里出现的类型必须能映射到 Base 表（`--type-base-strict` 下未命中即失败）
+- **扫描完整性**（`--layer1`）：消费 `sink_scan` 的 `scan_integrity.verdict`——`partial`/`failed` 直接阻断；`scoped` 必须由 `--scan-waiver` 逐条匹配 `{file, reason, waiver.reason, reviewer}`，未豁免的缺口记 `LAYER1_*` 阻断码
+- **结构引擎完整性**：`engine_status.verdict=failed` 无条件阻断；`partial`（结构引擎缺失退回正则）默认 WARN，加 `--require-structural` 即失败
+- **阶段状态**（`--stages`）：`audit-stages/1.0` 中必需阶段必须为 `success`，`missing`/`failed`/`partial` 一律 `STAGE_*` 阻断；声明与实测不一致记 `STAGE_INCONSISTENT`
+- **固件清单契约**（`--manifest`）：`firmware-manifest/1.0` 六字段 + `image.sha256` 必须与磁盘一致，否则 `MANIFEST_*` 阻断
+- **审计任务契约**（`--audit-task`）：`audit-task/1.0` 字段/枚举校验，`manifest_id` 必须等于 `--manifest` 的 `id`
 - 报告完整性：9 个必填字段齐全
 
 `--report` 另外触发 CVE 纪律检查 **V0–V4**：缺「组件风险（未验证）」区块（V0）/ 版本命中写成漏洞断言（V1）/ CVE 混进「漏洞统计」表（V2）/ 未验证的组件 CVE 被打了 P0–P3 或 CVSS（V3）/ **同一 CVE-ID 同时出现在 ④ 与 ⑥（V4：应「移动」而非「复制」）**。
@@ -282,9 +300,9 @@ uv run scripts/coverage_gate.py \
 | --- | --- | --- |
 | `light` | `--plan --verified` | 仅提示 |
 | `standard`（默认） | 同上 | 仅提示，**但报告里逐项列出** |
-| `strict` | 另需 `--candidates --review-list --report --entrypoints` | **必需检查的 SKIPPED 判为失败** |
+| `strict` | 另需 `--candidates --review-list --report --entrypoints --layer1 --manifest --audit-task --stages` | **必需检查的 SKIPPED 判为失败** |
 
-每项检查输出 `PASS` / `FAIL` / `SKIPPED` 三态，且 `SKIPPED` 明确表示「本次没有执行」而不是「通过」。
+每项检查输出 `PASS` / `FAIL` / `WARN` / `SKIPPED` 四态，且 `SKIPPED` 明确表示「本次没有执行」而不是「通过」；`WARN` 表示「降级但可继续」（如结构引擎不可用退回正则），不计入失败但必须出现在报告里。
 
 > **为什么不只看退出码。** `exit 0` 曾经只意味着「已执行的检查都过了」——高级检查没启用时它们根本不出现在报告里，于是「脚本支持 G5」被误读成「本次跑了 G5 且通过了」。现在未执行的检查一律以 `SKIPPED` 出现在判据表里，`strict` 还会把它们判失败。`gate-config.json` 同步记录档位、输入 SHA-256、每项检查状态与门禁版本，换台机器也能复算同一次判定。
 
@@ -321,9 +339,9 @@ uv run scripts/coverage_gate.py \
 }
 ```
 
-四类跳过原因分开记：`skip-dir`（设计如此）/ `excluded`（调用方排除）/ `too-large`（能力边界）/ `stat-failed`（异常）。**`complete: false` 时不得在报告里声称「已完整扫描」**——直接把 `scan_integrity` 贴进报告附录即可。
+四类跳过原因分开记：`skip-dir`（设计如此）/ `excluded`（调用方排除）/ `too-large`（能力边界）/ `stat-failed`（异常）。v1.3 起再给出归一后的 `verdict`（`complete` / `scoped` / `partial` / `failed`）：`partial` 或 `failed` 进 Phase 5 门禁即阻断，`scoped` 需由 `--scan-waiver` 逐条列明豁免理由。**`complete: false` 时不得在报告里声称「已完整扫描」**——直接把 `scan_integrity` 贴进报告附录即可。
 
-> 旧实现只 `f.read(8 << 20)`，20 MB 的 CGI 二进制后半段一个字符串都扫不到，输出里还看不出来。回归测试 `[13/15]` 用 9.5 MiB 偏移与跨块边界两个样本把这条钉死。
+> 旧实现只 `f.read(8 << 20)`，20 MB 的 CGI 二进制后半段一个字符串都扫不到，输出里还看不出来。回归测试 `[13/20]` 用 9.5 MiB 偏移与跨块边界两个样本把这条钉死；`[17/20]` 再验证「partial/failed 必须阻断、豁免必须逐条留痕」。
 
 ---
 
@@ -342,6 +360,7 @@ uv run scripts/coverage_gate.py \
 | `references/sink-patterns.md`     | 257 | 需要扩充或理解静态扫描规则（含 `structural` 结构级规则 schema），或手写 grep / YARA                        |
 | `references/vuln-taxonomy.md`     | 218 | 需要按攻击面 / 漏洞类型逐项核查（后门账号、命令注入、OTA、MQTT、U-Boot…）        |
 | `references/resource-index.md`    | 233 | 需要外部资料：awesome-connected-things-sec 精编索引（按阶段映射）      |
+| `references/data-contracts.md`   | 195 | **跨阶段数据契约**：FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / BenchResult 的字段、版本规则、strict 兼容边界、迁移清单 |
 
 ---
 
@@ -353,7 +372,7 @@ iot-firmware-vuln-hunting/
 ├── SKILL.md                      # 主入口：流水线 + 七条铁律 + 各 Phase 操作细节
 ├── README.md
 ├── LICENSE
-├── references/                   # 9 篇按需加载的知识库
+├── references/                   # 10 篇按需加载的知识库
 │   ├── methodology.md            # 方法论层：Tier 规则 / EALB / 三层审计（Track A/B/C）/ 门禁判据完整定义
 │   ├── high-order-taint.md       # 高阶污点专章：AEH/IPF/BDG/ADG + OD-ICP + 符号执行参数 + G7 判据
 │   ├── atomic-capabilities.md    # 判据层 + 原子能力层：Phase 1/4 选路树 + 54 项原子能力 + 替代路径矩阵
@@ -362,18 +381,25 @@ iot-firmware-vuln-hunting/
 │   ├── sink-patterns.md          # 静态扫描模式库 schema 与规则说明
 │   ├── emulation-fuzzing.md      # 模拟与模糊测试实操
 │   ├── reporting.md              # 报告规范 + IoT 评分 + DKTSS
-│   └── resource-index.md         # 外部资源索引
+│   └── data-contracts.md         # 11 种 schema 的数据契约 + strict 兼容边界 + 迁移清单
 ├── assets/
 │   ├── sink-rules.json           # 38 条规则 / 15 类（数据驱动扫描，含 cross-request 跨请求污点与 structural 结构级二次过滤）
 │   ├── ipc-functions.json        # IPC 原语词表：写/读端、键参数位置、控制/持久化标记、集中性阈值、sink 分类、AEH 模式
 │   ├── tier-rules.json           # R0–R7 分层规则
+│   ├── ealb-calibration.json     # EALB 校准结果（未达门槛时 status=heuristic）
+│   ├── ealb-measures-sample.jsonl # EALB 实测工时样本（校准输入）
+│   ├── bench/                    # 合成基准集：manifest.json + samples/B-001…B-011
 │   └── report-template.md        # 固定 7 区块报告模板
-└── scripts/                      # 6 个纯标准库 Python 脚本
+└── scripts/                      # 10 个纯标准库 Python 脚本
     ├── fw_triage.py
     ├── sink_scan.py
     ├── taint_graph.py
     ├── coverage_gate.py
     ├── entrypoints_init.py
+    ├── contracts.py
+    ├── ealb_calib.py
+    ├── sandbox_run.py
+    ├── bench_eval.py
     └── selftest.py
 ```
 

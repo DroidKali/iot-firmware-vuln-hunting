@@ -437,7 +437,7 @@ G2 的 waiver 落在 `25-review-list.md` 的 `## WAIVER` 段，格式：
 
 要一次全开用 `--profile strict`：四条高阶门禁全部强制启用，且**未执行的必需检查项直接判失败**（`required SKIPPED → FAIL`）。Phase 5 的标准命令即带 `--profile strict`。复现性由 `gate-config.json` 承担——它记录档位、`GATE_VERSION`、各项阈值、各项 `status`，以及全部输入文件的 sha256，事后可校验「当时的判定是在什么输入上、用什么口径做出来的」。
 
-回归由 `scripts/selftest.py` 的 `[13/15] 扫描完整性与门禁严格性` 组覆盖（含 standard vs strict 的 SKIPPED 行为差异）；**文档与 CLI 的一致性**由 `[14/15]` 组对拍——它把 `README.md` / `SKILL.md` / `references/` / `assets/` 里每条 `scripts/*.py` 示例命令的 `--flag` 与脚本 `--help` 逐一对齐，并检查布尔开关没被当成带值参数（历史缺陷：`--tier` 是 `store_true`，文档却写成 `--tier <rootfs>`，照抄即报错，而单元测试全绿）。
+回归由 `scripts/selftest.py` 的 `[13/20] 扫描完整性与门禁严格性` 组覆盖（含 standard vs strict 的 SKIPPED 行为差异）；**文档与 CLI 的一致性**由 `[14/20]` 组对拍——它把 `README.md` / `SKILL.md` / `references/` / `assets/` 里每条 `scripts/*.py` 示例命令的 `--flag` 与脚本 `--help` 逐一对齐，并检查布尔开关没被当成带值参数（历史缺陷：`--tier` 是 `store_true`，文档却写成 `--tier <rootfs>`，照抄即报错，而单元测试全绿）。
 
 
 ### 5.2 审阅清单的写法

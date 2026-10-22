@@ -1,0 +1,30 @@
+/*
+ * fw_upgrade.c - synthetic OTA verifier for bench sample B-008.
+ * Hand-written; not derived from real firmware.
+ */
+#include <stdio.h>
+#include <string.h>
+
+#define SIG_MAX 256
+
+static int verify_signature(const unsigned char *img, size_t len,
+                            const unsigned char *sig, size_t siglen)
+{
+    unsigned char expected[SIG_MAX];
+    if (len < SIG_MAX || siglen != SIG_MAX)
+        return -1;
+    /* synthetic: compare the trailing signature block */
+    memcpy(expected, sig, siglen);
+    if (memcmp(expected, img + len - SIG_MAX, SIG_MAX) != 0)
+        return -1;
+    return 0;
+}
+
+static int do_upgrade(const char *path)
+{
+    if (path == NULL || strchr(path, '/') != NULL)
+        return -1;
+    printf("verifying %s\n", path);
+    return verify_signature((const unsigned char *)path, strlen(path),
+                            (const unsigned char *)path, SIG_MAX);
+}

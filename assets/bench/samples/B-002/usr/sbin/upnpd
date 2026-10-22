@@ -1,0 +1,21 @@
+/*
+ * upnpd.c - synthetic SOAP handler for bench sample B-002.
+ * Hand-written; not derived from real firmware.
+ */
+#include <stdio.h>
+#include <string.h>
+
+#define SOAP_ACTION_MAX 64
+
+static char last_action[SOAP_ACTION_MAX];
+
+int handle_soap(const char *soap_action)
+{
+    char action[SOAP_ACTION_MAX];
+    if (soap_action == NULL)
+        return -1;
+    strcpy(action, soap_action); /* L-002: unbounded copy of SOAPAction */
+    strcpy(last_action, action);
+    printf("action=%s\n", action);
+    return 0;
+}

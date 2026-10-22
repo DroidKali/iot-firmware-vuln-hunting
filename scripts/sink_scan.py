@@ -535,6 +535,9 @@ def main() -> int:
                     help="禁用结构级二次过滤；回退情况仍会写进 engine_status")
     ap.add_argument("--structural-timeout", type=int, default=30,
                     help="单次结构引擎调用超时（秒）")
+    ap.add_argument("--strict", action="store_true",
+                    help="扫描不完整（verdict=partial/failed）时以退出码 3 结束；"
+                         "默认只告警、仍返回 0")
     ap.add_argument("--pretty", action="store_true")
     args = ap.parse_args()
 
@@ -628,9 +631,54 @@ def main() -> int:
     summary = collections.Counter(f["priority"] for f in findings)
     by_cat = collections.Counter(f["category"] for f in findings)
 
+    # ── 扫描完整性判定（schema layer1-sinks/1.3）──────────────────────────────
+    # complete / scoped / partial / failed 四态与 coverage_gate.py 的判定一一对应：
+    # 只有「什么都没跳过」才是 complete；仅跳过规则声明的目录/排除规则是 scoped；
+    # 有文件被截断或静默跳过是 partial；有读取/stat 失败是 failed。
+    reason_counts = collections.Counter(s["reason"] for s in skipped_files)
+    scope = {"skip_dirs": list(skip_dirs),
+             "excluded": [args.exclude] if args.exclude else []}
+    material = {r: n for r, n in reason_counts.items()
+                if r not in ("skip-dir", "excluded")}
+    if any(r in ("stat-failed", "read-error") for r in material):
+        verdict = "failed"
+    elif material or partial_files:
+        verdict = "partial"
+    elif reason_counts:
+        verdict = "scoped"
+    else:
+        verdict = "complete"
+
+    gaps: List[Dict[str, Any]] = [
+        {"file": p["file"], "reason": "partial",
+         "detail": str(p.get("truncation_reason") or "scan_complete=false")}
+        for p in partial_files
+    ]
+    gaps += [
+        {"file": s["file"], "reason": s["reason"],
+         "detail": (f"超过上限 {s.get('limit_bytes', 0)} 字节"
+                    if s["reason"] == "too-large" else s["reason"])}
+        for s in skipped_files if s["reason"] in material
+    ]
+
+    # 结构引擎状态：success / partial / skipped / failed（与门禁同一套语义）
+    if not enable_structural:
+        engine_verdict = "skipped"
+    elif rules_with_structural == 0:
+        engine_verdict = "success"      # 规则集不需要结构确认
+    elif not any(engines.values()):
+        engine_verdict = "skipped"      # 一个引擎都没有 → 全部回退正则
+    elif any(f.get("reason") == "engine-error" for f in fallbacks):
+        engine_verdict = "failed"
+    elif stats.get("regex_fallback", 0) > 0:
+        engine_verdict = "partial"
+    else:
+        engine_verdict = "success"
+
     out = {
         "tool": "sink_scan.py",
-        "version": "1.2",
+        "schema": "layer1-sinks/1.3",
+        "version": "1.3",
         "target": os.path.abspath(args.target),
         "rules_source": args.rules or "assets/sink-rules.json",
         "files_scanned": scanned,
@@ -643,7 +691,13 @@ def main() -> int:
         # 扫描完整性台账：让「没扫完 / 整文件没扫」成为可见状态，
         # 而不是用 files_scanned 一个数字掩盖掉。
         "scan_integrity": {
+            "schema": "scan-integrity/1.1",
+            # complete 只在「零跳过、零截断」时为真；门禁另用 verdict 区分
+            # 「范围外排除」(scoped) 与「真的没扫完」(partial/failed)。
             "complete": (not skipped_files and not partial_files),
+            "verdict": verdict,
+            "scope": scope,
+            "gaps": gaps[:1000],
             "files_scanned": scanned,
             "files_skipped": len(skipped_files),
             "files_partial": len(partial_files),
@@ -658,10 +712,13 @@ def main() -> int:
             "partial_files": partial_files[:1000],
             "note": ("files_skipped 含 skip-dir / excluded / too-large / stat-failed 四类；"
                      "partial_files 为读到了但被 size-limit 或 line-limit 截断的文件。"
+                     "verdict: complete=未跳过未截断；scoped=仅跳过规则声明的目录/正则；"
+                     "partial=有截断或被静默跳过；failed=有 stat/读取失败。"
                      "门禁不得把 incomplete 的扫描结果当作完整覆盖。"),
         },
         "engine_status": {
             "structural_enabled": enable_structural,
+            "verdict": engine_verdict,
             "engines": dict(engines),
             "rules_with_structural": rules_with_structural,
             "structural_confirmed": stats.get("structural_confirmed", 0),
@@ -687,8 +744,8 @@ def main() -> int:
 
     if args.md_out:
         lines = ["# Layer 1 扫描结果", "",
-                 f"扫描文件 {scanned} 个，跳过 {len(skipped_files)} 个，"
-                 f"部分扫描 {len(partial_files)} 个。",
+                 f"扫描完整性 **{verdict}**：扫描文件 {scanned} 个，"
+                 f"跳过 {len(skipped_files)} 个，部分扫描 {len(partial_files)} 个。",
                  ""]
         if skipped_files or partial_files:
             lines += ["## 扫描完整性提示", "",
@@ -716,9 +773,15 @@ def main() -> int:
 
     print(f"[summary] P0={summary.get('P0',0)} P1={summary.get('P1',0)} "
           f"P2={summary.get('P2',0)} P3={summary.get('P3',0)}  (scanned={scanned})")
-    if skipped_files or partial_files:
+    print(f"[integrity] verdict={verdict}，缺口 {len(gaps)} 个；"
+          f"结构引擎={engine_verdict}", file=sys.stderr)
+    if verdict in ("partial", "failed"):
         print(f"[warn] 扫描不完整：跳过 {len(skipped_files)} 个、部分扫描 "
               f"{len(partial_files)} 个（详见 scan_integrity）", file=sys.stderr)
+        if args.strict:
+            print("[error] --strict：扫描不完整，退出码 3（不得当作完整覆盖）",
+                  file=sys.stderr)
+            return 3
     return 0
 
 

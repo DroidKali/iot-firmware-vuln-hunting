@@ -1,0 +1,7 @@
+# 合成样本，仅用于验证 ealb_calib.py 的流程；不得据此把模型标为 calibrated
+{"id":"M-001","ealb":380,"actual_minutes":70,"arch":"mips","stage":"triage","source":"synthetic"}
+{"id":"M-002","ealb":950,"actual_minutes":210,"arch":"arm","stage":"deep-audit","source":"synthetic"}
+{"id":"M-003","ealb":2400,"actual_minutes":400,"arch":"mips","stage":"deep-audit","source":"synthetic"}
+{"id":"M-004","ealb":5200,"actual_minutes":1300,"arch":"arm","stage":"report","source":"synthetic"}
+{"id":"M-005","ealb":150,"actual_minutes":20,"arch":"x86","stage":"triage","source":"synthetic"}
+{"id":"M-006","ealb":1600,"actual_minutes":480,"arch":"mips","stage":"deep-audit","source":"synthetic"}

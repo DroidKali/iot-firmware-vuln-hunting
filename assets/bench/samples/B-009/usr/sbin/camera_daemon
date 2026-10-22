@@ -1,0 +1,23 @@
+/*
+ * camera_daemon.c - synthetic hard-negative for bench sample B-009.
+ *
+ * The dangerous-looking calls below exist only in comments and in
+ * string constants; neither system() nor strcpy() is ever invoked.
+ *   strcpy(dst, src);
+ *   system("/bin/sh");
+ *   sprintf(cmd, "wget %s", url);
+ */
+#include <stdio.h>
+
+static const char *banner =
+    "diagnostics: system() and strcpy() are not called here";
+
+static const char *build_note =
+    "legacy note: strcpy was removed in this build";
+
+int main(void)
+{
+    puts(banner);
+    puts(build_note);
+    return 0;
+}

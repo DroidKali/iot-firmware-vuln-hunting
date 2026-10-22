@@ -1,0 +1,16 @@
+#!/bin/sh
+# synthetic boot script for bench sample B-006 (hardened input handling).
+set -eu
+
+IFACE="$1"
+if [ -z "$IFACE" ]; then
+    IFACE=lan
+fi
+case "$IFACE" in
+    lan|wan|guest) : ;;
+    *) echo "invalid interface" >&2; exit 1 ;;
+esac
+
+nvram get "$IFACE"_ipaddr > /tmp/ipaddr
+chmod 600 /tmp/ipaddr
+/usr/sbin/httpd -p 80 &

@@ -1,0 +1,6 @@
+#!/bin/sh
+# synthetic boot script for bench sample B-001 (not a labelled finding)
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mkdir -p /var/run /var/log
+/usr/sbin/httpd -p 80 &

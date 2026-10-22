@@ -1,0 +1,352 @@
+{
+  "schema": "bench-manifest/1.0",
+  "dataset": {
+    "name": "iot-firmware-synthetic-bench",
+    "version": "1.0.0",
+    "created": "2026-10-22",
+    "kind": "synthetic",
+    "license": "CC0-1.0",
+    "description": "合成 IoT 固件基准集：11 个手工构造的迷你 rootfs 片段（4 个漏洞样本、4 个安全样本、3 个困难负样本），覆盖 mips/arm/x86_64/none 四种架构标注与 dev/holdout 划分。样本内容与标签均由本仓库手工编写，不含任何真实固件数据；仅用于验证 bench_eval.py 的校验、匹配、指标与基线门禁契约，不能用于推断真实设备上的检出率。真实固件基准待补充（real_firmware=pending）。",
+    "real_firmware": "pending"
+  },
+  "splits": {
+    "dev": [
+      "B-001",
+      "B-002",
+      "B-005",
+      "B-006",
+      "B-009",
+      "B-011"
+    ],
+    "holdout": [
+      "B-003",
+      "B-004",
+      "B-007",
+      "B-008",
+      "B-010"
+    ]
+  },
+  "samples": [
+    {
+      "id": "B-001",
+      "path": "samples/B-001/usr/sbin/httpd",
+      "sha256": "76a338cd9612cf823ac3af71fa3f7386fdf3fcafd6ff10788a9d394bb498e708",
+      "size": 510,
+      "files": [
+        {
+          "path": "etc/init.d/S50httpd",
+          "sha256": "7a1b9912b663f5255cc06006d41bf10852b8a4cbdc6dca52ea5fd283ec78ce97",
+          "size": 184
+        },
+        {
+          "path": "usr/sbin/httpd",
+          "sha256": "76a338cd9612cf823ac3af71fa3f7386fdf3fcafd6ff10788a9d394bb498e708",
+          "size": 510
+        }
+      ],
+      "arch": "mips",
+      "kind": "vuln",
+      "source": "synthetic",
+      "license": "CC0-1.0",
+      "labels": [
+        {
+          "id": "L-001",
+          "category": "command-injection",
+          "file": "usr/sbin/httpd",
+          "line": 16,
+          "symbol": "system",
+          "cwe": "CWE-78",
+          "severity": "high",
+          "evidence": "system(cmd);",
+          "review": "reviewed"
+        }
+      ],
+      "notes": "合成 CGI 前端：QUERY_STRING 未过滤即拼入 ping 命令，system() 行为 L-001 落点。非真实固件。"
+    },
+    {
+      "id": "B-002",
+      "path": "samples/B-002/usr/sbin/upnpd",
+      "sha256": "d3aa5fcb434e7d74a4782c368ae0ad4f6eacadaa4d2e9febd08317ac79e3cf55",
+      "size": 511,
+      "files": [
+        {
+          "path": "usr/sbin/upnpd",
+          "sha256": "d3aa5fcb434e7d74a4782c368ae0ad4f6eacadaa4d2e9febd08317ac79e3cf55",
+          "size": 511
+        },
+        {
+          "path": "www/goform/setup.xml",
+          "sha256": "d604ae91489f284935050a7d4bd7fb5595648a97c7f0c6540b87cdba04002eff",
+          "size": 133
+        }
+      ],
+      "arch": "arm",
+      "kind": "vuln",
+      "source": "synthetic",
+      "license": "CC0-1.0",
+      "labels": [
+        {
+          "id": "L-002",
+          "category": "buffer-overflow",
+          "file": "usr/sbin/upnpd",
+          "line": 17,
+          "symbol": "strcpy",
+          "cwe": "CWE-120",
+          "severity": "high",
+          "evidence": "strcpy(action, soap_action);",
+          "review": "reviewed"
+        }
+      ],
+      "notes": "合成 UPnP SOAP 处理器：SOAPAction 经 strcpy 复制到 64 字节栈缓冲，L-002 指向该行。非真实固件。"
+    },
+    {
+      "id": "B-003",
+      "path": "samples/B-003/www/cgi-bin/download.cgi",
+      "sha256": "70c6e1bce2bd0f2daa10703037a9ed42a0d1532238b3131e2ff1eb233b138fbd",
+      "size": 367,
+      "files": [
+        {
+          "path": "etc/httpd.conf",
+          "sha256": "d4cb2f3d2c2f923864aace5ffbae6223df1f046c455aa87c6936861725f97d86",
+          "size": 54
+        },
+        {
+          "path": "www/cgi-bin/download.cgi",
+          "sha256": "70c6e1bce2bd0f2daa10703037a9ed42a0d1532238b3131e2ff1eb233b138fbd",
+          "size": 367
+        }
+      ],
+      "arch": "x86_64",
+      "kind": "vuln",
+      "source": "synthetic",
+      "license": "CC0-1.0",
+      "labels": [
+        {
+          "id": "L-003",
+          "category": "path-traversal",
+          "file": "www/cgi-bin/download.cgi",
+          "line": 14,
+          "symbol": "cat",
+          "cwe": "CWE-22",
+          "severity": "high",
+          "evidence": "cat \"/tmp/uploads/$FILE\"",
+          "review": "reviewed"
+        }
+      ],
+      "notes": "合成下载 CGI：file 参数未做 ../ 规范化，L-003 指向 cat 拼接路径。非真实固件。"
+    },
+    {
+      "id": "B-004",
+      "path": "samples/B-004/etc/config/system.conf",
+      "sha256": "61130c78ff90548dcf9644c25c2a0606be0e6040e29cf2572f0d8205fb470e2d",
+      "size": 256,
+      "files": [
+        {
+          "path": "etc/config/system.conf",
+          "sha256": "61130c78ff90548dcf9644c25c2a0606be0e6040e29cf2572f0d8205fb470e2d",
+          "size": 256
+        },
+        {
+          "path": "www/js/app.js",
+          "sha256": "b2db15774f408cb8a7f882f9b92a3ce85def9558f643135576cb4cfb34c27803",
+          "size": 231
+        }
+      ],
+      "arch": "mips",
+      "kind": "vuln",
+      "source": "synthetic",
+      "license": "CC0-1.0",
+      "labels": [
+        {
+          "id": "L-004",
+          "category": "hardcoded-credential",
+          "file": "etc/config/system.conf",
+          "line": 5,
+          "symbol": "admin_password",
+          "cwe": "CWE-798",
+          "severity": "high",
+          "evidence": "admin_password=BenchPassw0rd!2024",
+          "review": "reviewed"
+        },
+        {
+          "id": "L-005",
+          "category": "hardcoded-credential",
+          "file": "www/js/app.js",
+          "line": 3,
+          "symbol": "API_TOKEN",
+          "cwe": "CWE-798",
+          "severity": "medium",
+          "evidence": "const API_TOKEN = \"BenchToken-2024\";",
+          "review": "needs_review"
+        }
+      ],
+      "notes": "合成配置与前端凭据：L-004 为配置明文口令（reviewed）；L-005 为前端 API token（needs_review，用于验证未复核标签的披露路径）。非真实固件。"
+    },
+    {
+      "id": "B-005",
+      "path": "samples/B-005/usr/sbin/safe_httpd",
+      "sha256": "8eb4327d845229b91c0f5a1a98bae204fbc762611f7634522c50879cad50c9c8",
+      "size": 510,
+      "files": [
+        {
+          "path": "etc/passwd",
+          "sha256": "6daa2b41fab7825d8b5f5a760481fcb4cc89ccf55b16c7f9ee640896cd31a39c",
+          "size": 67
+        },
+        {
+          "path": "usr/sbin/safe_httpd",
+          "sha256": "8eb4327d845229b91c0f5a1a98bae204fbc762611f7634522c50879cad50c9c8",
+          "size": 510
+        }
+      ],
+      "arch": "arm",
+      "kind": "safe",
+      "source": "synthetic",
+      "license": "CC0-1.0",
+      "labels": [],
+      "notes": "合成加固 C 处理器：strnlen + 边界检查 + 有界 memcpy，没有无界拷贝或命令执行。用于检验误报。非真实固件。"
+    },
+    {
+      "id": "B-006",
+      "path": "samples/B-006/etc/init.d/rcS",
+      "sha256": "18e27c7c03d1ce7a154945a5a93b9f382ca14839a592850b1de3eebe1f096e0f",
+      "size": 326,
+      "files": [
+        {
+          "path": "etc/config/network.conf",
+          "sha256": "8076bf0b78ae2ee0da185f202e0bf95372ba1472c842dc0a427e82738ec1df08",
+          "size": 45
+        },
+        {
+          "path": "etc/init.d/rcS",
+          "sha256": "18e27c7c03d1ce7a154945a5a93b9f382ca14839a592850b1de3eebe1f096e0f",
+          "size": 326
+        }
+      ],
+      "arch": "mips",
+      "kind": "safe",
+      "source": "synthetic",
+      "license": "CC0-1.0",
+      "labels": [],
+      "notes": "合成加固启动脚本：case 白名单校验接口名、chmod 600；仅含 nvram get 读端（跨请求线索，不是漏洞）。非真实固件。"
+    },
+    {
+      "id": "B-007",
+      "path": "samples/B-007/www/cgi-bin/status.cgi",
+      "sha256": "700f104c70417fc7c4e3bfc6341d0757094558f832a86b612e41fbdc25ef4010",
+      "size": 709,
+      "files": [
+        {
+          "path": "www/cgi-bin/status.cgi",
+          "sha256": "700f104c70417fc7c4e3bfc6341d0757094558f832a86b612e41fbdc25ef4010",
+          "size": 709
+        }
+      ],
+      "arch": "none",
+      "kind": "safe",
+      "source": "synthetic",
+      "license": "CC0-1.0",
+      "labels": [],
+      "notes": "合成 Python CGI：subprocess.run 使用参数数组且 shell=False，无命令注入。arch=none 表示纯脚本样本。非真实固件。"
+    },
+    {
+      "id": "B-008",
+      "path": "samples/B-008/usr/sbin/fw_upgrade",
+      "sha256": "8a67f03273b4e27cc16090b36626cfcf9edd10458b7ec358eabee4689f0400ed",
+      "size": 897,
+      "files": [
+        {
+          "path": "etc/update.conf",
+          "sha256": "396d5801316e97aea1cf9ee9bc6afd8e1aa9669e709cd7343888b76e0b341a99",
+          "size": 37
+        },
+        {
+          "path": "usr/sbin/fw_upgrade",
+          "sha256": "8a67f03273b4e27cc16090b36626cfcf9edd10458b7ec358eabee4689f0400ed",
+          "size": 897
+        }
+      ],
+      "arch": "x86_64",
+      "kind": "safe",
+      "source": "synthetic",
+      "license": "CC0-1.0",
+      "labels": [],
+      "notes": "合成 OTA 校验器：固定长度签名块校验、无 system/strcpy；用于检验对升级相关函数的误报。非真实固件。"
+    },
+    {
+      "id": "B-009",
+      "path": "samples/B-009/usr/sbin/camera_daemon",
+      "sha256": "9754add8a024c67acf6cc25240313a03ecbb53284db0dba5d7c362760a4472b4",
+      "size": 566,
+      "files": [
+        {
+          "path": "etc/camera.conf",
+          "sha256": "6d5d27e897338e2430f37a5804ebbcac30a4117b11fad018dcfec09bd68f1dee",
+          "size": 30
+        },
+        {
+          "path": "usr/sbin/camera_daemon",
+          "sha256": "9754add8a024c67acf6cc25240313a03ecbb53284db0dba5d7c362760a4472b4",
+          "size": 566
+        }
+      ],
+      "arch": "mips",
+      "kind": "hard-negative",
+      "source": "synthetic",
+      "license": "CC0-1.0",
+      "labels": [],
+      "notes": "困难负样本：system()/strcpy() 只出现在注释与字符串常量中，代码从不调用。用于检验正则/结构引擎能否区分字符串与调用。非真实固件。"
+    },
+    {
+      "id": "B-010",
+      "path": "samples/B-010/tests/test_httpd.c",
+      "sha256": "8eee91ab0c2c0bc7ebe072cdc3e8abf91ebdec86f338e21b2ece540709a0558e",
+      "size": 467,
+      "files": [
+        {
+          "path": "tests/Makefile",
+          "sha256": "00f86ab31074b7a7c93503fce290bc19594766a90b770b403cb14158e9ab487f",
+          "size": 59
+        },
+        {
+          "path": "tests/test_httpd.c",
+          "sha256": "8eee91ab0c2c0bc7ebe072cdc3e8abf91ebdec86f338e21b2ece540709a0558e",
+          "size": 467
+        }
+      ],
+      "arch": "arm",
+      "kind": "hard-negative",
+      "source": "synthetic",
+      "license": "CC0-1.0",
+      "labels": [],
+      "notes": "困难负样本：单元测试代码中的 strcpy 常量拷贝与 system(\"true\") 常量调用，只存在于测试夹具，不进固件。用于检验『测试代码伪漏洞』误报。非真实固件。"
+    },
+    {
+      "id": "B-011",
+      "path": "samples/B-011/www/js/vendor.min.js",
+      "sha256": "e5761003120a6a7f7fd0b8826f5620010fbc79714925ba5abaf19d5a9c7f6bc6",
+      "size": 346,
+      "files": [
+        {
+          "path": "www/js/site.js",
+          "sha256": "077499c9dbdc230b9825653335ed6d3f9c8e5d62f39f4d69307b429fe0daabd4",
+          "size": 123
+        },
+        {
+          "path": "www/js/vendor.min.js",
+          "sha256": "e5761003120a6a7f7fd0b8826f5620010fbc79714925ba5abaf19d5a9c7f6bc6",
+          "size": 346
+        }
+      ],
+      "arch": "x86_64",
+      "kind": "hard-negative",
+      "source": "synthetic",
+      "license": "CC0-1.0",
+      "labels": [],
+      "notes": "困难负样本：JS 字符串表里出现 system(/exec(/strcpy(/eval( 文本，没有真实调用。用于检验前端字符串误报。非真实固件。"
+    }
+  ],
+  "rule_version": "1.2",
+  "tool_version": "1.0.0",
+  "notes": "标签 review=reviewed 才进入主指标；B-004 的 L-005 故意保留 needs_review，用于验证未复核标签不计入 P/R 分母的披露与 --strict 降级路径。每个样本的 sha256/size 是 path 指向的锚点文件；files[] 给出该样本全部文件的大小与哈希。"
+}

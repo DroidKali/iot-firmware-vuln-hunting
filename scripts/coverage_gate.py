@@ -10,12 +10,18 @@ coverage_gate.py — 覆盖率门禁（Phase 5）
   --verified   30-findings-verified.md   （审计结论，含 finding 与 NOT_FOUND）
   --candidates 20-findings-candidates.jsonl（可选，用于校验候选处置率）
   --tiering    02-tiering.json           （可选，用于补充 T1/T2/T3 清单与 promotions）
+  --layer1     10-layer1-sinks.json      （sink_scan.py 产出；strict 必填，消费 scan_integrity）
+  --stages     audit-stages.json         （可选，阶段状态 success/partial/skipped/failed）
+  --scan-waiver scan-waiver.json         （可选，对扫描缺口逐文件显式豁免）
 
 判据：
   T1 覆盖率 100%（硬门禁）
   T2 覆盖率 >= 95%
-  候选处置率 100%（每条 candidate 必须落到 validated / NOT_FOUND / 待动态验证）
+  候选处置率 100%（每条 candidate 必须落到枚举内的结构化状态，且输入解析完整）
   promotions 跟进率 100%
+  扫描完整性：strict 下 partial / failed 阻断；complete 与 scoped（仅跳过规则声明的
+  目录/正则排除）可通过，但必须在报告中披露
+  阶段状态：必需阶段非 success 即阻断
 
 退出码：0 通过；1 未通过（缺口写入 40-coverage.md）；2 参数/文件错误
 """
@@ -26,7 +32,19 @@ import json
 import os
 import re
 import sys
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+# 同目录的契约校验器（scripts/contracts.py）。缺失时退化为内置最小校验，
+# 保证 coverage_gate.py 单独拷走也能跑；此时 schema 校验会弱一些，并在
+# --manifest 的检查明细里明确写出来（不允许静默降级）。
+try:
+    from contracts import summarize as _contract_summary
+    from contracts import validate_audit_task as _validate_audit_task
+    from contracts import validate_firmware_manifest as _validate_manifest
+except Exception:  # pragma: no cover - 仅在缺文件/被拷走时触发
+    _contract_summary = None
+    _validate_audit_task = None
+    _validate_manifest = None
 
 PATH_IN_BACKTICK = re.compile(r"`([^`]+)`")
 PLAN_ROW = re.compile(r"^\|\s*\[[ xX]\]\s*\|\s*`([^`]+)`\s*\|\s*([A-Z0-9]*)\s*\|")
@@ -62,7 +80,7 @@ RECOMMEND_LINE = re.compile(r"^\s*[-*]*\s*\*{0,2}(?:修复建议|建议|加固�
 BYPASS_ITEM = re.compile(r"\bB(?:1[0-2]|[1-9])\b")
 BYPASS_MIN_ITEMS = 10          # 一张完整 B1–B12 矩阵至少应出现 10 个条目号
 
-GATE_VERSION = "1.5"           # 门禁语义版本：判据变化时递增，便于复算历史结论
+GATE_VERSION = "1.6"           # 门禁语义版本：判据变化时递增，便于复算历史结论
 
 # ── 候选处置状态枚举（封闭集合）─────────────────────────────────────────────
 # 「文本里提过这个 ID」不等于「这条候选被处置过」。只有落在枚举内的结构化
@@ -685,63 +703,161 @@ def check_type_base(report_path: str, base_path: str) -> Dict[str, Any]:
     return out
 
 
+CAND_SCHEMA = "candidates/1.0"
+LEGACY_ID_RE = re.compile(r"\b([A-Z]{1,4}-\d{1,6})\b")
+
+
+def _parse_candidate_document(raw: str, legacy_text: bool
+                              ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]],
+                                         int, Optional[str], bool]:
+    """把候选文件解析成 (行, 解析错误, 注释行数, schema, 是否为 envelope)。
+
+    契约（ISSUE-01 / ISSUE-09）：
+      - 空行与以 # 开头的整行注释允许，跳过并计数；
+      - JSONL：逐行一个 JSON 对象；非空行解析失败必须记录「行号 + 原因 + 片段」，
+        绝不静默丢弃（旧实现 except JSONDecodeError: continue 是 P0 缺陷）；
+      - envelope：整个文件是一个 {"schema": "candidates/1.0", "candidates": [...]}，
+        这是 strict 唯一接受的输入形态；
+      - --legacy-text-candidates：非 JSON 行按旧文本格式回落（仅 standard 生效，
+        strict 下即使开启也不通过）。
+    """
+    rows: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+    comments = 0
+    schema: Optional[str] = None
+    envelope = False
+
+    stripped = raw.lstrip("\ufeff \t\r\n")
+    if stripped.startswith("{"):
+        try:
+            doc = json.loads(stripped)
+        except json.JSONDecodeError:
+            doc = None
+        if isinstance(doc, dict) and isinstance(doc.get("candidates"), list):
+            envelope = True
+            schema = str(doc.get("schema") or "") or None
+            for i, c in enumerate(doc["candidates"], 1):
+                if isinstance(c, dict):
+                    c = dict(c)
+                    c.setdefault("__line__", i)
+                    rows.append(c)
+                else:
+                    errors.append({"line": i, "error": "候选条目不是 JSON 对象",
+                                   "col": 0, "sample": str(c)[:120]})
+            return rows, errors, comments, schema, envelope
+
+    for lineno, line in enumerate(raw.splitlines(), 1):
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("#"):
+            comments += 1
+            continue
+        try:
+            obj = json.loads(s)
+        except json.JSONDecodeError as exc:
+            if legacy_text:
+                m = LEGACY_ID_RE.search(s)
+                rows.append({"__legacy__": True, "__line__": lineno,
+                             "id": m.group(1) if m else "", "raw": s[:160]})
+            else:
+                errors.append({"line": lineno, "error": exc.msg,
+                               "col": exc.colno, "sample": s[:120]})
+            continue
+        if isinstance(obj, list):
+            for it in obj:
+                if isinstance(it, dict):
+                    rows.append(dict(it))
+                else:
+                    errors.append({"line": lineno, "error": "候选条目不是 JSON 对象",
+                                   "col": 0, "sample": str(it)[:120]})
+            continue
+        if not isinstance(obj, dict):
+            errors.append({"line": lineno, "error": "候选记录必须是 JSON 对象",
+                           "col": 0, "sample": s[:120]})
+            continue
+        obj = dict(obj)
+        obj.setdefault("__line__", lineno)
+        rows.append(obj)
+    return rows, errors, comments, schema, envelope
+
+
 def check_candidates(cand_path: Optional[str], text: str, strict: bool,
-                     allow_empty: bool = False) -> Dict[str, Any]:
-    """候选处置校验（结构化优先，文本匹配仅作降级）。
+                     allow_empty: bool = False,
+                     legacy_text: bool = False) -> Dict[str, Any]:
+    """候选处置校验（结构化优先，文本匹配仅在显式兼容模式下允许）。
 
-    旧实现的三个漏洞（改进计划 §4）：
-      1. 用 `cid in text` 子串匹配判定处置——报告里只要出现过这个 ID 就算
-         「已处置」，哪怕写的是「C-001 已记录，待进一步检查」；
-      2. `cand_total == 0` 直接判 PASS——没给候选文件、文件不存在、清单为空
-         三种完全不同的情况全都静默通过；
-      3. 子串匹配还会把 `C-001` 误命中 `C-0010`。
+    修复的两个 P0（改进计划 §3 ISSUE-01 / ISSUE-02）：
+      1. 非法 JSON 行不再 `continue` 静默吞掉，而是逐行记录并整体判定输入不完整；
+      2. 空清单、文件缺失、读取失败、解析失败、未提供 五种状态分开判定：
+         只有「文件存在 + 解析完整 + 显式 --allow-empty-candidates」才算通过，
+         且 strict 下同样成立（旧实现 strict 里空清单永远过不了）。
 
-    本实现要求候选自带结构化 `status`（固定枚举），并对重复 ID、未知状态、
-    CONFIRMED 缺证据分别报错。没有 status 的旧格式只允许文本匹配，
-    并在 strict 下判为不合格。
+    另外（ISSUE-09）：strict 只接受带 schema 的 envelope 输入；旧文本匹配必须
+    显式 --legacy-text-candidates 才启用，且在 strict 下不作为通过路径。
     """
     out: Dict[str, Any] = {
         "checked": False, "exists": False, "total": 0, "disposed": 0,
         "unresolved": [], "duplicates": [], "bad_status": [],
         "missing_evidence": [], "weak": [], "mode": "structured",
-        "skipped": None, "ok": False,
+        "skipped": None, "ok": False, "reason": None,
+        "parse_errors": [], "parse_complete": True, "comments": 0,
+        "schema": None, "envelope": False,
     }
     if not cand_path:
         out["skipped"] = "未提供 --candidates（候选处置未被评估）"
+        out["reason"] = "not-provided"
         return out
     if not os.path.isfile(cand_path):
         out["skipped"] = f"候选文件不存在: {cand_path}"
         out["checked"] = True          # 显式给了却没落地 → 是缺口，不是「跳过」
+        out["reason"] = "missing-file"
         out["ok"] = False
         out["unresolved"] = ["<候选文件缺失>"]
         return out
 
     out["checked"] = True
     out["exists"] = True
-    rows: List[Dict[str, Any]] = []
     try:
-        with open(cand_path, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    c = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(c, dict):
-                    rows.append(c)
+        with open(cand_path, encoding="utf-8-sig", errors="replace") as f:
+            raw = f.read()
     except OSError as exc:
         out["skipped"] = f"候选文件读取失败: {exc}"
+        out["reason"] = "read-error"
         out["ok"] = False
         return out
 
+    rows, errors, comments, schema, envelope = _parse_candidate_document(
+        raw, legacy_text)
+    out["parse_errors"] = errors
+    out["parse_complete"] = not errors
+    out["comments"] = comments
+    out["schema"] = schema
+    out["envelope"] = envelope
+
+    # 版本化输入：声明了 schema 就必须是已知版本，未知版本不猜、不降级
+    if schema and schema not in (CAND_SCHEMA, "candidate/1.0"):
+        out["skipped"] = f"候选输入 schema 不受支持: {schema}（期望 {CAND_SCHEMA}）"
+        out["reason"] = "unsupported-schema"
+        out["ok"] = False
+        out["unresolved"] = ["<候选输入 schema 未知>"]
+        return out
+
     if not rows:
+        if errors:
+            first = errors[0]
+            out["skipped"] = (f"候选清单无有效记录：{len(errors)} 行非法 JSON"
+                              f"（首条第 {first['line']} 行：{first['error']}）")
+            out["reason"] = "parse-error"
+            out["ok"] = False
+            out["unresolved"] = ["<候选文件解析失败>"]
+            return out
         out["skipped"] = "候选清单为空（0 条）"
+        out["reason"] = "empty"
         # 空清单 ≠ 没有候选这回事：只有调用方显式声明「本次确实无候选」才算通过
-        out["ok"] = bool(allow_empty) and not strict
-        if strict and not allow_empty:
-            out["unresolved"] = ["<空候选清单：strict 需显式 --allow-empty-candidates>"]
+        out["ok"] = bool(allow_empty)
+        if not allow_empty:
+            out["unresolved"] = ["<空候选清单：需显式 --allow-empty-candidates>"]
         return out
 
     out["total"] = len(rows)
@@ -763,8 +879,8 @@ def check_candidates(cand_path: Optional[str], text: str, strict: bool,
             if isinstance(disp, dict):
                 status = str(disp.get("type") or "").strip().lower()
         if not status:
-            # 无结构化状态：降级为文本匹配，并标记为弱证据
-            out["mode"] = "text"
+            # 无结构化状态：仅在显式兼容模式下回落为文本匹配，并标记为弱证据
+            out["mode"] = "legacy-text" if c.get("__legacy__") else "text"
             if _id_in_text(cid, text):
                 out["disposed"] += 1
                 weak.append(cid)
@@ -787,9 +903,20 @@ def check_candidates(cand_path: Optional[str], text: str, strict: bool,
     out["duplicates"] = [f"{k} ×{v}" for k, v in seen.items() if v > 1]
     out["unresolved"] = unresolved
     out["weak"] = weak
-    out["ok"] = (not unresolved and not out["duplicates"]
-                 and not out["bad_status"] and not out["missing_evidence"]
-                 and (strict is False or out["mode"] == "structured"))
+    hard = bool(unresolved or out["duplicates"] or out["bad_status"]
+                or out["missing_evidence"] or errors)
+    if errors:
+        out["reason"] = "parse-error"
+        unresolved.append(f"<{len(errors)} 行候选记录解析失败>")
+    if strict and not envelope:
+        out["reason"] = out["reason"] or "unversioned-input"
+        hard = True
+        unresolved.append(f"<未声明 schema（strict 要求 {CAND_SCHEMA} envelope）>")
+    if strict and out["mode"] != "structured":
+        out["reason"] = out["reason"] or "non-structured-mode"
+        hard = True
+    out["ok"] = not hard
+    out["unresolved"] = unresolved
     return out
 
 
@@ -849,6 +976,562 @@ def plan_auto_recover(rdiff: Dict[str, Any], round_no: int, max_rounds: int,
         out["notes"].append(
             f"G2 {len(g2)} 项 → 禁止自动：须补充分片重审，或在 25-review-list.md "
             f"的 `## WAIVER` 段写明理由")
+    return out
+
+
+LAYER1_SCHEMAS = ("layer1-sinks/1.3", "layer1-sinks/1.2", "layer1-sinks/1.0")
+SCAN_WAIVER_SCHEMA = "scan-waiver/1.0"
+STAGE_SCHEMA = "audit-stages/1.0"
+STAGE_STATUSES = ("success", "partial", "skipped", "failed")
+SCAN_HARD_GAP_REASONS = ("too-large", "stat-failed", "read-error", "decode-error")
+SCAN_SCOPE_REASONS = ("skip-dir", "excluded")
+
+
+def _load_scan_waiver(path: Optional[str]) -> Dict[str, Any]:
+    """载入 scan-waiver/1.0：对具体文件的扫描缺口做显式、可审计的豁免。"""
+    out: Dict[str, Any] = {"provided": False, "files": {}, "errors": [], "schema": None}
+    if not path:
+        return out
+    out["provided"] = True
+    if not os.path.isfile(path):
+        out["errors"].append(f"豁免文件不存在: {path}")
+        return out
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        out["errors"].append(f"豁免文件解析失败: {exc}")
+        return out
+    if not isinstance(doc, dict) or str(doc.get("schema") or "") != SCAN_WAIVER_SCHEMA:
+        out["errors"].append(f"豁免文件 schema 必须是 {SCAN_WAIVER_SCHEMA}")
+        return out
+    out["schema"] = doc.get("schema")
+    for it in doc.get("files") or []:
+        if not isinstance(it, dict):
+            out["errors"].append(f"豁免条目必须是对象: {str(it)[:80]}")
+            continue
+        f = norm(str(it.get("path") or it.get("file") or ""))
+        reason = str(it.get("reason") or "").strip()
+        by = str(it.get("approved_by") or "").strip()
+        if not f or not reason or not by:
+            out["errors"].append(
+                f"豁免条目缺 path/reason/approved_by: {str(it)[:80]}")
+            continue
+        out["files"][f] = {"reason": reason, "approved_by": by,
+                           "scope": str(it.get("scope") or "file")}
+    return out
+
+
+def _engine_summary(es: Any) -> Dict[str, Any]:
+    """把 engine_status 归一为 success / partial / skipped / failed（ISSUE-04）。"""
+    out: Dict[str, Any] = {
+        "verdict": "skipped", "reason": "", "engines": [],
+        "fallback_reasons": {}, "structural_confirmed": 0,
+        "regex_fallback": 0, "rules_with_structural": 0,
+    }
+    if not isinstance(es, dict):
+        out["reason"] = "Layer 1 输出缺 engine_status"
+        return out
+    out["engines"] = sorted(k for k, v in (es.get("engines") or {}).items() if v)
+    out["structural_confirmed"] = int(es.get("structural_confirmed") or 0)
+    out["regex_fallback"] = int(es.get("regex_fallback") or 0)
+    out["rules_with_structural"] = int(es.get("rules_with_structural") or 0)
+    cnt: Dict[str, int] = {}
+    for f in es.get("fallbacks") or []:
+        if isinstance(f, dict):
+            r = str(f.get("reason") or "unknown")
+            cnt[r] = cnt.get(r, 0) + 1
+    out["fallback_reasons"] = cnt
+    if not es.get("structural_enabled"):
+        out["verdict"] = "skipped"
+        out["reason"] = "--no-structural（结构确认未启用）"
+        return out
+    if out["rules_with_structural"] == 0:
+        out["verdict"] = "success"
+        out["reason"] = "规则集无需结构确认"
+        return out
+    if not out["engines"]:
+        out["verdict"] = "skipped"
+        out["reason"] = "未找到 ast-grep / semgrep，结构确认全部降级为 regex"
+        return out
+    if cnt.get("engine-error"):
+        out["verdict"] = "failed"
+        out["reason"] = "结构引擎报错后降级"
+        return out
+    if out["regex_fallback"] > 0:
+        out["verdict"] = "partial"
+        detail = ", ".join(f"{k}×{v}" for k, v in sorted(cnt.items()))
+        out["reason"] = f"部分命中缺少结构确认（{detail or '未知原因'}）"
+        return out
+    out["verdict"] = "success"
+    out["reason"] = "结构确认全部成功"
+    return out
+
+
+def check_scan_integrity(path: Optional[str], waiver_path: Optional[str] = None
+                         ) -> Dict[str, Any]:
+    """消费 sink_scan.py 的 scan_integrity / engine_status（ISSUE-03 / ISSUE-04）。
+
+    旧实现把完整性只写进 10-layer1-sinks.json，门禁从不读取，于是「扫描不完整」
+    与「扫完没发现」在最终报告里长得一模一样。这里把缺口变成可判定的输入。
+
+    verdict 四态：
+      complete — 没有跳过、没有截断、没有解析失败；
+      scoped   — 仅跳过规则声明的目录/正则排除（skip-dir / excluded），范围内完整；
+      partial  — 有文件因体积/行数/分块上限被截断或静默跳过（未被豁免）；
+      failed   — 有文件读取/stat/解码失败，或缺 scan_integrity（输出损坏）。
+    """
+    out: Dict[str, Any] = {
+        "checked": False, "exists": False, "verdict": None, "ok": False,
+        "complete_raw": None, "gaps": [], "blocking": [], "waived": [],
+        "scope": {}, "skip_reason_counts": {}, "files_scanned": 0,
+        "files_skipped": 0, "files_partial": 0, "findings": 0,
+        "schema": None, "schema_ok": False, "engine": _engine_summary(None),
+        "engine_verdict": None, "skipped": None, "error": None,
+        "waiver_errors": [],
+    }
+    if not path:
+        out["skipped"] = "未提供 --layer1（Layer 1 扫描完整性未纳入门禁）"
+        return out
+    out["checked"] = True
+    if not os.path.isfile(path):
+        out["error"] = f"Layer 1 输出不存在: {path}（缺文件不等于零发现）"
+        out["verdict"] = "failed"
+        out["blocking"].append({"code": "LAYER1_MISSING", "detail": out["error"]})
+        return out
+    out["exists"] = True
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        out["error"] = f"Layer 1 输出解析失败（不得当作空结果）: {exc}"
+        out["verdict"] = "failed"
+        out["blocking"].append({"code": "LAYER1_CORRUPT", "detail": out["error"]})
+        return out
+    if not isinstance(doc, dict):
+        out["error"] = "Layer 1 输出顶层不是 JSON 对象"
+        out["verdict"] = "failed"
+        out["blocking"].append({"code": "LAYER1_CORRUPT", "detail": out["error"]})
+        return out
+
+    out["schema"] = str(doc.get("schema") or doc.get("version") or "")
+    out["schema_ok"] = out["schema"] in LAYER1_SCHEMAS
+    out["findings"] = len(doc.get("findings") or [])
+    out["engine"] = _engine_summary(doc.get("engine_status"))
+    out["engine_verdict"] = out["engine"]["verdict"]
+
+    si = doc.get("scan_integrity")
+    if not isinstance(si, dict):
+        out["error"] = "Layer 1 输出缺 scan_integrity（旧版或被截断的输出）"
+        out["verdict"] = "failed"
+        out["blocking"].append({"code": "LAYER1_NO_INTEGRITY",
+                                "detail": out["error"]})
+        return out
+
+    out["complete_raw"] = bool(si.get("complete"))
+    out["files_scanned"] = int(si.get("files_scanned") or 0)
+    out["files_skipped"] = int(si.get("files_skipped") or 0)
+    out["files_partial"] = int(si.get("files_partial") or 0)
+    out["skip_reason_counts"] = dict(si.get("skip_reason_counts") or {})
+    out["scope"] = dict(si.get("scope") or {})
+
+    waiver = _load_scan_waiver(waiver_path)
+    out["waiver_errors"] = waiver["errors"]
+    if waiver["errors"] and waiver_path:
+        out["blocking"].append({"code": "SCAN_WAIVER_INVALID",
+                                "detail": "; ".join(waiver["errors"])})
+
+    gaps: List[Dict[str, Any]] = []
+    for p in si.get("partial_files") or []:
+        if not isinstance(p, dict):
+            continue
+        f = norm(str(p.get("file") or ""))
+        gaps.append({"file": f, "reason": "partial",
+                     "detail": str(p.get("truncation_reason") or "scan_complete=false"),
+                     "bytes_total": p.get("bytes_total"),
+                     "bytes_scanned": p.get("bytes_scanned"),
+                     "lines_total": p.get("lines_total"),
+                     "lines_scanned": p.get("lines_scanned")})
+    for s in si.get("skipped_files") or []:
+        if not isinstance(s, dict):
+            continue
+        reason = str(s.get("reason") or "unknown")
+        if reason in SCAN_SCOPE_REASONS:
+            continue
+        f = norm(str(s.get("file") or ""))
+        gaps.append({"file": f, "reason": reason,
+                     "detail": (f"超过上限 {s.get('limit_mb')} MiB"
+                                if s.get("limit_mb") is not None else reason),
+                     "bytes_total": s.get("bytes_total")})
+
+    for g in gaps:
+        w = waiver["files"].get(g["file"])
+        if w:
+            g["waived"] = True
+            g["waiver"] = w
+            out["waived"].append({"file": g["file"], "reason": g["reason"],
+                                  "waiver": w})
+        else:
+            g["waived"] = False
+
+    unwaived = [g for g in gaps if not g["waived"]]
+    hard_fail = any(g["reason"] in ("stat-failed", "read-error", "decode-error")
+                    for g in unwaived)
+    if not out["schema_ok"]:
+        out["blocking"].append({
+            "code": "LAYER1_SCHEMA",
+            "detail": f"Layer 1 schema 未识别: {out['schema'] or '<缺失>'}"})
+    if unwaived and hard_fail:
+        out["verdict"] = "failed"
+    elif unwaived:
+        out["verdict"] = "partial"
+    elif out["complete_raw"]:
+        out["verdict"] = "complete"
+    elif out["waived"]:
+        # 缺口全部被显式豁免：结论是「按豁免范围可接受」，不是「扫全了」
+        out["verdict"] = "scoped"
+    elif (out["scope"].get("skip_dirs") or out["scope"].get("excluded")):
+        out["verdict"] = "scoped"
+    else:
+        out["verdict"] = "partial"
+
+    if out["verdict"] in ("partial", "failed"):
+        for g in unwaived:
+            out["blocking"].append({
+                "code": ("LAYER1_READ_ERROR" if g["reason"] in
+                         ("stat-failed", "read-error", "decode-error")
+                         else "LAYER1_SCAN_GAP"),
+                "detail": f"{g['file']}: {g['reason']}（{g['detail']}）"
+                          f"{'，已截断' if g.get('bytes_scanned') is not None else ''}"})
+    out["gaps"] = gaps
+    out["ok"] = out["verdict"] in ("complete", "scoped") and not out["blocking"]
+    return out
+
+
+def check_stages(path: Optional[str]) -> Dict[str, Any]:
+    """校验 audit-stages/1.0：必需阶段非 success 即阻断（ISSUE-04）。"""
+    out: Dict[str, Any] = {
+        "checked": False, "exists": False, "stages": [], "blocked": [],
+        "warnings": [], "schema": None, "skipped": None, "error": None,
+        "ok": False,
+    }
+    if not path:
+        out["skipped"] = "未提供 --stages（阶段状态未登记）"
+        return out
+    out["checked"] = True
+    if not os.path.isfile(path):
+        out["error"] = f"阶段状态文件不存在: {path}"
+        out["blocked"].append({"code": "STAGES_MISSING", "detail": out["error"]})
+        return out
+    out["exists"] = True
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        out["error"] = f"阶段状态文件解析失败（不得当作全部成功）: {exc}"
+        out["blocked"].append({"code": "STAGES_CORRUPT", "detail": out["error"]})
+        return out
+    if not isinstance(doc, dict):
+        out["error"] = "阶段状态文件顶层不是 JSON 对象"
+        out["blocked"].append({"code": "STAGES_CORRUPT", "detail": out["error"]})
+        return out
+    out["schema"] = str(doc.get("schema") or "")
+    if out["schema"] != STAGE_SCHEMA:
+        out["error"] = (f"阶段状态 schema 必须是 {STAGE_SCHEMA}"
+                        f"（实际 {out['schema'] or '<缺失>'}）")
+        out["blocked"].append({"code": "STAGES_SCHEMA", "detail": out["error"]})
+        return out
+
+    for i, st in enumerate(doc.get("stages") or [], 1):
+        if not isinstance(st, dict):
+            out["blocked"].append({"code": "STAGES_CORRUPT",
+                                   "detail": f"第 {i} 个 stage 不是对象"})
+            continue
+        sid = str(st.get("id") or st.get("stage") or st.get("name") or f"stage-{i}")
+        status = str(st.get("status") or "").strip().lower()
+        required = st.get("required", True) is not False
+        rec = {"id": sid, "status": status, "required": required,
+               "detail": str(st.get("detail") or ""),
+               "fallback_reason": str(st.get("fallback_reason") or "")}
+        if status not in STAGE_STATUSES:
+            out["blocked"].append({
+                "code": "STAGE_BAD_STATUS", "stage": sid,
+                "detail": f"阶段 {sid} 状态非法: {status or '<缺失>'}"
+                          f"（允许 {', '.join(STAGE_STATUSES)}）"})
+            rec["status"] = "invalid"
+            out["stages"].append(rec)
+            continue
+        out["stages"].append(rec)
+        if required and status != "success":
+            out["blocked"].append({
+                "code": "STAGE_NOT_SUCCESS", "stage": sid,
+                "detail": (f"必需阶段 {sid} 状态为 {status}"
+                           + (f"（{rec['fallback_reason']}）"
+                              if rec["fallback_reason"] else ""))})
+        elif not required and status in ("partial", "skipped", "failed"):
+            out["warnings"].append({
+                "code": "STAGE_DEGRADED", "stage": sid,
+                "detail": (f"非必需阶段 {sid} 状态为 {status}"
+                           + (f"（{rec['fallback_reason']}）"
+                              if rec["fallback_reason"] else ""))})
+    out["ok"] = not out["blocked"]
+    return out
+
+
+def merge_stages(declared: Dict[str, Any], scan: Dict[str, Any],
+                 require_structural: bool) -> Dict[str, Any]:
+    """把 --stages 声明与 Layer 1 派生阶段合并，并交叉校验两者是否自相矛盾。"""
+    stages = [dict(s) for s in declared.get("stages") or []]
+    blocked = list(declared.get("blocked") or [])
+    warnings = list(declared.get("warnings") or [])
+    seen = {s["id"]: s for s in stages}
+
+    def add(stage_id: str, status: str, required: bool, detail: str) -> None:
+        if stage_id in seen:
+            return
+        rec = {"id": stage_id, "status": status, "required": required,
+               "detail": detail, "derived": True}
+        stages.append(rec)
+        seen[stage_id] = rec
+
+    if scan.get("checked"):
+        mapping = {"complete": "success", "scoped": "success",
+                   "partial": "partial", "failed": "failed"}
+        status = mapping.get(str(scan.get("verdict")), "failed")
+        add("layer1-scan", status, True,
+            f"扫描完整性 verdict={scan.get('verdict')}")
+        declared_scan = seen.get("layer1-scan") or seen.get("scan-integrity")
+        if declared_scan and declared_scan.get("status") == "success" \
+                and scan.get("verdict") in ("partial", "failed"):
+            blocked.append({
+                "code": "STAGE_INCONSISTENT", "stage": declared_scan["id"],
+                "detail": (f"阶段 {declared_scan['id']} 声明 success，"
+                           f"但 Layer 1 扫描完整性为 {scan.get('verdict')}")})
+
+    if scan.get("checked"):
+        ev = str(scan.get("engine_verdict") or "skipped")
+        add("structural-engine", ev, bool(require_structural),
+            str((scan.get("engine") or {}).get("reason") or ""))
+        declared_engine = seen.get("structural-engine")
+        if declared_engine and declared_engine.get("status") == "success" \
+                and ev != "success":
+            blocked.append({
+                "code": "STAGE_INCONSISTENT", "stage": "structural-engine",
+                "detail": (f"阶段 structural-engine 声明 success，"
+                           f"但结构引擎状态为 {ev}")})
+
+    return {"checked": declared.get("checked") or scan.get("checked"),
+            "exists": declared.get("exists") or scan.get("exists"),
+            "schema": declared.get("schema"), "stages": stages,
+            "blocked": blocked, "warnings": warnings,
+            "skipped": declared.get("skipped"), "error": declared.get("error"),
+            "ok": not blocked}
+
+
+def _minimal_manifest_errors(doc: Dict[str, Any]) -> List[Dict[str, str]]:
+    """contracts.py 不可用时的兜底校验：只查最关键的四项。"""
+    errs: List[Dict[str, str]] = []
+    image = doc.get("image") if isinstance(doc.get("image"), dict) else {}
+    for key, typ in (("schema", str), ("id", str), ("vendor", str),
+                     ("product", str), ("version", str), ("arch", str)):
+        if not isinstance(doc.get(key), typ) or not str(doc.get(key) or "").strip():
+            errs.append({"path": f"manifest.{key}", "code": "MISSING",
+                         "message": "必填字段缺失或类型错误（builtin 兜底校验）"})
+    if not (isinstance(doc.get("sha256"), str) or isinstance(image.get("sha256"), str)):
+        errs.append({"path": "manifest.image.sha256", "code": "MISSING",
+                     "message": "缺少镜像哈希 image.sha256"})
+    sha = doc.get("sha256") or image.get("sha256")
+    if isinstance(sha, str) and not re.match(r"^[0-9a-f]{64}$", sha.lower()):
+        errs.append({"path": "manifest.sha256", "code": "BAD_HASH",
+                     "message": "sha256 必须是 64 位十六进制"})
+    return errs
+
+
+def check_manifest(path: Optional[str]) -> Dict[str, Any]:
+    """FirmwareManifest 契约（ISSUE-05）：版本化输入，不接受自由文本替代。
+
+    判定：
+      * 未提供         -> SKIPPED（是否必需由 --require-manifest 决定）
+      * 文件不存在     -> FAIL（MANIFEST_MISSING）
+      * JSON 解析失败  -> FAIL（MANIFEST_CORRUPT）
+      * 契约违规       -> FAIL（MANIFEST_INVALID，逐条列出字段路径）
+      * image 哈希不符 -> FAIL（MANIFEST_HASH_MISMATCH，只警告版本号变化不算数）
+    """
+    out: Dict[str, Any] = {
+        "checked": bool(path), "exists": False, "ok": False, "schema": None,
+        "id": None, "arch": None, "sha256": None, "errors": [], "blocking": [],
+        "image_verified": None, "skipped": None, "detail": "",
+    }
+    if not path:
+        out["skipped"] = "未提供 --manifest"
+        out["detail"] = out["skipped"]
+        return out
+    if not os.path.isfile(path):
+        out["errors"].append({"path": "$", "code": "MISSING", "message": "文件不存在"})
+        out["blocking"].append({"code": "MANIFEST_MISSING",
+                                "detail": f"固件清单不存在：{path}"})
+        out["detail"] = "文件不存在"
+        return out
+    out["exists"] = True
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        out["errors"].append({"path": "$", "code": "PARSE_ERROR", "message": str(exc)})
+        out["blocking"].append({"code": "MANIFEST_CORRUPT",
+                                "detail": f"固件清单解析失败：{exc}"})
+        out["detail"] = "JSON 解析失败"
+        return out
+    if not isinstance(doc, dict):
+        out["errors"].append({"path": "$", "code": "BAD_TYPE",
+                              "message": "顶层必须是 JSON 对象"})
+        out["blocking"].append({"code": "MANIFEST_INVALID",
+                                "detail": "固件清单顶层必须是 JSON 对象"})
+        out["detail"] = "顶层必须是对象"
+        return out
+
+    out["schema"] = doc.get("schema") if isinstance(doc.get("schema"), str) else None
+    out["id"] = doc.get("id") if isinstance(doc.get("id"), str) else None
+    out["arch"] = doc.get("arch") if isinstance(doc.get("arch"), str) else None
+    _img0 = doc.get("image") if isinstance(doc.get("image"), dict) else {}
+    _sha = doc.get("sha256")
+    if not isinstance(_sha, str) and isinstance(_img0.get("sha256"), str):
+        _sha = _img0["sha256"]
+    out["sha256"] = _sha if isinstance(_sha, str) else None
+
+    if _validate_manifest is not None:
+        errs = _validate_manifest(doc)
+    else:
+        errs = _minimal_manifest_errors(doc)
+        errs.append({"path": "$", "code": "DEGRADED",
+                     "message": "contracts.py 不可用，已退化为内置最小校验"})
+    out["errors"] = errs
+    if errs:
+        out["blocking"].append({"code": "MANIFEST_INVALID",
+                                "detail": (f"{len(errs)} 处契约违规："
+                                           + "；".join(f"{e['path']} {e['message']}"
+                                                       for e in errs[:3]))})
+
+    # 镜像哈希核对：清单声明的 image 若存在，必须与磁盘一致。
+    image = doc.get("image")
+    if isinstance(image, dict) and isinstance(image.get("path"), str):
+        ip = image["path"]
+        if not os.path.isabs(ip):
+            ip = os.path.join(os.path.dirname(os.path.abspath(path)), ip)
+        if os.path.isfile(ip):
+            actual = _sha256_file(ip)
+            declared = str(image.get("sha256") or "").lower()
+            out["image_verified"] = (actual == declared)
+            if actual != declared:
+                out["blocking"].append({
+                    "code": "MANIFEST_HASH_MISMATCH",
+                    "detail": f"镜像哈希不符：清单 {declared[:12]}… 实际 {actual[:12]}…"})
+        else:
+            out["image_verified"] = None
+
+    out["ok"] = not out["blocking"] and not errs
+    if out["ok"]:
+        out["detail"] = (f"schema={out['schema']} id={out['id']} arch={out['arch']} "
+                         f"sha256={str(out['sha256'])[:12]}…")
+    else:
+        head = "；".join(f"{e['path']}: {e['message']}" for e in errs[:3])
+        out["detail"] = (head or "；".join(str(b["detail"]) for b in out["blocking"][:2]))
+        if _contract_summary is not None and errs:
+            out["detail"] = _contract_summary(errs, limit=3)
+    return out
+
+
+def _minimal_audit_task_errors(doc: Dict[str, Any]) -> List[Dict[str, str]]:
+    """contracts.py 不可用时的兜底校验：只查最关键的五项。"""
+    errs: List[Dict[str, str]] = []
+    for key in ("schema", "task_id", "manifest_id", "profile", "created_at"):
+        if not isinstance(doc.get(key), str) or not str(doc.get(key) or "").strip():
+            errs.append({"path": f"task.{key}", "code": "MISSING",
+                         "message": "必填字段缺失或类型错误（builtin 兜底校验）"})
+    scope = doc.get("scope")
+    if not isinstance(scope, dict):
+        errs.append({"path": "task.scope", "code": "MISSING",
+                     "message": "缺少范围声明对象 scope"})
+    return errs
+
+
+def check_audit_task(path: Optional[str], manifest: Dict[str, Any]) -> Dict[str, Any]:
+    """AuditTask 契约（ISSUE-05）：范围/预算声明必须能回指固件清单。
+
+    判定：
+      * 未提供          -> SKIPPED（可选输入）
+      * 文件不存在      -> FAIL（AUDIT_TASK_MISSING）
+      * JSON 解析失败   -> FAIL（AUDIT_TASK_CORRUPT）
+      * 契约违规        -> FAIL（AUDIT_TASK_INVALID）
+      * manifest_id 与 --manifest 不一致 -> FAIL（AUDIT_TASK_MISMATCH）
+    """
+    out: Dict[str, Any] = {
+        "checked": bool(path), "ok": False, "schema": None, "task_id": None,
+        "manifest_id": None, "profile": None, "errors": [], "blocking": [],
+        "skipped": None, "detail": "",
+    }
+    if not path:
+        out["skipped"] = "未提供 --audit-task"
+        out["detail"] = out["skipped"]
+        return out
+    if not os.path.isfile(path):
+        out["errors"].append({"path": "$", "code": "MISSING", "message": "文件不存在"})
+        out["blocking"].append({"code": "AUDIT_TASK_MISSING",
+                                "detail": f"审计任务文件不存在：{path}"})
+        out["detail"] = "文件不存在"
+        return out
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        out["errors"].append({"path": "$", "code": "PARSE_ERROR", "message": str(exc)})
+        out["blocking"].append({"code": "AUDIT_TASK_CORRUPT",
+                                "detail": f"审计任务解析失败：{exc}"})
+        out["detail"] = "JSON 解析失败"
+        return out
+    if not isinstance(doc, dict):
+        out["errors"].append({"path": "$", "code": "BAD_TYPE",
+                              "message": "顶层必须是 JSON 对象"})
+        out["blocking"].append({"code": "AUDIT_TASK_INVALID",
+                                "detail": "审计任务顶层必须是 JSON 对象"})
+        out["detail"] = "顶层必须是对象"
+        return out
+
+    out["schema"] = doc.get("schema") if isinstance(doc.get("schema"), str) else None
+    out["task_id"] = doc.get("task_id") if isinstance(doc.get("task_id"), str) else None
+    out["profile"] = doc.get("profile") if isinstance(doc.get("profile"), str) else None
+    out["manifest_id"] = (doc.get("manifest_id")
+                          if isinstance(doc.get("manifest_id"), str) else None)
+    if _validate_audit_task is not None:
+        errs = _validate_audit_task(doc)
+    else:
+        errs = _minimal_audit_task_errors(doc)
+        errs.append({"path": "$", "code": "DEGRADED",
+                     "message": "contracts.py 不可用，已退化为内置最小校验"})
+    out["errors"] = errs
+    if errs:
+        out["blocking"].append({"code": "AUDIT_TASK_INVALID",
+                                "detail": (f"{len(errs)} 处契约违规："
+                                           + "；".join(f"{e['path']} {e['message']}"
+                                                       for e in errs[:3]))})
+
+    # 回指核对：任务声明的固件必须就是本次门禁审的那一份。
+    if manifest.get("checked") and out["manifest_id"] and manifest.get("id"):
+        if out["manifest_id"] != manifest["id"]:
+            out["blocking"].append({
+                "code": "AUDIT_TASK_MISMATCH",
+                "detail": (f"任务 manifest_id={out['manifest_id']} "
+                           f"≠ 固件清单 id={manifest['id']}")})
+
+    out["ok"] = not out["blocking"] and not errs
+    if out["ok"]:
+        out["detail"] = (f"schema={out['schema']} task={out['task_id']} "
+                         f"profile={out['profile']} manifest={out['manifest_id']}")
+    else:
+        head = "；".join(f"{e['path']}: {e['message']}" for e in errs[:3])
+        out["detail"] = (head or "；".join(str(b["detail"]) for b in out["blocking"][:2]))
+        if _contract_summary is not None and errs:
+            out["detail"] = _contract_summary(errs, limit=3)
     return out
 
 
@@ -1123,6 +1806,23 @@ def main() -> int:
                          "strict=必需输入齐全 + 高级检查全部启用 + 未执行即失败")
     ap.add_argument("--allow-empty-candidates", action="store_true",
                     help="显式声明本次审计确实没有候选（空清单不再判失败）")
+    ap.add_argument("--layer1",
+                    help="sink_scan.py 的 10-layer1-sinks.json；strict 必填，"
+                         "其 scan_integrity 纳入门禁判定")
+    ap.add_argument("--stages",
+                    help="阶段状态文件 audit-stages/1.0（success/partial/skipped/failed）")
+    ap.add_argument("--scan-waiver",
+                    help="扫描缺口豁免 scan-waiver/1.0（逐文件、需 reason 与 approved_by）")
+    ap.add_argument("--require-structural", action="store_true",
+                    help="结构引擎降级（partial/skipped/failed）即判失败")
+    ap.add_argument("--legacy-text-candidates", action="store_true",
+                    help="允许旧文本候选格式（非 JSON 行按 ID 正则解析；strict 下仍不通过）")
+    ap.add_argument("--manifest",
+                    help="firmware-manifest/1.0 固件清单（结构化契约输入，ISSUE-05）")
+    ap.add_argument("--audit-task",
+                    help="审计任务声明 JSON（audit-task/1.0，contracts.py 校验并核对 manifest_id）")
+    ap.add_argument("--require-manifest", action="store_true",
+                    help="强制要求 --manifest 通过契约校验（CI 与正式审计建议开启）")
     ap.add_argument("--gate-config",
                     help="输出 gate-config.json 的路径（记录执行了哪些检查与版本）")
     args = ap.parse_args()
@@ -1191,10 +1891,31 @@ def main() -> int:
         tot = by_tier_total.get(t, 0)
         return 100.0 if tot == 0 else round(by_tier_cov.get(t, 0) * 100.0 / tot, 2)
 
-    # 候选处置率（结构化优先；文本匹配降级并标记）
+    # 候选处置率（结构化优先；文本匹配只在显式兼容模式下允许）
     cand = check_candidates(args.candidates, text, STRICT,
-                            allow_empty=args.allow_empty_candidates)
+                            allow_empty=args.allow_empty_candidates,
+                            legacy_text=args.legacy_text_candidates)
     cand_missing: List[str] = list(cand["unresolved"])
+
+    # Layer 1 扫描完整性（ISSUE-03）与阶段状态（ISSUE-04）：
+    # 两者都必须真正进入门禁，而不是只写在中间产物里。
+    scan = check_scan_integrity(args.layer1, args.scan_waiver)
+    declared_stages = check_stages(args.stages)
+    stages = merge_stages(declared_stages, scan, args.require_structural)
+    manifest = check_manifest(args.manifest)
+    audit_task = check_audit_task(args.audit_task, manifest)
+    blocking: List[Dict[str, Any]] = []
+    blocking.extend(scan["blocking"])
+    blocking.extend(stages["blocked"])
+    blocking.extend(manifest["blocking"])
+    blocking.extend(audit_task["blocking"])
+    if cand["parse_errors"]:
+        blocking.append({"code": "CAND_PARSE_ERROR",
+                         "detail": f"{len(cand['parse_errors'])} 行候选记录解析失败"})
+    if cand["reason"] in ("missing-file", "unsupported-schema",
+                          "unversioned-input", "non-structured-mode"):
+        blocking.append({"code": "CAND_INPUT_INVALID",
+                         "detail": cand["skipped"] or cand["reason"]})
 
     # promotions 跟进
     promo_missing: List[str] = []
@@ -1269,20 +1990,86 @@ def main() -> int:
          f"缺失 {len(promo_missing)} 项"),
         ("无未审文件", not missing, f"缺失 {len(missing)} 个"),
     ]
+    warn_checks: List[Tuple[str, str]] = []
+
+    # 扫描完整性（ISSUE-03）：文件缺失/截断/解析失败都不等于「没发现」。
+    if scan["checked"]:
+        unwaived = [g for g in scan["gaps"] if not g.get("waived")]
+        if scan["verdict"] in ("complete", "scoped"):
+            detail = (f"verdict={scan['verdict']}；扫描 {scan['files_scanned']} 个文件，"
+                      f"跳过 {scan['files_skipped']}、截断 {scan['files_partial']}")
+            if scan["verdict"] == "scoped":
+                detail += "；范围外仅为规则声明的目录/正则排除"
+            if scan["waived"]:
+                detail += f"；已豁免 {len(scan['waived'])} 个"
+            checks.append(("扫描完整性（Layer 1）", True, detail))
+        else:
+            checks.append((
+                "扫描完整性（Layer 1）", False,
+                (scan.get("error") and f"{scan['error']}；" or "")
+                + f"verdict={scan['verdict']}；缺口 {len(scan['gaps'])} 个，"
+                  f"未豁免 {len(unwaived)} 个"
+                + ("；存在读取/解析失败" if scan["verdict"] == "failed" else "")))
+
+        # 结构引擎降级（ISSUE-04）：默认只警告；--require-structural 或引擎报错才阻断。
+        ev = str(scan["engine_verdict"] or "skipped")
+        ereason = str((scan["engine"] or {}).get("reason") or "")
+        if ev == "success":
+            checks.append((
+                "结构引擎完整性", True,
+                f"引擎 {','.join(scan['engine']['engines']) or '—'}；"
+                f"结构确认 {scan['engine']['structural_confirmed']} 条"))
+        elif args.require_structural or ev == "failed":
+            checks.append(("结构引擎完整性", False, f"{ev}：{ereason}"))
+        else:
+            warn_checks.append(("结构引擎完整性",
+                                f"{ev}：{ereason}（未启用 --require-structural）"))
+
+    # 阶段状态（ISSUE-04）：必需阶段非 success 即阻断。
+    if args.stages:
+        if not stages["stages"]:
+            checks.append(("审计阶段全部成功", False,
+                           stages.get("error") or "阶段状态文件无有效阶段"))
+        else:
+            bad_stages = [s for s in stages["stages"]
+                          if s.get("required", True)
+                          and s.get("status") != "success"]
+            detail = f"{len(stages['stages'])} 个阶段；非 success {len(bad_stages)} 个"
+            if bad_stages:
+                detail += "（" + "、".join(f"{s['id']}={s.get('status')}"
+                                           for s in bad_stages[:6]) + "）"
+            checks.append(("审计阶段全部成功", not bad_stages, detail))
+            for w in stages["warnings"]:
+                warn_checks.append(("阶段降级", str(w.get("detail") or "")))
+
+    # 固件清单契约（ISSUE-05）：版本化输入 + 字段/类型/枚举校验 + 镜像哈希核对。
+    if manifest["checked"]:
+        checks.append(("固件清单契约（FirmwareManifest）", manifest["ok"],
+                       manifest["detail"]))
+    if audit_task["checked"]:
+        checks.append(("审计任务契约（AuditTask）", audit_task["ok"],
+                       audit_task["detail"]))
     # 候选处置：只有「真的评估过、且每条都有结构化状态」才算 PASS；
     # 未提供文件 / 文件不存在 / 空清单 一律进 SKIPPED 或 FAIL，不允许静默通过。
     if cand["checked"] and cand["total"] > 0:
-        checks.append((
-            "候选处置率 100%",
-            cand["ok"],
-            f"{cand['disposed']}/{cand['total']} 已处置"
-            + (f"；未处置 {len(cand['unresolved'])}、重复 {len(cand['duplicates'])}、"
-               f"未知状态 {len(cand['bad_status'])}、确认但缺证据 {len(cand['missing_evidence'])}"
-               if not cand["ok"] else "")
-            + ("；**含文本匹配降级项**" if cand["mode"] == "text" else "")))
+        detail = f"{cand['disposed']}/{cand['total']} 已处置"
+        if not cand["ok"]:
+            detail += (f"；未处置 {len(cand['unresolved'])}、"
+                       f"重复 {len(cand['duplicates'])}、"
+                       f"未知状态 {len(cand['bad_status'])}、"
+                       f"确认但缺证据 {len(cand['missing_evidence'])}")
+        if cand["parse_errors"]:
+            detail += f"；**解析失败 {len(cand['parse_errors'])} 行**"
+        if cand["mode"] != "structured":
+            detail += f"；**{cand['mode']} 兼容模式（无结构化保证）**"
+        checks.append(("候选处置率 100%", cand["ok"], detail))
     elif cand["checked"]:
-        checks.append(("候选处置率 100%", cand["ok"],
-                       cand["skipped"] or "空/无效候选清单"))
+        # 文件存在但没有任何有效记录：空清单 / 解析失败 / 结构不受支持，
+        # 三者都必须显式判定，绝不允许「没数据所以通过」。
+        detail = cand["skipped"] or "空/无效候选清单"
+        if cand["parse_errors"]:
+            detail += f"；{len(cand['parse_errors'])} 行非法 JSON"
+        checks.append(("候选处置率 100%", cand["ok"], detail))
     if rdiff["available"]:
         if recover["enabled"] and not rdiff["ok"]:
             note = (f"；自动修复第 {recover['round']}/{recover['max_rounds']} 轮"
@@ -1372,6 +2159,18 @@ def main() -> int:
     # 旧实现只在 checked 时 append，导致没启用的高级检查在报告里完全不可见，
     # 退出码 0 被误读为「所有质量约束都过了」。
     skipped_checks: List[Tuple[str, str, bool]] = []
+    if not scan["checked"]:
+        # strict 下 --layer1 是必需输入：没交 Layer 1 输出就无从证明扫描完整
+        skipped_checks.append(("扫描完整性（Layer 1）",
+                               scan["skipped"] or "未提供 --layer1", True))
+    if not manifest["checked"]:
+        skipped_checks.append(("固件清单契约（FirmwareManifest）",
+                               manifest["skipped"] or "未提供 --manifest",
+                               bool(args.require_manifest)))
+    if not audit_task["checked"]:
+        skipped_checks.append(("审计任务契约（AuditTask）",
+                               audit_task["skipped"] or "未提供 --audit-task",
+                               False))
     if not cand["checked"]:
         skipped_checks.append(("候选处置率 100%",
                                cand["skipped"] or "未评估候选处置", True))
@@ -1404,6 +2203,10 @@ def main() -> int:
 
     ROWS = [{"name": n, "status": "PASS" if ok else "FAIL", "detail": d,
              "required": True, "executed": True} for n, ok, d in checks]
+    # WARN：检查执行了、也发现了降级，但不构成阻断（例如未启用 --require-structural
+    # 时的结构引擎回落）。旧实现只有 PASS/FAIL/SKIPPED 三态，降级信息会丢失。
+    ROWS += [{"name": n, "status": "WARN", "detail": d,
+              "required": False, "executed": True} for n, d in warn_checks]
     ROWS += [{"name": n, "status": "SKIPPED", "detail": r,
               "required": req, "executed": False} for n, r, req in skipped_checks]
 
@@ -1412,14 +2215,24 @@ def main() -> int:
         # strict 下「必需检查没跑」按失败处理——这是整个 profile 的意义所在
         failed += [r for r in ROWS if r["status"] == "SKIPPED" and r["required"]]
 
+    # 机器可读的阻断项：让编排层/CI 不必解析 Markdown 表格就能知道为什么没过。
+    blocking.extend({"code": "CHECK_FAILED", "detail": f"{r['name']}：{r['detail']}"}
+                    for r in ROWS if r["status"] == "FAIL")
+    if STRICT:
+        blocking.extend({"code": "CHECK_NOT_EXECUTED",
+                         "detail": f"{r['name']}：{r['detail']}"}
+                        for r in ROWS
+                        if r["status"] == "SKIPPED" and r["required"])
+
     n_pass = sum(1 for r in ROWS if r["status"] == "PASS")
     n_skip = sum(1 for r in ROWS if r["status"] == "SKIPPED")
+    n_warn = sum(1 for r in ROWS if r["status"] == "WARN")
 
     lines = [
         "# 覆盖率门禁报告（40-coverage.md）",
         "",
         f"> 档位 **{PROFILE}**　·　PASS {n_pass} / FAIL "
-        f"{len([r for r in ROWS if r['status'] == 'FAIL'])} / SKIPPED {n_skip}",
+        f"{len([r for r in ROWS if r['status'] == 'FAIL'])} / WARN {n_warn} / SKIPPED {n_skip}",
         ">",
         "> `SKIPPED` 表示该检查**本次没有执行**，不等于通过。"
         + ("strict 档位下必需检查的 SKIPPED 判为失败。" if STRICT else
@@ -1431,7 +2244,7 @@ def main() -> int:
         "|---|---|---|",
     ]
     for r in ROWS:
-        mark = {"PASS": "PASS", "FAIL": "**FAIL**",
+        mark = {"PASS": "PASS", "FAIL": "**FAIL**", "WARN": "**WARN**",
                 "SKIPPED": "SKIPPED", "ERROR": "**ERROR**"}[r["status"]]
         lines.append("| %s | %s | %s |" % (r["name"], mark, r["detail"]))
 
@@ -1455,6 +2268,125 @@ def main() -> int:
     else:
         lines.append("无。所有计划内文件均有审计结论。")
 
+    # ── 扫描完整性 / 阶段状态（ISSUE-03 / ISSUE-04）──────────────────────────
+    # 「扫描不完整」与「扫完没发现」必须在报告里长得完全不一样。
+    if scan["checked"] or (args.stages and stages["stages"]):
+        lines += ["", "## 扫描完整性与阶段状态", ""]
+        if scan["checked"]:
+            lines += [
+                f"- Layer 1 verdict：`{scan['verdict']}`"
+                f"（原始 `scan_integrity.complete={scan['complete_raw']}`；"
+                f"schema=`{scan['schema'] or '—'}`）",
+                f"- 已扫描 {scan['files_scanned']} 个文件；跳过 {scan['files_skipped']}、"
+                f"截断 {scan['files_partial']}；findings {scan['findings']} 条",
+            ]
+            if scan["skip_reason_counts"]:
+                lines.append("- 跳过原因：" + "，".join(
+                    f"`{k}`×{v}"
+                    for k, v in sorted(scan["skip_reason_counts"].items())))
+            sc = (scan.get("scope") or {}) if isinstance(scan.get("scope"), dict) else {}
+            bits = []
+            if sc.get("skip_dirs"):
+                bits.append("跳过目录 " + "、".join(
+                    f"`{d}`" for d in list(sc["skip_dirs"])[:10]))
+            if sc.get("excluded"):
+                bits.append("排除正则 " + "、".join(
+                    f"`{e}`" for e in list(sc["excluded"])[:10]))
+            if bits:
+                lines.append("- 声明范围外：" + "；".join(bits))
+            lines.append("")
+            if scan["gaps"]:
+                lines += ["| 文件 | 原因 | 细节 | 处置 |", "|---|---|---|---|"]
+                for g in scan["gaps"][:200]:
+                    wv = g.get("waiver") or {}
+                    disp = ("已豁免：" + str(wv.get("reason") or "—")
+                            if g.get("waived") else "**未豁免（覆盖缺口）**")
+                    lines.append("| `%s` | %s | %s | %s |" % (
+                        g["file"], g["reason"],
+                        str(g["detail"]).replace("|", "\\|"), disp))
+                if len(scan["gaps"]) > 200:
+                    lines.append(f"\n> 仅显示前 200 个缺口，共 {len(scan['gaps'])} 个。")
+            else:
+                lines.append("无扫描缺口（未跳过、未截断）。")
+            eng = scan["engine"] or {}
+            lines += [
+                "",
+                f"**结构引擎**：`{scan['engine_verdict']}` — {eng.get('reason') or '—'}",
+                "",
+                "- 引擎：" + ("、".join(f"`{e}`" for e in eng.get("engines") or [])
+                            or "—")
+                + f"；结构确认 {eng.get('structural_confirmed', 0)} 条、"
+                  f"正则回落 {eng.get('regex_fallback', 0)} 条",
+            ]
+            fr = eng.get("fallback_reasons") or {}
+            if fr:
+                lines.append("- 回落原因：" + "，".join(
+                    f"`{k}`×{v}" for k, v in sorted(fr.items())))
+        for w in stages["warnings"]:
+            lines.append("- ⚠ " + str(w.get("detail") or ""))
+        for b in stages["blocked"]:
+            lines.append(f"- ⛔ **{b.get('code')}** {b.get('detail') or ''}")
+        if stages["stages"]:
+            lines += ["", "| 阶段 | 状态 | 必需 | 说明 |", "|---|---|---|---|"]
+            for s in stages["stages"]:
+                lines.append("| `%s` | %s | %s | %s |" % (
+                    s.get("id"), s.get("status"),
+                    "是" if s.get("required", True) else "否",
+                    str(s.get("detail") or s.get("fallback_reason") or "")
+                    .replace("|", "\\|")))
+        lines.append("")
+
+    if manifest["checked"]:
+        lines += ["", "## 固件清单契约（FirmwareManifest）", ""]
+        if manifest["ok"]:
+            lines += [
+                f"- schema：`{manifest['schema']}`",
+                f"- 固件：`{manifest['id']}`（arch `{manifest['arch']}`）",
+                f"- 镜像 sha256：`{manifest['sha256']}`",
+            ]
+            if manifest["image_verified"] is True:
+                lines.append("- 镜像哈希：已与磁盘文件核对一致")
+        else:
+            lines.append(f"- ⛔ 未通过：{manifest['detail']}")
+            for e in manifest["errors"][:30]:
+                lines.append(f"- `{e['path']}` [{e['code']}] {e['message']}")
+        lines.append("")
+
+    if audit_task["checked"]:
+        lines += ["", "## 审计任务契约（AuditTask）", ""]
+        if audit_task["ok"]:
+            lines += [f"- schema：`{audit_task['schema']}`",
+                      f"- 任务：`{audit_task['task_id']}`（profile `{audit_task['profile']}`）",
+                      f"- 固件清单：`{audit_task['manifest_id']}`（已与 --manifest 核对）"]
+        else:
+            lines.append(f"- ⛔ 未通过：{audit_task['detail']}")
+            for e in audit_task["errors"][:30]:
+                lines.append(f"- `{e['path']}` [{e['code']}] {e['message']}")
+        lines.append("")
+
+    if cand["parse_errors"]:
+        lines += ["", "## 候选文件解析失败（非法行不得被静默忽略）", "",
+                  f"`{os.path.basename(args.candidates or '')}` 中有 "
+                  f"{len(cand['parse_errors'])} 行不是合法 JSON 对象。"
+                  "旧实现会直接跳过这些行，导致「少读了几条候选」和「候选都处置了」"
+                  "在报告里无法区分。", "",
+                  "| 行号 | 原因 | 片段 |", "|---|---|---|"]
+        for e in cand["parse_errors"][:200]:
+            lines.append("| %s | %s | `%s` |" % (
+                e.get("line"), e.get("error"),
+                str(e.get("sample") or "").replace("`", "'").replace("|", "\\|")[:100]))
+        if len(cand["parse_errors"]) > 200:
+            lines.append("")
+            lines.append(f"> 仅显示前 200 条，共 {len(cand['parse_errors'])} 条。")
+
+    if cand["checked"] and cand["mode"] != "structured":
+        lines += ["", "## 候选输入为兼容模式（无结构化保证）", "",
+                  f"mode=`{cand['mode']}`：部分候选只凭「报告里出现过 ID」判定处置，"
+                  "没有结构化 status。该模式在 standard 下仅提示，"
+                  "strict 下不构成通过路径。", ""]
+        for c in cand["weak"]:
+            lines.append(f"- `{c}`")
+
     if cand_missing:
         lines += ["", "## 未处置的候选（必须落到 status 枚举里的合法状态）", "",
                   "合法状态：" + "、".join(f"`{s}`" for s in sorted(CAND_STATUS)), ""]
@@ -1474,13 +2406,6 @@ def main() -> int:
     if cand["missing_evidence"]:
         lines += ["", "## 标记为 confirmed 但缺证据", ""]
         for c in cand["missing_evidence"]:
-            lines.append(f"- `{c}`")
-
-    if cand["weak"]:
-        lines += ["", "## 仅凭文本提及判定的候选（弱证据）", "",
-                  "这些候选在结论里出现过 ID，但没有结构化 `status`。"
-                  "standard 档位下接受，strict 档位下不认。", ""]
-        for c in cand["weak"]:
             lines.append(f"- `{c}`")
 
     if promo_missing:
@@ -1681,6 +2606,9 @@ def main() -> int:
             lines.append(f"- {tag}：{r['name']}（{r['detail']}）")
     else:
         lines += [f"门禁通过（{PROFILE} 档位），可进入 Phase 5.2 规则沉淀与 5.3 报告生成。", ""]
+        if n_warn:
+            lines += [f"> 注意：有 {n_warn} 项**警告**（降级但不阻断，见上表 WARN）。"
+                      "如需把降级也当作阻断，请加 `--require-structural`。", ""]
         if n_skip:
             lines += [f"> 注意：仍有 {n_skip} 项检查未执行（见上表 SKIPPED）。"
                       "若需「所有必需检查均已执行」的结论，请用 `--profile strict`。", ""]
@@ -1717,7 +2645,7 @@ def main() -> int:
         cfg_path = os.path.splitext(args.out)[0] + ".gate-config.json"
     if cfg_path:
         cfg = {
-            "schema_version": "gate-config/1.0",
+            "schema_version": "gate-config/1.1",
             "profile": PROFILE,
             "gate_version": GATE_VERSION,
             "strict": STRICT,
@@ -1734,6 +2662,11 @@ def main() -> int:
                 "type_base_strict": bool(args.type_base_strict),
                 "review_list": bool(args.review_list),
                 "report": bool(args.report),
+                "layer1": bool(args.layer1),
+                "require_structural": bool(args.require_structural),
+                "legacy_text_candidates": bool(args.legacy_text_candidates),
+                "manifest": bool(args.manifest),
+                "require_manifest": bool(args.require_manifest),
             },
             "inputs": {
                 k: {"path": v, "sha256": _sha256_file(v)}
@@ -1743,12 +2676,56 @@ def main() -> int:
                              ("tiering", args.tiering),
                              ("report", args.report),
                              ("taint_graph", args.taint_graph),
+                             ("layer1", args.layer1),
+                             ("stages", args.stages),
+                             ("scan_waiver", args.scan_waiver),
+                             ("manifest", args.manifest),
                              ("entrypoints", ep_path))
             },
+            # 机器可读的阻断原因：编排层不必解析 Markdown 表格
+            "blocked": blocking,
+            "candidate_input": {
+                "mode": cand["mode"],
+                "schema": cand["schema"],
+                "parse_complete": cand["parse_complete"],
+                "parse_errors": len(cand["parse_errors"]),
+                "total": cand["total"],
+                "reason": cand["reason"],
+            },
+            "scan_integrity": ({
+                "verdict": scan["verdict"],
+                "complete_raw": scan["complete_raw"],
+                "gaps": len(scan["gaps"]),
+                "unwaived": len([g for g in scan["gaps"] if not g.get("waived")]),
+                "waived": len(scan["waived"]),
+                "files_scanned": scan["files_scanned"],
+                "files_skipped": scan["files_skipped"],
+                "files_partial": scan["files_partial"],
+                "engine_verdict": scan["engine_verdict"],
+            } if scan["checked"] else None),
+            "stages": stages["stages"] or None,
+            "manifest": ({
+                "ok": manifest["ok"],
+                "schema": manifest["schema"],
+                "id": manifest["id"],
+                "arch": manifest["arch"],
+                "sha256": manifest["sha256"],
+                "image_verified": manifest["image_verified"],
+                "errors": len(manifest["errors"]),
+            } if manifest["checked"] else None),
+            "audit_task": ({
+                "ok": audit_task["ok"],
+                "schema": audit_task["schema"],
+                "task_id": audit_task["task_id"],
+                "manifest_id": audit_task["manifest_id"],
+                "profile": audit_task["profile"],
+                "errors": len(audit_task["errors"]),
+            } if audit_task["checked"] else None),
             "checks": ROWS,
             "summary": {
                 "pass": n_pass,
                 "fail": sum(1 for r in ROWS if r["status"] == "FAIL"),
+                "warn": n_warn,
                 "skipped": n_skip,
                 "error": sum(1 for r in ROWS if r["status"] == "ERROR"),
                 "executed": sum(1 for r in ROWS if r["executed"]),
@@ -1773,7 +2750,8 @@ def main() -> int:
     if failed:
         print(f"[gate] 未通过（{len(failed)} 项，档位 {PROFILE}）", file=sys.stderr)
         return 1
-    print(f"[gate] 通过（档位 {PROFILE}；PASS {n_pass} / SKIPPED {n_skip}）")
+    print(f"[gate] 通过（档位 {PROFILE}；PASS {n_pass} / WARN {n_warn} / "
+          f"SKIPPED {n_skip}）")
     return 0
 
 

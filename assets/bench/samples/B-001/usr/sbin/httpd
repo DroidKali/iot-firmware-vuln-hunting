@@ -1,0 +1,23 @@
+/*
+ * httpd.c - synthetic CGI front end for bench sample B-001.
+ * Hand-written for the benchmark; not derived from real firmware.
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int do_ping(void)
+{
+    char cmd[128];
+    const char *host = getenv("QUERY_STRING");
+    if (host == NULL)
+        return -1;
+    snprintf(cmd, sizeof(cmd), "ping -c 1 %s", host);
+    system(cmd); /* L-001: QUERY_STRING reaches system() unquoted */
+    return 0;
+}
+
+int main(void)
+{
+    return do_ping();
+}

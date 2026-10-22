@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import os
 import random
@@ -29,7 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 FAILS: list = []
 TOTAL = 0          # 实际执行的断言数：由脚本自己报，避免文档里的数字靠数日志漂移
-NGROUPS = 15       # 组数：与各处 [N/15] 表头一致，末尾会自校验，防止「13 组」再次漂移
+NGROUPS = 20       # 组数：与各处 [N/20] 表头一致，末尾会自校验，防止「13 组」再次漂移
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -167,7 +168,10 @@ VERIFIED_PARTIAL = """# 审计结论
 
 
 def run(args: list) -> subprocess.CompletedProcess:
-    return subprocess.run([PY] + args, capture_output=True, text=True)
+    # 子进程一律按 UTF-8 解码：Windows 默认用 GBK，中文/箭头/省略号会把
+    # _readerthread 打崩，stdout/stderr 变成 None，断言随后 AttributeError。
+    return subprocess.run([PY] + args, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
 
 
 # ------------------------------------------------- 文档 ↔ CLI 一致性（第 14 组）
@@ -272,6 +276,14 @@ def main() -> int:
     ap.add_argument("--keep", action="store_true")
     args = ap.parse_args()
 
+    # Windows 控制台默认 GBK：标题里的 ↔、→ 等字符会直接把自检打崩，
+    # 而崩溃信息又掩盖了真正的断言失败。这里只放宽「不可编码字符」的替换。
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except Exception:
+            pass
+
     base = args.workdir or tempfile.mkdtemp(prefix="fw_selftest_")
     os.makedirs(base, exist_ok=True)
     print(f"[selftest] 工作目录: {base}")
@@ -287,7 +299,7 @@ def main() -> int:
         with open(p, "w", encoding="utf-8", newline="\n") as f:
             f.write(txt)
 
-    print("\n[1/15] fw_triage.py — 度量 / 加固画像 / 分层")
+    print("\n[1/20] fw_triage.py — 度量 / 加固画像 / 分层")
     r = run([os.path.join(HERE, "fw_triage.py"), img, "--rootfs", root, "--tier",
              "--budget", "800", "--out", metrics, "--plan", plan, "--pretty"])
     check("fw_triage 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
@@ -315,7 +327,7 @@ def main() -> int:
     check("T3 含 www/index.html", "www/index.html" in set(t["t3_list"]))
     check("EALB > 0", t["ealoc_total"] > 0, str(t["ealoc_total"]))
 
-    print("\n[2/15] sink_scan.py — Layer 1 危险模式扫描")
+    print("\n[2/20] sink_scan.py — Layer 1 危险模式扫描")
     r = run([os.path.join(HERE, "sink_scan.py"), root, "--json", sinks])
     check("sink_scan 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
     if r.returncode != 0:
@@ -329,19 +341,19 @@ def main() -> int:
     check("etc/passwd 不再误报 P1-S-020", ("P1-S-020", "etc/passwd") not in key)
     check("文档目录被跳过", not any(f["file"].startswith("usr/share/doc") for f in sd["findings"]))
 
-    print("\n[3/15] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
+    print("\n[3/20] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vpart, "--tiering", tiering])
     check("不完整输入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
 
-    print("\n[4/15] coverage_gate.py — 覆盖率门禁（完整应通过）")
+    print("\n[4/20] coverage_gate.py — 覆盖率门禁（完整应通过）")
     out = os.path.join(base, "40-coverage.md")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vfull, "--tiering", tiering, "--out", out])
     check("完整输入 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("门禁报告已生成", os.path.isfile(out))
 
-    print("\n[5/15] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
+    print("\n[5/20] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
     bad_rep = os.path.join(base, "report-bad.md")
     with open(bad_rep, "w", encoding="utf-8") as fh:
         fh.write(
@@ -429,7 +441,7 @@ def main() -> int:
     check("⑥ 保留指针行（移动语义）→ 退出码 0", r.returncode == 0,
           r.stdout.strip()[-200:])
 
-    print("\n[6/15] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
+    print("\n[6/20] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
     review_bad = os.path.join(base, "25-review-list.md")
     with open(review_bad, "w", encoding="utf-8") as fh:
         fh.write("- [x] `www/cgi-bin/ping.cgi`\n"     # 有结论 → OK
@@ -461,7 +473,7 @@ def main() -> int:
     check("审阅清单一致 → 退出码 0", r.returncode == 0,
           r.stdout.strip()[-160:])
 
-    print("\n[7/15] coverage_gate.py — 报告 9 必填字段校验")
+    print("\n[7/20] coverage_gate.py — 报告 9 必填字段校验")
     f_bad = os.path.join(base, "report-fields-bad.md")
     with open(f_bad, "w", encoding="utf-8") as fh:
         fh.write(
@@ -497,7 +509,7 @@ def main() -> int:
     check("9 字段齐全 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("报告模板字段不误报", _template_fields_clean())
 
-    print("\n[8/15] coverage_gate.py — G4 入口级覆盖（文件级 100% ≠ 入口级 100%）")
+    print("\n[8/20] coverage_gate.py — G4 入口级覆盖（文件级 100% ≠ 入口级 100%）")
     tj_g4 = os.path.join(base, "02-tiering-g4.json")
     with open(tj_g4, "w", encoding="utf-8") as fh:
         json.dump({"rootfs_analysis": {"tiering": {"shards": [{"items": [
@@ -539,7 +551,7 @@ def main() -> int:
              "--entrypoints", ep_ok, "--out", os.path.join(base, "40-g4c.md")])
     check("入口枚举 + 全部处置 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
 
-    print("\n[9/15] coverage_gate.py — G5 绕过矩阵（「有防护」≠「防护有效」）")
+    print("\n[9/20] coverage_gate.py — G5 绕过矩阵（「有防护」≠「防护有效」）")
     vp_bad = os.path.join(base, "30-claim-bad.md")
     with open(vp_bad, "w", encoding="utf-8") as fh:
         fh.write("# 结论\n\n## F-001 · x\n\n- 影响: 已鉴权，不可利用\n")
@@ -569,7 +581,7 @@ def main() -> int:
     check("G5 端到端接入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
     check("检出绕过矩阵缺失", "绕过矩阵完备（G5）" in open(out_g5, encoding="utf-8").read())
 
-    print("\n[10/15] coverage_gate.py — G6 跨请求污点溯源（持久化来源须声明写入面）")
+    print("\n[10/20] coverage_gate.py — G6 跨请求污点溯源（持久化来源须声明写入面）")
     _F = ("- **类型**：命令注入\n- **位置**：`usr/sbin/httpd:0x1`\n- **优先级**：P1\n"
           "- **置信度**：CONFIRMED\n- **CVSS 3.1**：`AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H` = 9.8\n"
           "{src}- **Sink**：system()\n- **完整调用链**：1. a @0x1\n- **证据**：`[E1]` disasm\n")
@@ -604,7 +616,7 @@ def main() -> int:
              os.path.join(base, "40-g6b.md")])
     check("声明写入面端到端 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
 
-    print("\n[11/15] coverage_gate.py — G1/G2/G3 自动修复 + 类型→Base 命中")
+    print("\n[11/20] coverage_gate.py — G1/G2/G3 自动修复 + 类型→Base 命中")
     out_rec = os.path.join(base, "40-recover.md")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vpart, "--tiering", tiering,
@@ -638,7 +650,7 @@ def main() -> int:
     check("可映射类型 → 不报",
           not _cg.check_type_base(rep_mapped, base_md)["unmapped"])
 
-    print("\n[12/15] sink_scan.py — 结构级二次过滤（正则初筛 → 结构确认 / 否定 / 回退）")
+    print("\n[12/20] sink_scan.py — 结构级二次过滤（正则初筛 → 结构确认 / 否定 / 回退）")
     if HERE not in sys.path:
         sys.path.insert(0, HERE)
     import sink_scan as _ss  # noqa
@@ -717,7 +729,7 @@ def main() -> int:
         _ss.structural_match = _orig_sm
 
     # ── 13. 扫描完整性 + 门禁严格性（改进计划 §3 / §4 / §6 的回归）──────────
-    print("\n[13/15] 扫描完整性与门禁严格性")
+    print("\n[13/20] 扫描完整性与门禁严格性")
 
     sz = os.path.join(base, "scanint")
     os.makedirs(sz, exist_ok=True)
@@ -879,7 +891,7 @@ def main() -> int:
     check("组数常量与表头数量一致", n_hdr == NGROUPS, f"表头 {n_hdr} / 常量 {NGROUPS}")
 
     # ── 15. 高阶污点图：写面/读面必须分属不同 action ──────────────────────────
-    print("\n[15/15] taint_graph.py — 跨请求污点图（BDG/ADG）与 G7 门禁")
+    print("\n[15/20] taint_graph.py — 跨请求污点图（BDG/ADG）与 G7 门禁")
     tg = os.path.join(base, "tg")
     os.makedirs(tg, exist_ok=True)
     TG = os.path.join(HERE, "taint_graph.py")
@@ -1058,6 +1070,490 @@ def main() -> int:
     check("strict：声称高阶但未给图 → G7 记为必需且未执行",
           row.get("status") == "SKIPPED" and row.get("required") is True
           and r.returncode != 0, f"{row.get('status')}/{row.get('required')}")
+
+    # ── 16. 候选输入契约：解析失败必须可见，strict 只吃版本化输入 ─────────────
+    print("\n[16/20] 候选输入契约：解析失败可见 / strict 只接受版本化输入")
+    cd16 = os.path.join(base, "cand")
+    os.makedirs(cd16, exist_ok=True)
+
+    def _cf(name: str, text: str) -> str:
+        pth = os.path.join(cd16, name)
+        with open(pth, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        return pth
+
+    def _cf_gate(name: str, extra: list) -> tuple:
+        cfg = os.path.join(cd16, name)
+        rr = run([os.path.join(HERE, "coverage_gate.py")] + extra
+                 + ["--gate-config", cfg])
+        doc = json.load(open(cfg, encoding="utf-8")) if os.path.isfile(cfg) else {}
+        return rr, doc
+
+    cver = _cf("verif.md", open(gver, encoding="utf-8").read() + "\n- C-999 已处置\n")
+    env_ok = _cf("env.json", json.dumps({"schema": "candidates/1.0", "candidates": [
+        {"id": "C-001", "status": "confirmed", "evidence": ["0x2a30"]}]}) + "\n")
+    bad_line = _cf("badline.jsonl", json.dumps(
+        {"id": "C-001", "status": "confirmed", "evidence": ["x"]}) + "\n{oops: 1}\n")
+    plain = _cf("plain.txt", "C-999 已处置\n")
+    empty_env = _cf("empty-env.json", json.dumps(
+        {"schema": "candidates/1.0", "candidates": []}) + "\n")
+    rep40 = os.path.join(cd16, "40.md")
+
+    rr, g16 = _cf_gate("gc16.json", gbase + ["--candidates", bad_line, "--out", rep40])
+    ci = (g16.get("candidate_input") or {})
+    txt16 = open(rep40, encoding="utf-8").read() if os.path.isfile(rep40) else ""
+    check("候选：非法 JSON 行 → 整体失败（不再静默跳过）",
+          rr.returncode == 1, f"rc={rr.returncode}")
+    check("候选：解析错误逐行记录（含行号）",
+          ci.get("parse_complete") is False and ci.get("parse_errors") == 1,
+          json.dumps(ci, ensure_ascii=False))
+    check("候选：报告列出解析失败的行与原因",
+          "候选文件解析失败" in txt16 and "| 2 |" in txt16
+          and "Expecting" in txt16)
+    check("候选：解析失败进入机器可读 blocked",
+          any(b.get("code") == "CAND_PARSE_ERROR"
+              for b in (g16.get("blocked") or [])))
+
+    rr = run([os.path.join(HERE, "coverage_gate.py")] + gbase
+             + ["--candidates", env_ok, "--out", rep40])
+    check("候选：envelope（candidates/1.0）→ standard 通过", rr.returncode == 0,
+          f"rc={rr.returncode}")
+
+    rr, g16b = _cf_gate("gc16b.json", gbase + [
+        "--candidates", env_ok, "--profile", "strict", "--out", rep40])
+    row = next((x for x in (g16b.get("checks") or [])
+                if x["name"].startswith("候选处置率")), {})
+    check("strict：envelope 候选记为 structured 且通过",
+          row.get("status") == "PASS"
+          and (g16b.get("candidate_input") or {}).get("mode") == "structured",
+          json.dumps(row, ensure_ascii=False))
+
+    rr, g16c = _cf_gate("gc16c.json", gbase + [
+        "--candidates", ok_cand, "--profile", "strict", "--out", rep40])
+    check("strict：未声明 schema 的 JSONL → 阻断为未版本化输入",
+          rr.returncode != 0 and any(
+              b.get("code") == "CAND_INPUT_INVALID"
+              for b in (g16c.get("blocked") or [])),
+          json.dumps((g16c.get("candidate_input") or {}), ensure_ascii=False))
+
+    rr = run([os.path.join(HERE, "coverage_gate.py")] + gbase
+             + ["--candidates", plain, "--out", rep40])
+    check("候选：纯文本未声明兼容模式 → 拒绝", rr.returncode == 1, f"rc={rr.returncode}")
+    rr, g16d = _cf_gate("gc16d.json", ["--plan", gplan, "--verified", cver,
+                                       "--candidates", plain,
+                                       "--legacy-text-candidates", "--out", rep40])
+    txt16d = open(rep40, encoding="utf-8").read() if os.path.isfile(rep40) else ""
+    check("--legacy-text-candidates：兼容模式可用且在报告里披露",
+          rr.returncode == 0
+          and (g16d.get("candidate_input") or {}).get("mode") == "legacy-text"
+          and "兼容模式" in txt16d,
+          json.dumps((g16d.get("candidate_input") or {}), ensure_ascii=False))
+    rr, g16e = _cf_gate("gc16e.json", gbase + [
+        "--candidates", plain, "--legacy-text-candidates", "--profile", "strict",
+        "--out", rep40])
+    check("strict：即使显式开启兼容模式也不放行",
+          rr.returncode != 0, f"rc={rr.returncode}")
+
+    rr, g16f = _cf_gate("gc16f.json", gbase + [
+        "--candidates", empty_env, "--allow-empty-candidates",
+        "--profile", "strict", "--out", rep40])
+    row = next((x for x in (g16f.get("checks") or [])
+                if x["name"].startswith("候选处置率")), {})
+    check("strict：合法空清单 + 显式 allow → 候选项通过（旧逻辑永远失败）",
+          row.get("status") == "PASS", json.dumps(row, ensure_ascii=False))
+
+    rr, g16g = _cf_gate("gc16g.json", gbase + [
+        "--candidates", os.path.join(cd16, "gone.jsonl"),
+        "--allow-empty-candidates", "--out", rep40])
+    check("候选：文件缺失即使 allow-empty 也失败",
+          rr.returncode == 1
+          and any(b.get("code") == "CAND_INPUT_INVALID"
+                  for b in (g16g.get("blocked") or [])),
+          f"rc={rr.returncode}")
+
+    # ── 17. 扫描完整性 / 阶段状态 / 结构引擎：降级可见，且 strict 能阻断 ─────
+    print("\n[17/20] 扫描完整性与阶段状态：降级可见、可阻断")
+    sd17 = os.path.join(base, "scangate")
+    os.makedirs(sd17, exist_ok=True)
+    layer1_partial = os.path.join(sz, "out2.json")
+    rep17 = os.path.join(sd17, "40.md")
+
+    def _g17(name: str, extra: list) -> tuple:
+        cfg = os.path.join(sd17, name)
+        rr = run([os.path.join(HERE, "coverage_gate.py")] + gbase + extra
+                 + ["--out", rep17, "--gate-config", cfg])
+        doc = json.load(open(cfg, encoding="utf-8")) if os.path.isfile(cfg) else {}
+        return rr, doc
+
+    rr, g17 = _g17("gc17.json", ["--layer1", layer1_partial])
+    sc = (g17.get("scan_integrity") or {})
+    check("Layer 1 有截断/跳过 → 门禁失败（不当作没发现）",
+          rr.returncode == 1 and sc.get("verdict") == "partial",
+          json.dumps(sc, ensure_ascii=False))
+    check("扫描缺口写入机器可读 blocked",
+          any(b.get("code") == "LAYER1_SCAN_GAP"
+              for b in (g17.get("blocked") or [])))
+    check("报告披露扫描完整性缺口",
+          os.path.isfile(rep17)
+          and "扫描完整性与阶段状态" in open(rep17, encoding="utf-8").read())
+
+    wv = os.path.join(sd17, "waiver.json")
+    with open(wv, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump({"schema": "scan-waiver/1.0", "files": [
+            {"path": "big.bin", "reason": "too-large", "approved_by": "selftest"},
+            {"path": "cross.bin", "reason": "too-large",
+             "approved_by": "selftest"}]}, fh, ensure_ascii=False, indent=2)
+    rr, g17b = _g17("gc17b.json", ["--layer1", layer1_partial, "--scan-waiver", wv])
+    check("显式豁免全部缺口 → 通过，但结论是 scoped 而非 complete",
+          rr.returncode == 0
+          and (g17b.get("scan_integrity") or {}).get("verdict") == "scoped"
+          and (g17b.get("scan_integrity") or {}).get("waived", 0) >= 1,
+          json.dumps((g17b.get("scan_integrity") or {}), ensure_ascii=False))
+
+    st_bad = os.path.join(sd17, "stages-partial.json")
+    with open(st_bad, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump({"schema": "audit-stages/1.0", "stages": [
+            {"name": "layer2-auth", "status": "partial",
+             "fallback_reason": "未完成认证矩阵"}]}, fh, ensure_ascii=False)
+    rr, g17c = _g17("gc17c.json", ["--stages", st_bad])
+    check("必需阶段 partial → 阻断（STAGE_NOT_SUCCESS）",
+          rr.returncode == 1 and any(
+              b.get("code") == "STAGE_NOT_SUCCESS"
+              for b in (g17c.get("blocked") or [])),
+          f"rc={rr.returncode}")
+
+    st_ok = os.path.join(sd17, "stages-ok.json")
+    with open(st_ok, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump({"schema": "audit-stages/1.0", "stages": [
+            {"name": "layer2-auth", "status": "success"}]}, fh, ensure_ascii=False)
+    rr = run([os.path.join(HERE, "coverage_gate.py")] + gbase
+             + ["--stages", st_ok, "--out", rep17])
+    check("必需阶段全部 success → 通过", rr.returncode == 0, f"rc={rr.returncode}")
+
+    l1_eng = os.path.join(sd17, "layer1-engine-failed.json")
+    with open(layer1_partial, encoding="utf-8") as fh:
+        l1d = json.load(fh)
+    l1d["engine_status"] = {"structural_enabled": True, "verdict": "failed",
+                            "engines": {"ast-grep": True}, "rules_with_structural": 3,
+                            "structural_confirmed": 1, "regex_fallback": 2,
+                            "fallbacks": [{"file": "usr/sbin/httpd",
+                                           "reason": "engine-error"}]}
+    with open(l1_eng, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(l1d, fh, ensure_ascii=False)
+    rr, g17d = _g17("gc17d.json", ["--layer1", l1_eng])
+    rows17 = {x["name"]: x for x in (g17d.get("checks") or [])}
+    eng = rows17.get("结构引擎完整性") or {}
+    check("结构引擎报错 → 即使未加参数也判失败（不当作成功确认）",
+          eng.get("status") == "FAIL" and rr.returncode == 1,
+          f"{eng.get('status')} rc={rr.returncode}")
+
+    l1_pt = os.path.join(sd17, "layer1-engine-partial.json")
+    l1d["engine_status"] = {"structural_enabled": True, "verdict": "partial",
+                            "engines": {"semgrep": True}, "rules_with_structural": 3,
+                            "structural_confirmed": 2, "regex_fallback": 1,
+                            "fallbacks": []}
+    with open(l1_pt, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(l1d, fh, ensure_ascii=False)
+    rr, g17d2 = _g17("gc17d2.json", ["--layer1", l1_pt])
+    eng2 = next((x for x in (g17d2.get("checks") or [])
+                 if x["name"] == "结构引擎完整性"), {})
+    check("结构引擎部分降级、未要求严格 → 记为 WARN（不升级为阻断）",
+          eng2.get("status") == "WARN",
+          f"{eng2.get('status')} rc={rr.returncode}")
+    check("gate-config 记录 warn 计数",
+          (g17d2.get("summary") or {}).get("warn", 0) >= 1,
+          json.dumps((g17d2.get("summary") or {}), ensure_ascii=False))
+    rr, g17e = _g17("gc17e.json", ["--layer1", l1_pt, "--require-structural"])
+    eng = next((x for x in (g17e.get("checks") or [])
+                if x["name"] == "结构引擎完整性"), {})
+    check("--require-structural：引擎降级 → 失败",
+          rr.returncode == 1 and eng.get("status") == "FAIL",
+          f"{eng.get('status')} rc={rr.returncode}")
+
+    cfg17f = os.path.join(sd17, "gc17f.json")
+    rr = run([os.path.join(HERE, "coverage_gate.py")] + gbase
+             + ["--profile", "strict", "--gate-config", cfg17f,
+                "--out", rep17])
+    g17f = json.load(open(cfg17f, encoding="utf-8")) if os.path.isfile(cfg17f) else {}
+    row = next((x for x in (g17f.get("checks") or [])
+                if x["name"].startswith("扫描完整性")), {})
+    check("strict：未给 --layer1 → 扫描完整性记为必需且未执行",
+          rr.returncode != 0 and row.get("status") == "SKIPPED"
+          and row.get("required") is True,
+          f"{row.get('status')}/{row.get('required')} rc={rr.returncode}")
+
+    # ── 18. 结构化契约 / 固件清单 / EALB 校准 ────────────────────────────────
+    print("\n[18/20] 契约校验（contracts.py）、FirmwareManifest、EALB 校准")
+    cd18 = os.path.join(base, "contracts")
+    os.makedirs(cd18, exist_ok=True)
+    CONTRACTS = os.path.join(HERE, "contracts.py")
+
+    rr = run([CONTRACTS, "--list"])
+    check("contracts.py --list 列出受支持的 schema",
+          rr.returncode == 0 and "firmware-manifest/1.0" in (rr.stdout or "")
+          and "candidates/1.0" in (rr.stdout or ""))
+
+    sha_img = hashlib.sha256(open(img, "rb").read()).hexdigest()
+    man_ok = os.path.join(cd18, "manifest.json")
+    with open(man_ok, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump({"schema": "firmware-manifest/1.0", "id": "FW-SELFTEST",
+                   "vendor": "Demo", "product": "Router", "version": "1.0.0",
+                   "arch": "mips",
+                   "image": {"path": os.path.relpath(img, cd18),
+                             "sha256": sha_img,
+                             "size": os.path.getsize(img)}},
+                  fh, ensure_ascii=False, indent=2)
+    check("contracts.py：合法 FirmwareManifest 通过",
+          run([CONTRACTS, "--kind", "firmware-manifest",
+               "--file", man_ok]).returncode == 0)
+
+    man_bad = os.path.join(cd18, "manifest-bad-fields.json")
+    with open(man_bad, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump({"schema": "firmware-manifest/1.0", "id": "FW-SELFTEST",
+                   "image": {"path": "x", "sha256": sha_img}},
+                  fh, ensure_ascii=False)
+    check("contracts.py：缺 vendor/product/arch → 报错",
+          run([CONTRACTS, "--kind", "firmware-manifest",
+               "--file", man_bad]).returncode == 1)
+
+    man_hash = os.path.join(cd18, "manifest-bad-hash.json")
+    with open(man_hash, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump({"schema": "firmware-manifest/1.0", "id": "FW-SELFTEST",
+                   "vendor": "Demo", "product": "Router", "version": "1.0.0",
+                   "arch": "mips",
+                   "image": {"path": os.path.relpath(img, cd18),
+                             "sha256": "0" * 64,
+                             "size": os.path.getsize(img)}},
+                  fh, ensure_ascii=False)
+    cfg18 = os.path.join(cd18, "gc18.json")
+    rr = run([os.path.join(HERE, "coverage_gate.py")] + gbase
+             + ["--manifest", man_ok, "--out", os.path.join(cd18, "40.md"),
+                "--gate-config", cfg18])
+    g18 = json.load(open(cfg18, encoding="utf-8")) if os.path.isfile(cfg18) else {}
+    mrow = next((x for x in (g18.get("checks") or [])
+                 if x["name"].startswith("固件清单契约")), {})
+    check("门禁：合法清单 → PASS 且核对镜像哈希",
+          rr.returncode == 0 and mrow.get("status") == "PASS"
+          and (g18.get("manifest") or {}).get("image_verified") is True,
+          json.dumps(mrow, ensure_ascii=False))
+    rr, g18b = _cf_gate("gc18b.json", gbase + ["--manifest", man_hash,
+                                               "--out", os.path.join(cd18, "41.md")])
+    check("门禁：镜像哈希不符 → 阻断（MANIFEST_HASH_MISMATCH）",
+          rr.returncode == 1 and any(
+              b.get("code") == "MANIFEST_HASH_MISMATCH"
+              for b in (g18b.get("blocked") or [])),
+          f"rc={rr.returncode}")
+
+    task_ok = os.path.join(cd18, "audit-task.json")
+    with open(task_ok, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump({"schema": "audit-task/1.0", "task_id": "AT-SELFTEST",
+                   "manifest_id": "FW-SELFTEST", "profile": "strict",
+                   "created_at": "2026-01-01T00:00:00Z",
+                   "scope": {"t1_count": 3, "t2_count": 2, "skip_count": 0,
+                             "ealb_total": 1200},
+                   "agents": 2}, fh, ensure_ascii=False, indent=2)
+    check("contracts.py：合法 AuditTask 通过",
+          run([CONTRACTS, "--kind", "audit-task",
+               "--file", task_ok]).returncode == 0)
+
+    cfg18c = os.path.join(cd18, "gc18c.json")
+    rr = run([os.path.join(HERE, "coverage_gate.py")] + gbase
+             + ["--manifest", man_ok, "--audit-task", task_ok,
+                "--gate-config", cfg18c,
+                "--out", os.path.join(cd18, "42.md")])
+    g18c = json.load(open(cfg18c, encoding="utf-8")) if os.path.isfile(cfg18c) else {}
+    arow = next((x for x in (g18c.get("checks") or [])
+                 if x["name"].startswith("审计任务契约")), {})
+    check("门禁：合法 AuditTask → PASS 且与清单一致",
+          rr.returncode == 0 and arow.get("status") == "PASS"
+          and (g18c.get("audit_task") or {}).get("task_id") == "AT-SELFTEST",
+          json.dumps(arow, ensure_ascii=False))
+
+    task_bad = os.path.join(cd18, "audit-task-mismatch.json")
+    with open(task_bad, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump({"schema": "audit-task/1.0", "task_id": "AT-SELFTEST",
+                   "manifest_id": "FW-OTHER", "profile": "standard",
+                   "created_at": "2026-01-01T00:00:00Z",
+                   "scope": {"t1_count": 0, "t2_count": 0, "skip_count": 0,
+                             "ealb_total": 0},
+                   "agents": 1}, fh, ensure_ascii=False, indent=2)
+    cfg18d = os.path.join(cd18, "gc18d.json")
+    rr = run([os.path.join(HERE, "coverage_gate.py")] + gbase
+             + ["--manifest", man_ok, "--audit-task", task_bad,
+                "--gate-config", cfg18d,
+                "--out", os.path.join(cd18, "43.md")])
+    g18d = json.load(open(cfg18d, encoding="utf-8")) if os.path.isfile(cfg18d) else {}
+    check("门禁：AuditTask.manifest_id 与 --manifest 不一致 → 阻断",
+          rr.returncode == 1 and any(
+              b.get("code") == "AUDIT_TASK_MISMATCH"
+              for b in (g18d.get("blocked") or [])),
+          f"rc={rr.returncode}")
+
+    EALBC = os.path.join(HERE, "ealb_calib.py")
+    ej = os.path.join(cd18, "ealb.json")
+    rr = run([EALBC, "predict", "--ealb", "1200", "--json", ej])
+    ed = json.load(open(ej, encoding="utf-8")) if os.path.isfile(ej) else {}
+    check("EALB：给单点预算与模型状态（heuristic 必须显式）",
+          rr.returncode == 0 and ed.get("status") == "heuristic"
+          and ed.get("minutes", 0) > 0, json.dumps(ed, ensure_ascii=False))
+
+    meas = os.path.join(os.path.dirname(HERE), "assets",
+                        "ealb-measures-sample.jsonl")
+    ej2 = os.path.join(cd18, "ealb-eval.json")
+    rr = run([EALBC, "evaluate", "--records", meas, "--json", ej2])
+    ee = json.load(open(ej2, encoding="utf-8")) if os.path.isfile(ej2) else {}
+    check("EALB：实测评估给出 MAE/MAPE 并在样本不足时拒绝称 calibrated",
+          rr.returncode == 0 and ee.get("status") == "heuristic"
+          and ((ee.get("targets") or {}).get("minutes") or {}).get("mape") is not None,
+          json.dumps((ee.get("targets") or {}).get("minutes") or {},
+                     ensure_ascii=False))
+
+    print("\n[19/20] sandbox_run.py — 不可信固件的隔离边界（fail-closed）")
+    SANDBOX = os.path.join(HERE, "sandbox_run.py")
+    sb_dir = os.path.join(base, "sandbox")
+    os.makedirs(sb_dir, exist_ok=True)
+
+    rr = run([SANDBOX, "--check"])
+    try:
+        chk = json.loads(rr.stdout or "{}")
+    except ValueError:
+        chk = {}
+    check("sandbox --check 输出可解析 JSON，且 host_fallback 恒为 false",
+          bool(chk) and chk.get("host_fallback") is False
+          and chk.get("mode") in ("check", "sandbox", "fail-closed", "host-opt-in"),
+          (rr.stderr or "")[-200:])
+
+    sb_auto = os.path.join(sb_dir, "auto.json")
+    rr = run([SANDBOX, "--firmware", root, "--cmd", "echo ok",
+              "--json", sb_auto, "--timeout", "30"])
+    try:
+        d_auto = json.load(open(sb_auto, encoding="utf-8"))
+    except (OSError, ValueError):
+        d_auto = {}
+    if chk.get("mode") == "fail-closed":
+        check("sandbox：运行时不可用 → 退出 3 且拒绝执行（不回落宿主机）",
+              rr.returncode == 3 and d_auto.get("mode") == "fail-closed"
+              and d_auto.get("host_fallback") is False
+              and d_auto.get("ok") is False,
+              f"rc={rr.returncode}")
+    else:
+        check("sandbox：运行时可用时走隔离链路（成功或命令失败都不是 host 回退）",
+              rr.returncode in (0, 1, 124)
+              and d_auto.get("host_fallback") is False,
+              f"rc={rr.returncode}")
+
+    rr = run([SANDBOX, "--firmware", root, "--mode", "host"])
+    check("sandbox：--mode host 缺显式授权 → 拒绝（退出 4）",
+          rr.returncode == 4, f"rc={rr.returncode}")
+
+    sb_host = os.path.join(sb_dir, "host.json")
+    rr = run([SANDBOX, "--firmware", root, "--mode", "host",
+              "--i-understand-host-risk", "--cmd", "echo ok",
+              "--json", sb_host, "--timeout", "30"])
+    try:
+        d_host = json.load(open(sb_host, encoding="utf-8"))
+    except (OSError, ValueError):
+        d_host = {}
+    fw_hash = ((d_host.get("mounts") or {}).get("firmware") or {}).get("sha256") or ""
+    check("sandbox：显式授权后执行，JSON 标注 host-opt-in 且 host_fallback=false",
+          rr.returncode == 0 and d_host.get("mode") == "host-opt-in"
+          and d_host.get("host_fallback") is False,
+          f"rc={rr.returncode}")
+    check("sandbox：宿主机执行也记录固件指纹（64 位 sha256）",
+          bool(re.fullmatch(r"[0-9a-f]{64}", fw_hash)), fw_hash[:16])
+
+    check("contracts.py：sandbox-run JSON 通过契约校验",
+          os.path.isfile(sb_host)
+          and run([CONTRACTS, "--kind", "sandbox-run",
+                   "--file", sb_host]).returncode == 0)
+
+    rr = run([SANDBOX, "--firmware", root, "--out",
+              os.path.join(root, "out"), "--mode", "host",
+              "--i-understand-host-risk", "--cmd", "echo ok"])
+    check("sandbox：--out 落在固件目录内 → 拒绝（挂载重叠）",
+          rr.returncode == 4, f"rc={rr.returncode}")
+
+    # ── 20. 基准评估：指标可复算、严格模式不吞未复核标签、回归可阻断 ──────────
+    print("\n[20/20] bench_eval.py — 基准评估（precision/recall/回归阻断）")
+    BENCH = os.path.join(HERE, "bench_eval.py")
+    bench_manifest = os.path.join(os.path.dirname(HERE), "assets", "bench", "manifest.json")
+    bd = os.path.join(base, "bench")
+    os.makedirs(bd, exist_ok=True)
+
+    check("bench：合成基准集清单存在", os.path.isfile(bench_manifest), bench_manifest)
+    if not os.path.isfile(bench_manifest):
+        check("bench：基准集清单缺失，无法评估", False)
+    else:
+        bench_findings = os.path.join(bd, "findings.json")
+        with open(bench_findings, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump({
+                "schema": "layer1-sinks/1.3",
+                "tool": "sink_scan",
+                "findings": [{
+                    "rule_id": "P0-C-001",
+                    "priority": "P0",
+                    "category": "cmd-exec",
+                    "file": "samples/B-001/usr/sbin/httpd",
+                    "location": "16",
+                    "symbol": "system",
+                    "match": "system(cmd);",
+                }],
+            }, fh, ensure_ascii=False, indent=2)
+
+        b1 = os.path.join(bd, "bench-result.json")
+        rr = run([BENCH, "--manifest", bench_manifest, "--findings", bench_findings,
+                  "--split", "all", "--json", b1, "--quiet"])
+        try:
+            d1 = json.load(open(b1, encoding="utf-8"))
+        except (OSError, ValueError):
+            d1 = {}
+        cm = d1.get("confusion_matrix") or {}
+        micro = (d1.get("metrics") or {}).get("micro") or {}
+        check("bench：合成基准退出码 0", rr.returncode == 0, rr.stderr.strip()[:160])
+        check("bench：混淆矩阵为 1 TP / 0 FP / 3 FN",
+              cm.get("tp") == 1 and cm.get("fp") == 0 and cm.get("fn") == 3,
+              json.dumps(cm, ensure_ascii=False))
+        check("bench：precision/recall 可复算",
+              micro.get("precision") == 1.0 and micro.get("recall") == 0.25,
+              f"P={micro.get('precision')} R={micro.get('recall')}")
+        prov = d1.get("provisional") or {}
+        check("bench：未复核标签只进 provisional，不冒充权威结论",
+              prov.get("authoritative") is False
+              and (prov.get("labels_included") or 0) >= 1,
+              f"labels_included={prov.get('labels_included')}")
+
+        bs = os.path.join(bd, "bench-strict.json")
+        rr = run([BENCH, "--manifest", bench_manifest, "--findings", bench_findings,
+                  "--split", "all", "--strict", "--json", bs, "--quiet"])
+        try:
+            ds = json.load(open(bs, encoding="utf-8"))
+        except (OSError, ValueError):
+            ds = {}
+        check("bench：--strict 不计算 provisional 指标",
+              rr.returncode == 0 and ds.get("provisional") is None,
+              f"rc={rr.returncode}")
+
+        check("contracts.py：bench-manifest 通过契约校验",
+              run([CONTRACTS, "--kind", "bench-manifest",
+                   "--file", bench_manifest]).returncode == 0)
+
+        base_out = os.path.join(bd, "bench-baseline.json")
+        if d1:
+            d1["metrics"]["micro"]["recall"] = 1.0
+            d1["metrics"]["micro"]["f1"] = 1.0
+            d1["baseline"] = None
+            with open(base_out, "w", encoding="utf-8", newline="\n") as fh:
+                json.dump(d1, fh, ensure_ascii=False, indent=2)
+        br = os.path.join(bd, "bench-regression.json")
+        rr = run([BENCH, "--manifest", bench_manifest, "--findings", bench_findings,
+                  "--split", "all", "--baseline", base_out, "--json", br, "--quiet"])
+        try:
+            db = json.load(open(br, encoding="utf-8"))
+        except (OSError, ValueError):
+            db = {}
+        check("bench：相对基线召回暴跌 → 退出码 3 且标记 regression",
+              rr.returncode == 3 and db.get("regression") is True,
+              f"rc={rr.returncode} reasons={db.get('regression_reasons')}")
 
     print()
     if FAILS:

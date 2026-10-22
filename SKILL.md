@@ -30,7 +30,7 @@ agent_created: true
 
 | 层 | 固化什么 | 承载位置 |
 |---|---|---|
-| **方法论层** | 决策逻辑、优先级、证据标准、降级策略、交付规范 | 本文件（七条铁律、Phase 0–5、EALB、三轨审计、G1–G6 门禁）· `references/methodology.md` · `references/reporting.md`（DKTSS / 7 区块） |
+| **方法论层** | 决策逻辑、优先级、证据标准、降级策略、交付规范 | 本文件（七条铁律、Phase 0–5、EALB、三轨审计、G1–G7 门禁）· `references/methodology.md` · `references/reporting.md`（DKTSS / 7 区块） |
 | **决策判据层** | **识别到什么特征 → 走哪条路**，以及失败反馈信号 | `references/atomic-capabilities.md` **§3**（Phase 1 提取选路树、Phase 4 仿真选路树） |
 | **原子能力层** | **单个可调用的操作**：能力 / 实现方式 / 输入输出 | `references/atomic-capabilities.md` **§1–§9**（54 项原子能力：侦察、提取、内容扫描、文件系统侦察、二进制分析、动态验证、网络、硬件） |
 
@@ -289,6 +289,8 @@ EALB = Σ ( tier_weight(f) × text_KB(f) )
 ```
 Agent 数 = ceil(EALB / 800)      # 单 Agent 预算 800 EALB 单位，可按上下文窗口调整
 ```
+
+> **当前是启发式，不是已验证预测**：`assets/ealb-calibration.json` 的 `status` 为 `heuristic`（真实样本 0），EALB 只用于**相对排序与切分 Agent**，不得写成工期承诺。用 `scripts/ealb_calib.py` 记录 `ealb` 与实际工时；真实样本 ≥20 进 `experimental`，≥60 且 MAPE ≤0.30 才进 `calibrated`。
 
 **效果示例**（真实形态的 IPC 固件）：T1 3.2MB 代码 + T2 8.4MB + T3 22MB →
   
@@ -587,6 +589,40 @@ strings -a -t x usr/sbin/httpd | rg -i 'referer|cmd|ping|traceroute'
 
 静态链路完整 ≠ 可利用。固件场景还必须过三关：**能不能跑到这段代码**、**环境依赖（NVRAM/ioctl/硬件）能不能满足**、**有没有运行时防护**。
 
+#### 前置：执行边界（在选路之前）
+
+**默认只做静态分析；任何"运行固件里的东西"都必须先过这张表。** 固件是攻击者可控输入：CGI、init 脚本、ELF 都可能带恶意载荷，解析器本身也可能是攻击面。
+
+| 阶段 | 是否执行固件内容 | 默认策略 |
+|---|---|---|
+| Phase 1 解包（moria / unblob / unsquashfs） | 只解析格式，不执行固件代码 | 可在宿主机；但**解析器漏洞**仍是攻击面，可疑镜像建议进沙箱 |
+| Phase 2/3 直接执行 rootfs 里的脚本、CGI、init | **是** | **禁止**；需要动态行为就进沙箱 |
+| Phase 4 整机模拟（qemu-system，D1） | **是**（内核 + init 启动） | 必须隔离 |
+| Phase 4 单二进制模拟（Qiling / qemu-user，D5–D8） | **是** | 必须隔离 |
+| Phase 4 模糊测试（AFL++，D10–D11） | **是** | 必须隔离 |
+| 辅助工具（binwalk / mithril / strings） | 解析，不执行 | 可在宿主机；不要给外网、不要挂载真实设备 |
+
+统一入口是 `scripts/sandbox_run.py`（纯标准库，Linux 用 docker/podman；Windows 需 Docker Desktop/WSL2）：
+
+```bash
+# 只探测能力，不碰固件内容；退出码 0=可用 3=不可用
+uv run scripts/sandbox_run.py --check
+
+# 一次性隔离执行：无网络、只读固件、非 root、限内存/CPU/PID/时长
+uv run scripts/sandbox_run.py \
+    --firmware fw-audit/$TARGET/01-extract \
+    --out      fw-audit/$TARGET/45-sandbox \
+    --json     fw-audit/$TARGET/45-sandbox/run.json \
+    --cmd      "cd /firmware && timeout 30 ./usr/sbin/httpd -h"
+```
+
+**四条硬规则：**
+
+1. **fail-closed**：隔离运行时不可用时，脚本以 **退出码 3** 拒绝执行，并在 JSON 里写 `mode="fail-closed"`、`host_fallback=false`。**没有自动回退宿主机这条路径**——"探测失败"与"沙箱可用"在报告里必须长得不一样。
+2. **宿主机执行只能显式授权**：`--mode host --i-understand-host-risk`，输出标记 `mode="host-opt-in"`、`policy.host_execution="explicit-opt-in"`。只用于完全可信的自建 rootfs。
+3. **隔离参数固定**：`--network none`、`--read-only`、`--cap-drop=ALL`、`no-new-privileges`、`--user 65534:65534`、`--memory 512m --cpus 1 --pids-limit 128`、`/tmp` noexec、固件 `:ro`、输出目录与固件目录**不得重叠**。超时由 Python 侧 kill 并清理容器。
+4. **留痕**：JSON 记录容器命令行、运行时版本、固件目录指纹（`sha256`）、退出码、stdout/stderr 头部、超时标志。动态结论必须能指回这份记录；**在宿主机直接跑固件二进制得到的结论不予采信**。
+
 #### 4.0 选路判据：要证明什么 → 需要哪组原子能力
 
 **先问一个更高层的问题：你要把哪一条 HYPOTHESIS 升成 CONFIRMED？** 判据不是「哪个工具更强」，而是**结论类型决定能力组合**。完整决策树（含每个失败分支的处置）见 `references/atomic-capabilities.md` §3.2：
@@ -734,6 +770,11 @@ uv run scripts/coverage_gate.py --profile strict \
     --tiering fw-audit/<target>/02-tiering.json \
     --entrypoints fw-audit/<target>/entrypoints.json \
     --taint-graph fw-audit/<target>/taint-graph.json \
+    --layer1 fw-audit/<target>/10-layer1-sinks.json \
+    --stages fw-audit/<target>/30-stages.json \
+    --manifest fw-audit/<target>/00-manifest.json \
+    --audit-task fw-audit/<target>/20-tasks.json \
+    --require-structural \
     --report fw-audit/<target>/report.md \
     --out fw-audit/<target>/40-coverage.md
 ```
@@ -742,7 +783,7 @@ uv run scripts/coverage_gate.py --profile strict \
 
 三个档位：`light`（只查覆盖率）/ `standard`（默认，未执行的高级检查以 `SKIPPED` 列出但不判失败）/ `strict`（需齐全输入 + 未执行即失败）。
 
-**每项检查输出 `PASS` / `FAIL` / `SKIPPED` 三态。** `SKIPPED` 的含义是「本次没有执行」，不是「通过」——旧版把未启用的检查从判据表里直接删掉，于是 `exit 0` 被误读成「G5 也通过了」。同时写 `40-coverage.gate-config.json`：档位、各项输入 SHA-256、每项检查状态、门禁版本，换机也能复算同一次判定。
+**每项检查输出 `PASS` / `FAIL` / `WARN` / `SKIPPED` 四态。** `SKIPPED` 的含义是「本次没有执行」，不是「通过」；`WARN` 表示「降级但可继续」（例如结构引擎不可用而退回正则），不参与 `result` 判定但必须出现在报告里——旧版把未启用的检查从判据表里直接删掉，于是 `exit 0` 被误读成「G5 也通过了」。同时写 `40-coverage.gate-config.json`：档位、各项输入 SHA-256、每项检查状态、门禁版本，换机也能复算同一次判定。
 
 `--report` 触发 **CVE 纪律检查**（铁律 7 的机械化落实）：扫描报告里是否把版本命中的组件 CVE 写成了漏洞断言（V1）、是否混进了「漏洞统计」表（V2）、是否被打了 P0-P3/CVSS（V3）、**同一 `CVE-ID` 是否同时出现在 ④ 与 ⑥（V4：应是「移动」而非「复制」）**、以及有没有单列「组件风险（未验证）」区块（V0）。命中即为门禁失败，退出码 1。
 
@@ -761,6 +802,10 @@ uv run scripts/coverage_gate.py --profile strict \
 - 绕过假设（G5）：凡「有防护 / 不可利用」断言必须附 B1–B12 矩阵
 - 跨请求溯源（G6）：持久化存储来源的 finding 必须声明写入面
 - 跨请求污点图（G7，给出 `--taint-graph` 时）：**写它的请求 ≠ 触发读的请求**、键两端字面一致、两端有 addr+evidence、sink 类型已知、跨进程读给出 `via_control`；报告声称高阶时图中必须有高阶链
+- 扫描完整性（`--layer1`）：`sink_scan` 的 `scan_integrity.verdict` 为 `partial`/`failed` 即阻断；`scoped` 必须由 `--scan-waiver` 逐条豁免（`file` + `reason` + 豁免理由/复核人），未豁免缺口记 `LAYER1_*`
+- 结构引擎完整性：`engine_status.verdict=failed` 无条件阻断；`partial` 默认 WARN，加 `--require-structural` 即失败
+- 阶段状态（`--stages`）：`audit-stages/1.0` 的必需阶段必须为 `success`，否则 `STAGE_*`；声明与实测不一致记 `STAGE_INCONSISTENT`
+- 清单与任务契约（`--manifest` / `--audit-task`）：`firmware-manifest/1.0` 与 `audit-task/1.0` 字段/枚举须通过 `contracts.py` 校验，`manifest_id` 必须与清单一致；镜像哈希不符即 `MANIFEST_HASH_MISMATCH`
 
 脚本退出码非 0 表示未达标，缺口写入 `40-coverage.md` 的「待补审清单」，回去补。
 
@@ -878,6 +923,7 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 | `references/emulation-fuzzing.md` | Phase 4 需要模拟与模糊的具体做法、踩坑与替代方案 |
 | `references/reporting.md` | Phase 5 需要报告字段、评分表、脱敏规范 |
 | `references/resource-index.md` | 需要外部资料：awesome-connected-things-sec 精编索引（按阶段映射） |
+| `references/data-contracts.md` | **跨阶段数据契约**：11 种 schema——FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / BenchResult 的字段、版本规则、strict 兼容边界、迁移清单 |
 
 ## 脚本
 
@@ -888,7 +934,11 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 | `scripts/coverage_gate.py` | Phase 5：覆盖率门禁校验 + **CVE 纪律检查**（`--report`）+ **审阅清单三方对齐**（`--review-list`）+ **G4 入口级覆盖**（`--entrypoints`）+ **G5 绕过矩阵**（`--bypass-check`）+ **G6 跨请求污点溯源**（`--cross-request`）+ **G7 跨请求污点图**（`--taint-graph`）+ **类型→Base 命中**（`--type-base`）+ **自动修复计划**（`--auto-recover`）+ **`--profile {light,standard,strict}` 档位与 `gate-config.json` 执行台账** |
 | `scripts/taint_graph.py` | Phase 3/5：跨请求污点图（BDG/ADG 最小实现）——`recover` 从反编译产物恢复常量键（literal / local-const / fill-composed），`build` 构图并校验「写请求 ≠ 触发读的请求、键一致、两端有证据、跨进程读带 via_control」；产出 `taint-graph.json` 供 G7 消费 |
 | `scripts/entrypoints_init.py` | Phase 3/5：从 `02-tiering.json` 生成入口枚举骨架 `entrypoints.json`（G4 的输入） |
-| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证上面脚本的判据，并把**文档示例命令与 CLI 参数表对拍**（15 组 / 117 条断言，结尾自报总数） |
+| `scripts/contracts.py` | Phase 0–5：数据契约校验（11 种 schema：FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest）；`--list` 列受支持版本，`--json` 出机器可读结果 |
+| `scripts/ealb_calib.py` | Phase 2：用实测工时样本校准 EALB；样本不足时只报 `heuristic`，达到门槛才标 `calibrated` |
+| `scripts/sandbox_run.py` | Phase 4：不可信固件的一次性隔离执行（`--network none`、只读根、cap-drop、非 root、内存/CPU/PID 限额）；无隔离运行时 **fail-closed**（退出 3），宿主机执行必须显式授权 |
+| `scripts/bench_eval.py` | Phase 5/回归：合成基准集上的 precision / recall / F1 / FPR 评估；`--baseline` 检测召回暴跌与 FPR 上升（退出码 3） |
+| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证其余九个脚本的判据，并把**文档示例命令与 CLI 参数表对拍**（20 组 / 165 条断言，结尾自报总数） |
 
 脚本都只用 Python 标准库，无第三方依赖，Windows / Linux / macOS 均可运行。用 `uv` 管理环境（`uv run` 自动建临时环境；无 `uv` 时直接 `python scripts/xxx.py` 亦可）。安装后建议先跑一次自检：
 

@@ -1,0 +1,23 @@
+/*
+ * safe_httpd.c - synthetic hardened handler for bench sample B-005.
+ * Hand-written; not derived from real firmware.
+ */
+#include <stdio.h>
+#include <string.h>
+
+#define HOST_MAX 64
+
+static int handle_host(const char *raw)
+{
+    char host[HOST_MAX];
+    size_t n;
+    if (raw == NULL)
+        return -1;
+    n = strnlen(raw, HOST_MAX - 1);
+    if (n >= HOST_MAX - 1)
+        return -1;
+    memcpy(host, raw, n); /* bounded: n < HOST_MAX */
+    host[n] = '\0';
+    printf("host=%s\n", host);
+    return 0;
+}
