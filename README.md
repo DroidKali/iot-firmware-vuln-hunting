@@ -4,7 +4,7 @@
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">  
   <img alt="python" src="https://img.shields.io/badge/python-3.8%2B%20stdlib%20only-3776AB.svg?logo=python\&logoColor=white">  
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg">  
-  <img alt="files" src="https://img.shields.io/badge/package-53%20files%20%C2%B7%2018406%20lines-informational.svg">  
+  <img alt="files" src="https://img.shields.io/badge/package-54%20files%20%C2%B7%2018772%20lines-informational.svg">  
   <img alt="selftest" src="https://img.shields.io/badge/selftest-165%20assertions%20passing-brightgreen.svg">  
   <img alt="agent" src="https://img.shields.io/badge/type-Agent%20Skill-7B42BC.svg">  
 </p>
@@ -23,6 +23,7 @@
 - [七条铁律](#七条铁律)
 - [安装](#安装)
 - [快速开始](#快速开始)
+- [路线图](#路线图)
 - [脚本](#脚本)
 - [参考文件](#参考文件)
 - [目录结构](#目录结构)
@@ -254,6 +255,23 @@ uv run scripts/coverage_gate.py \
 
 ---
 
+## 路线图
+
+当前主线是在不破坏 Phase 0–5 确定性流水线的前提下，增加 **Blackboard 动态探索层**：控制平面继续负责证据完整性、覆盖率、Strict 门禁、沙箱与预算，黑板只记录 Fact / Candidate / Intent / Hint 并驱动受控探索。模型和工具可以提出线索，但不能自行认定漏洞成立或绕过硬门禁。
+
+里程碑按依赖顺序推进：
+
+- **M0 盘点现状**：逐路径确认 Strict / Coverage / 沙箱 / 结构化证据的真实调用链，用运行结果而非文档自述作证据。
+- **M1 契约与黑板**：Fact / Intent / EmulationResult / BoardState 契约、事件日志、快照、去重与 `validate_transition`。
+- **M2 资源与沙箱**：所有执行统一经过 Sandbox Runner，预算、并发准入、超时与失败关闭。
+- **M3 EmbaAdapter**：解析既有 EMBA 产物，区分「静态发现 / 进程运行 / 端口响应」。
+- **M4 Qiling 定向仿真**：事件过滤、上下文捕获、Evidence 归一化，区分 syscall 与库函数 Hook。
+- **M5 真实固件基准**：合法来源、人工复核、Precision / Recall / 成本与 EALB 校准。
+
+完整对象模型、门禁分层、各里程碑交付物/验收标准、风险清单与实施前检查表见 [ROADMAP.md](ROADMAP.md)。
+
+---
+
 ## 脚本
 
 十个脚本都**只用 Python 标准库**，无第三方依赖。
@@ -371,6 +389,7 @@ uv run scripts/coverage_gate.py \
 iot-firmware-vuln-hunting/
 ├── SKILL.md                      # 主入口：流水线 + 七条铁律 + 各 Phase 操作细节
 ├── README.md
+├── ROADMAP.md                    # V2 路线图：Blackboard / 契约 / 沙箱 / 适配器 / 真实基准
 ├── LICENSE
 ├── references/                   # 10 篇按需加载的知识库
 │   ├── methodology.md            # 方法论层：Tier 规则 / EALB / 三层审计（Track A/B/C）/ 门禁判据完整定义
