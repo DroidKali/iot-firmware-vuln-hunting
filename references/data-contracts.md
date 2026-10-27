@@ -1,8 +1,8 @@
-# 数据契约（FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / SandboxRun / BenchManifest）
+# 数据契约（FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / SandboxRun / BenchManifest / 黑板对象）
 
 本文件定义跨阶段传递的结构化数据，以及**校验入口、版本规则、兼容模式边界**。目标是消除「同一事实在 plan、报告、gate-config 里三种写法」的漂移：任何下游脚本要消费上游产物时，先看 schema 版本，再按本文件取字段。
 
-配套校验器：`scripts/contracts.py`（纯标准库）。
+配套校验器：`scripts/contracts.py`（纯标准库）。`--list` 当前列出 16 种 schema；候选的整文件 envelope 由 `candidates` 文档校验器单独处理。
 
 ```bash
 # 列出支持的所有 schema
@@ -26,7 +26,7 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 | 哈希格式 | 所有 `sha256` 为 64 位小写十六进制，不带 `0x`、不带空格 |
 | 路径 | 文档内的相对路径相对**该文档所在目录**解析，不相对 CWD |
 | 时间 | ISO 8601 带时区；只写日期时按 UTC 当日 00:00 理解 |
-| ID 唯一 | `F-`、`C-`、`E-` 三类 ID 在同一文档内不得重复，跨文档引用必须能对上 |
+| ID 唯一 | 同一文档内 ID 不得重复，跨文档引用必须能对上。既有前缀：`F-`（Finding）、`C-`（Candidate）、`E-`（Evidence）；黑板另用 `fact_id` / `intent_id` / `hint_id` / `emulation_id` / `event_id`，格式分别为 `FACT-*` / `INT-*` / `HINT-*` / `EMU-*` / `EV-000001` |
 | 编码 | UTF-8 无 BOM；JSONL 一行一条，空行与 `#` 注释行允许 |
 
 **版本升级规则**：新增可选字段 → minor +1（旧文档仍合法）；删除字段、改语义、改枚举 → major +1（旧文档必须失败并给出迁移提示）。校验器同时接受同一 major 的相邻 minor（例如 `candidates/1.0` 与 `candidates/1.1`），跨 major 不兼容。
@@ -87,6 +87,8 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 
 **关键约束**：`status=confirmed` 且 `evidence` 为空 → 门禁失败；`status` 不在枚举内 → 失败；同一 `id` 重复 → 失败。非法 JSON 行**不允许静默跳过**：解析错误必须逐行上报（行号 + 原因 + 片段），且该输入判为「解析不完整」，strict 下直接失败。
 
+**`validated` / `confirmed` 的语义**（与 `references/methodology.md` §4 一致）：`validated` = Source→Sink 静态/仿真链路完整闭合、参数可控性与条件已验证，但未动态复现；`confirmed` = 已在模拟或真实设备上复现，是最终态。报告层仍只输出 `CONFIRMED` / `HYPOTHESIS` 两态。黑板上这两个状态不能由报告文案直接写入：必须经 `board_transitions.validate_transition` 做证据绑定、漏洞类型、判据与触发上下文校验（见 §16）。
+
 ## 5. Finding（`findings/1.0`）
 
 报告 ④ 区块的机器可读形态。每条漏洞固定 9 字段（与 `references/reporting.md` 一致），缺一即不合格。
@@ -121,6 +123,28 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 | `environment` | string | — | 设备/模拟环境标识 |
 
 动态证据必须注明隔离方式（见 `scripts/sandbox_run.py` 与 `references/emulation-fuzzing.md`）：**在宿主机直接跑未审计固件二进制得到的结论不予采信**。
+
+### 6.1 归一化证据（`evidence/1.1`）
+
+黑板、Qiling/QEMU 与 EMBA 适配器共用同一份证据形态。带 `schema` 的证据**必须**声明 `evidence/1.1`；`evidence/1.0` 只保留为无 schema 的历史轻量形态（`type/path/line|offset/stage/source`），不得给旧对象补一个 `schema` 假装升级。
+
+| 字段 | 类型 | 必需 | 说明 |
+|---|---|---|---|
+| `schema` | string | ✅ | `evidence/1.1` |
+| `evidence_id` | string | ✅ | 证据 ID |
+| `run_id` / `firmware_sha256` | string | ✅ | 运行与固件绑定；跨 run 证据不得用于当前候选的验证 |
+| `type` | enum | ✅ | `static` / `dynamic` / `emulation` / `fuzzing` / `manual` |
+| `observed_at` | string | ✅ | ISO 8601 带时区 |
+| `status` | enum | ✅ | `parsed` / `partial` / `failed`；非 `parsed` 必须在 `limitations` 说明缺什么 |
+| `source` | object | ✅ | `{type, tool, path?, line?}`；`type` 为 `static`/`dynamic`/`emulation`/`tool-report`/`manual`，`tool` 必填 |
+| `artifact` | object | — | `{path, sha256, size?}`，原始产物 |
+| `raw_log` | object | — | `{path, sha256}`，原始日志 |
+| `hook` | object | — | `{mechanism: syscall|api|libc|other, name}`；`system()` 是 libc/api Hook，`execve` 才是 syscall Hook |
+| `filter` | object | — | `{rule_id, rule_version}`，事件过滤规则留痕 |
+| `event` | object | 动态/仿真必需 | `{type, trigger?: bool, args?: object}`；`trigger` 表示这次观察是否真触发 |
+| `limitations` | array | 非 `parsed` 必需 | 字符串数组 |
+
+约束：`dynamic` / `emulation` 证据必须带 `event`；`static` 证据必须带 `source.path` 或 `artifact`。这些约束由 `contracts.py --kind evidence` 直接执行，避免「只写一句我跑过了」当证据。
 
 ## 7. GateResult（`gate-config/1.1`）
 
@@ -193,3 +217,168 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 4. 候选清单在 strict 下必须改为 envelope；带 `status` 的 JSONL 只在 standard 下可用（strict 判 `unversioned-input`）。纯文本输入加 `--legacy-text-candidates` 仅作过渡，且必须在报告里标注。
 5. 阶段状态写 `30-stages.json`（`audit-stages/1.0`），必需阶段非 `success` 即阻断。
 6. 报告 ④ 区块与 `findings/1.0` 对齐；证据统一引用 `E-###`。
+7. 黑板初始化：`board_store.py init --workspace ... --run-id ... --firmware-sha256 ...` 生成 `audit-events.jsonl`（首事件 `BOARD_INITIALIZED`）和 `audit-board.json` 快照；`--phase` 默认 `P0`，只在补录或已确认当前阶段时显式指定。
+8. `board_store.py import --workspace ... --manifest ... --layer1 ... --stages ... --candidates ...` 把 Phase 0–5 的结构化产物导入黑板。导入只新增 Fact / Evidence / Candidate，不改写原文件；门禁仍读原来的 manifest / layer1 / stages / candidates。
+9. 候选状态只能经 `board_store.py transition`（内部调用 `board_transitions.validate_transition`）；回退用 `board_store.py backtrack`，且 `from_phase` 必须等于黑板当前 `phase`。
+
+## 12. 黑板事件与快照（`board-event/1.0`）
+
+黑板有两个文件，职责不同：
+
+- `audit-events.jsonl`：**真相源**，一行一个事件，只追加，不重写。
+- `audit-board.json`：**加速器快照**，随时可由事件日志完整重放。
+
+| 字段 | 类型 | 必需 | 说明 |
+|---|---|---|---|
+| `schema` | string | ✅ | `board-event/1.0` |
+| `event_id` | string | ✅ | `EV-000001` 形式，日志内唯一 |
+| `run_id` | string | ✅ | 事件所属运行 |
+| `seq` | int | ✅ | 从 1 开始连续，回放按它排序与校验 |
+| `type` | enum | ✅ | 见下表 |
+| `ts` | string | ✅ | ISO 8601 带时区；`ts` 不参与去重键 |
+| `dedupe_key` | string | ✅ | `sha256("board-event/1.0\n" + type + "\n" + canonical_json(payload))` |
+| `payload` | object | ✅ | 事件载荷 |
+
+| `type` | `payload` 必填 |
+|---|---|
+| `BOARD_INITIALIZED` | `firmware_sha256`；`manifest_id` 可选 |
+| `FACT_RECORDED` | `fact`（完整 `fact/1.0` 对象） |
+| `CANDIDATE_RECORDED` | `candidate`（完整候选对象） |
+| `EVIDENCE_RECORDED` | `evidence`（完整 `evidence/1.1` 对象） |
+| `INTENT_CREATED` | `intent`（完整 `intent/1.0` 对象） |
+| `HINT_RECORDED` | `hint`（完整 `hint/1.0` 对象） |
+| `EMULATION_RECORDED` | `result`（完整 `emulation-result/1.0` 对象） |
+| `CANDIDATE_TRANSITIONED` | `candidate_id` / `from_state` / `to_state` / `reason` / `evidence_refs`；`policy` 可选 |
+| `INTENT_STATUS_CHANGED` | `intent_id` / `from_status` / `to_status`；`worker` 可选 |
+| `BACKTRACK` | `from_phase` / `to_phase` / `reason` / `evidence_refs`；`approved_by` 可选 |
+
+语义与失败模式：
+
+- 只追加：写入后 `flush` + `fsync`。重复 `dedupe_key` 返回 `duplicate=true` 且不再落盘；回放时同样跳过并计数。
+- `seq` 必须从 1 连续；`event_id` 唯一；同一日志出现多个 `run_id` 即 `RUN_MISMATCH`。
+- 空行可以容忍（计入 `blank`），但**非法 JSON 行必须报 `PARSE_ERROR` 并非零退出**，不得静默跳过。
+- 快照的 `revision` / `event_count` / `last_event_id` 与日志不一致时，`load` 会重建并标记 `recovered=true`；快照缺失也能从日志恢复。
+- 重复初始化报 `ALREADY_INITIALIZED`（除非显式 `--force`）；`BACKTRACK` 的 `from_phase` 不是当前阶段报 `PHASE_MISMATCH`，方向不是回退报 `NOT_A_BACKTRACK`。
+- 事件载荷内的对象若 `run_id` 与事件不一致，报 `RUN_MISMATCH`；引用不存在的证据 / 来源 / Intent，报 `DANGLING_EVIDENCE` / `DANGLING_REF`。
+- 回放遇到状态的 `from_state` 与快照当前状态不一致，报 `STATE_MISMATCH`；未知事件类型报 `UNKNOWN_EVENT`。
+
+## 13. Fact（`fact/1.0`）
+
+Fact 是**有来源、绑定了运行与固件的客观观察**，不是判断，也不是待办。
+
+| 字段 | 类型 | 必需 | 说明 |
+|---|---|---|---|
+| `schema` | string | ✅ | `fact/1.0` |
+| `fact_id` | string | ✅ | 建议 `FACT-*` |
+| `run_id` | string | ✅ | 与黑板一致 |
+| `firmware_sha256` | string | ✅ | 64 位十六进制 |
+| `type` | enum | ✅ | `firmware` / `file` / `elf` / `architecture` / `service` / `config` / `credential` / `syscall` / `api-call` / `network` / `scan` / `stage` / `other` |
+| `value` | object | ✅ | 非空；字段由 `type` 决定，必须能独立读懂 |
+| `evidence_refs` | array | ✅ | 非空字符串数组，指向黑板上已存在的证据 |
+| `source` | object | ✅ | `{type, tool?, tool_version?, rule_id?, rule_version?, path?, location?}`；`type` 为 `static` / `dynamic` / `emulation` / `tool-report` / `manual` |
+| `observed_at` | string | ✅ | ISO 8601 带时区 |
+| `scope` | object | — | 适用范围（架构、镜像、服务等） |
+| `supersedes` / `contradicts` | array | — | 字符串数组；被取代/冲突的事实 ID |
+
+约束：`value` 不得为空对象；`evidence_refs` 不得为空；`evidence_refs` 指向的证据必须存在于黑板，否则 `DANGLING_REF`。导入 manifest / layer1 / stages 各产生一条 Fact 和一条证据，ID 由文件哈希派生，重复导入保持幂等。
+
+## 14. Intent（`intent/1.0`）与 Hint（`hint/1.0`）
+
+Intent 是**尚未执行的方向**：必须由已有事实/候选/证据/Intent 触发，带唯一去重键与预算。
+
+| 字段 | 类型 | 必需 | 说明 |
+|---|---|---|---|
+| `schema` | string | ✅ | `intent/1.0` |
+| `intent_id` | string | ✅ | 建议 `INT-*` |
+| `run_id` / `firmware_sha256` | string | ✅ | 运行与固件绑定 |
+| `type` | enum | ✅ | `triage` / `static-analysis` / `dynamic-validation` / `emulation` / `verification` / `manual-review` / `other` |
+| `status` | enum | ✅ | `open` / `claimed` / `done` / `failed` / `cancelled` |
+| `from` | array | ✅ | 非空；引用 Fact / Candidate / Evidence / Intent |
+| `description` | string | ✅ | 要做什么、为什么 |
+| `dedupe_key` | string | ✅ | 幂等键；同一方向不得重复建单 |
+| `creator` / `created_at` | string | ✅ | 创建者与时间 |
+| `target` | string/object | ✅ | 非空；目标文件、服务、函数或对象 |
+| `params` | object | — | 执行参数 |
+| `budget` | object | — | `{seconds, max_attempts, tokens}`，均为非负整数 |
+| `timeout_seconds` / `max_retries` | int | — | 分别 ≥1 / ≥0 |
+| `preconditions` / `stop_conditions` / `expected_outputs` | array | — | 字符串数组 |
+| `worker` | string/null | — | 认领者 |
+| `claimed_at` / `concluded_at` | string | 条件 | `claimed` 必须有 `worker`+`claimed_at`；`done`/`failed`/`cancelled` 必须有 `concluded_at` |
+
+Intent 状态机：`open → claimed | cancelled`；`claimed → done | failed | cancelled | open`（释放）；`done` / `failed` / `cancelled` 为终态。认领必须带 `worker`，否则 `MISSING_WORKER`；非法转换报 `ILLEGAL_TRANSITION`。
+
+Hint 是人工判断或提示，**不是证据**，不得用来替代 Fact / Evidence。
+
+| 字段 | 类型 | 必需 | 说明 |
+|---|---|---|---|
+| `schema` | string | ✅ | `hint/1.0` |
+| `hint_id` | string | ✅ | 建议 `HINT-*` |
+| `run_id` / `firmware_sha256` | string | ✅ | 运行与固件绑定 |
+| `content` | string | ✅ | 提示内容 |
+| `creator` / `created_at` | string | ✅ | 创建者与时间 |
+| `active` | bool | — | 是否仍生效 |
+| `affects` | array | — | 受影响的 Fact / Candidate / Intent ID |
+
+## 15. EmulationResult（`emulation-result/1.0`）
+
+Qiling / QEMU / 其他后端共用一份结果契约。关键点是**失败、阻断、超时不能被写成「没发现」**。
+
+| 字段 | 类型 | 必需 | 说明 |
+|---|---|---|---|
+| `schema` | string | ✅ | `emulation-result/1.0` |
+| `emulation_id` | string | ✅ | 建议 `EMU-*` |
+| `run_id` / `intent_id` | string | ✅ | Intent 必须存在于黑板 |
+| `firmware_sha256` / `target_sha256` | string | 前者必需 | 固件与可执行目标哈希 |
+| `backend` / `backend_version` | string | ✅ | 后端名与版本 |
+| `status` | enum | ✅ | `SUCCESS` / `PARTIAL` / `FAILED` / `BLOCKED` / `NOT_APPLICABLE` / `TIMED_OUT` |
+| `environment` | object | ✅ | 根文件系统、内核、架构、外设等 |
+| `observations` | array | — | 结构化观察（对象数组） |
+| `evidence_refs` / `artifacts` | array | — | 证据引用；产物 `{path, sha256, size?}` |
+| `resource_usage` | object | — | 时间、内存、CPU 等 |
+| `started_at` / `finished_at` | string | `finished_at` 必需 | ISO 8601 |
+| `limitations` | array | PARTIAL 必需 | 未覆盖内容，不得折叠成成功 |
+| `failure` | object | 失败态必需 | `{category, reason, retryable}`，`retryable` 为布尔 |
+
+约束：`FAILED` / `BLOCKED` / `TIMED_OUT` 必须带 `failure`；`PARTIAL` 必须带非空 `limitations`。`SUCCESS` 只表示「后端按预期跑完」，仍需与证据链、类型判据一起才能升级候选状态。
+
+## 16. BoardState（`board-state/1.0`）与候选状态机
+
+BoardState 是快照文件的结构，所有条目都必须绑定同一个 `run_id` 与 `firmware_sha256`。
+
+| 字段 | 类型 | 必需 | 说明 |
+|---|---|---|---|
+| `schema` | string | ✅ | `board-state/1.0` |
+| `run_id` / `firmware_sha256` | string | ✅ | 快照级绑定 |
+| `revision` / `event_count` | int | — | 非负；与事件日志对账 |
+| `updated_at` | string | ✅ | ISO 8601 |
+| `phase` | enum | — | `P0`…`P5`；默认 `P0` |
+| `manifest_id` / `last_event_id` | string | — | 清单与最后事件 |
+| `evidence` / `facts` / `candidates` / `intents` / `hints` / `emulation_results` / `backtracks` | array | ✅ | 七类数组；每项走对应 validator |
+| `counters` | object | — | 若提供，必须与各数组实际长度一致 |
+
+交叉引用（悬空即 `DANGLING_REF`）：`fact.evidence_refs` 必须指向 `evidence`；`intent.from` 必须指向 facts / candidates / evidence / intents；`emulation_result.intent_id` 必须指向 `intents`；`emulation_result.evidence_refs` 与 `backtrack.evidence_refs` 必须指向 `evidence`。每类 ID 在各自数组内唯一。
+
+**BACKTRACK** 记录：`{from_phase, to_phase, reason, evidence_refs, approved_by?}`。`from_phase` 必须等于黑板当前 `phase`，且 `to_phase` 必须是更早的阶段，否则 `PHASE_MISMATCH` / `NOT_A_BACKTRACK`。
+
+候选状态转换白名单（`board-transitions/1.0`）：
+
+| 当前状态 | 允许转到 |
+|---|---|
+| `hypothesis` | `pending_static_analysis` / `not_applicable` / `blocked_by_environment` |
+| `pending_static_analysis` | `pending_dynamic_validation` / `validated` / `not_found` / `not_reproduced` / `not_applicable` / `blocked_by_environment` |
+| `pending_dynamic_validation` | `validated` / `confirmed` / `not_reproduced` / `blocked_by_environment` / `not_applicable` |
+| `validated` | `confirmed` / `not_reproduced` / `blocked_by_environment` |
+| `blocked_by_environment` | `pending_static_analysis` / `pending_dynamic_validation` / `not_applicable` |
+
+终态：`confirmed` / `not_found` / `not_reproduced` / `not_applicable`。`VERIFIED` 是 `confirmed` 的别名（持久化只写小写状态）；同状态转换报 `SAME_STATE`，终态再转报 `TERMINAL_STATE`。
+
+进入 `validated` 或 `confirmed` 时，`validate_transition` 按候选的漏洞类型（`policy.vuln_type`）检查证据绑定与判据：
+
+- 证据必须来自同一 `run_id` 与同一固件；跨 run → `EVIDENCE_NOT_BOUND_TO_RUN`，固件不一致 → `FIRMWARE_MISMATCH`，目标哈希不一致 → `TARGET_HASH_MISMATCH`。
+- 至少一条证据的 `type` 属于该漏洞类型允许的来源；否则 `EVIDENCE_TYPE_NOT_ACCEPTED`。
+- `policy.criteria` 必须覆盖该类型的 `required_criteria` 且全为 true；缺失 → `VALIDATION_CRITERIA_NOT_MET`。
+- 需要触发上下文的类型（命令注入、缓冲区溢出、路径穿越、认证绕过、SSRF、反序列化）必须有 `event.trigger=true`、匹配的触发事件，或候选自带 `trigger` / `poc`；否则 `MISSING_TRIGGER_CONTEXT`。
+- `policy.expected` 与 `policy.actual` 要么都给且相等，要么都不给；只给一方 → `EXPECTED_ACTUAL_NOT_SUPPORTED`。
+- 其余失败码：`BAD_CANDIDATE` / `BAD_STATE` / `ILLEGAL_TRANSITION` / `TYPE_RULE_MISSING` / `CANDIDATE_TYPE_MISMATCH` / `EVIDENCE_REQUIRED` / `EVIDENCE_INVALID`；成功为 `OK`。
+
+**风险处置不是状态**：`accepted` / `mitigated` / `transferred` / `avoided` / `pending` 是独立字段；`ACCEPTED_WITH_RISK` 只能作为风险处置，写进 `candidate.status` 会被拒绝（`RISK_AS_STATUS`）。接受风险不改变漏洞是否真实存在。

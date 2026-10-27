@@ -30,7 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 FAILS: list = []
 TOTAL = 0          # 实际执行的断言数：由脚本自己报，避免文档里的数字靠数日志漂移
-NGROUPS = 20       # 组数：与各处 [N/20] 表头一致，末尾会自校验，防止「13 组」再次漂移
+NGROUPS = 21       # 组数：与各处 [N/21] 表头一致，末尾会自校验，防止「13 组」再次漂移
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -299,7 +299,7 @@ def main() -> int:
         with open(p, "w", encoding="utf-8", newline="\n") as f:
             f.write(txt)
 
-    print("\n[1/20] fw_triage.py — 度量 / 加固画像 / 分层")
+    print("\n[1/21] fw_triage.py — 度量 / 加固画像 / 分层")
     r = run([os.path.join(HERE, "fw_triage.py"), img, "--rootfs", root, "--tier",
              "--budget", "800", "--out", metrics, "--plan", plan, "--pretty"])
     check("fw_triage 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
@@ -327,7 +327,7 @@ def main() -> int:
     check("T3 含 www/index.html", "www/index.html" in set(t["t3_list"]))
     check("EALB > 0", t["ealoc_total"] > 0, str(t["ealoc_total"]))
 
-    print("\n[2/20] sink_scan.py — Layer 1 危险模式扫描")
+    print("\n[2/21] sink_scan.py — Layer 1 危险模式扫描")
     r = run([os.path.join(HERE, "sink_scan.py"), root, "--json", sinks])
     check("sink_scan 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
     if r.returncode != 0:
@@ -341,19 +341,19 @@ def main() -> int:
     check("etc/passwd 不再误报 P1-S-020", ("P1-S-020", "etc/passwd") not in key)
     check("文档目录被跳过", not any(f["file"].startswith("usr/share/doc") for f in sd["findings"]))
 
-    print("\n[3/20] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
+    print("\n[3/21] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vpart, "--tiering", tiering])
     check("不完整输入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
 
-    print("\n[4/20] coverage_gate.py — 覆盖率门禁（完整应通过）")
+    print("\n[4/21] coverage_gate.py — 覆盖率门禁（完整应通过）")
     out = os.path.join(base, "40-coverage.md")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vfull, "--tiering", tiering, "--out", out])
     check("完整输入 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("门禁报告已生成", os.path.isfile(out))
 
-    print("\n[5/20] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
+    print("\n[5/21] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
     bad_rep = os.path.join(base, "report-bad.md")
     with open(bad_rep, "w", encoding="utf-8") as fh:
         fh.write(
@@ -441,7 +441,7 @@ def main() -> int:
     check("⑥ 保留指针行（移动语义）→ 退出码 0", r.returncode == 0,
           r.stdout.strip()[-200:])
 
-    print("\n[6/20] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
+    print("\n[6/21] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
     review_bad = os.path.join(base, "25-review-list.md")
     with open(review_bad, "w", encoding="utf-8") as fh:
         fh.write("- [x] `www/cgi-bin/ping.cgi`\n"     # 有结论 → OK
@@ -473,7 +473,7 @@ def main() -> int:
     check("审阅清单一致 → 退出码 0", r.returncode == 0,
           r.stdout.strip()[-160:])
 
-    print("\n[7/20] coverage_gate.py — 报告 9 必填字段校验")
+    print("\n[7/21] coverage_gate.py — 报告 9 必填字段校验")
     f_bad = os.path.join(base, "report-fields-bad.md")
     with open(f_bad, "w", encoding="utf-8") as fh:
         fh.write(
@@ -509,7 +509,7 @@ def main() -> int:
     check("9 字段齐全 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("报告模板字段不误报", _template_fields_clean())
 
-    print("\n[8/20] coverage_gate.py — G4 入口级覆盖（文件级 100% ≠ 入口级 100%）")
+    print("\n[8/21] coverage_gate.py — G4 入口级覆盖（文件级 100% ≠ 入口级 100%）")
     tj_g4 = os.path.join(base, "02-tiering-g4.json")
     with open(tj_g4, "w", encoding="utf-8") as fh:
         json.dump({"rootfs_analysis": {"tiering": {"shards": [{"items": [
@@ -551,7 +551,7 @@ def main() -> int:
              "--entrypoints", ep_ok, "--out", os.path.join(base, "40-g4c.md")])
     check("入口枚举 + 全部处置 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
 
-    print("\n[9/20] coverage_gate.py — G5 绕过矩阵（「有防护」≠「防护有效」）")
+    print("\n[9/21] coverage_gate.py — G5 绕过矩阵（「有防护」≠「防护有效」）")
     vp_bad = os.path.join(base, "30-claim-bad.md")
     with open(vp_bad, "w", encoding="utf-8") as fh:
         fh.write("# 结论\n\n## F-001 · x\n\n- 影响: 已鉴权，不可利用\n")
@@ -581,7 +581,7 @@ def main() -> int:
     check("G5 端到端接入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
     check("检出绕过矩阵缺失", "绕过矩阵完备（G5）" in open(out_g5, encoding="utf-8").read())
 
-    print("\n[10/20] coverage_gate.py — G6 跨请求污点溯源（持久化来源须声明写入面）")
+    print("\n[10/21] coverage_gate.py — G6 跨请求污点溯源（持久化来源须声明写入面）")
     _F = ("- **类型**：命令注入\n- **位置**：`usr/sbin/httpd:0x1`\n- **优先级**：P1\n"
           "- **置信度**：CONFIRMED\n- **CVSS 3.1**：`AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H` = 9.8\n"
           "{src}- **Sink**：system()\n- **完整调用链**：1. a @0x1\n- **证据**：`[E1]` disasm\n")
@@ -616,7 +616,7 @@ def main() -> int:
              os.path.join(base, "40-g6b.md")])
     check("声明写入面端到端 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
 
-    print("\n[11/20] coverage_gate.py — G1/G2/G3 自动修复 + 类型→Base 命中")
+    print("\n[11/21] coverage_gate.py — G1/G2/G3 自动修复 + 类型→Base 命中")
     out_rec = os.path.join(base, "40-recover.md")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vpart, "--tiering", tiering,
@@ -650,7 +650,7 @@ def main() -> int:
     check("可映射类型 → 不报",
           not _cg.check_type_base(rep_mapped, base_md)["unmapped"])
 
-    print("\n[12/20] sink_scan.py — 结构级二次过滤（正则初筛 → 结构确认 / 否定 / 回退）")
+    print("\n[12/21] sink_scan.py — 结构级二次过滤（正则初筛 → 结构确认 / 否定 / 回退）")
     if HERE not in sys.path:
         sys.path.insert(0, HERE)
     import sink_scan as _ss  # noqa
@@ -729,7 +729,7 @@ def main() -> int:
         _ss.structural_match = _orig_sm
 
     # ── 13. 扫描完整性 + 门禁严格性（改进计划 §3 / §4 / §6 的回归）──────────
-    print("\n[13/20] 扫描完整性与门禁严格性")
+    print("\n[13/21] 扫描完整性与门禁严格性")
 
     sz = os.path.join(base, "scanint")
     os.makedirs(sz, exist_ok=True)
@@ -891,7 +891,7 @@ def main() -> int:
     check("组数常量与表头数量一致", n_hdr == NGROUPS, f"表头 {n_hdr} / 常量 {NGROUPS}")
 
     # ── 15. 高阶污点图：写面/读面必须分属不同 action ──────────────────────────
-    print("\n[15/20] taint_graph.py — 跨请求污点图（BDG/ADG）与 G7 门禁")
+    print("\n[15/21] taint_graph.py — 跨请求污点图（BDG/ADG）与 G7 门禁")
     tg = os.path.join(base, "tg")
     os.makedirs(tg, exist_ok=True)
     TG = os.path.join(HERE, "taint_graph.py")
@@ -1072,7 +1072,7 @@ def main() -> int:
           and r.returncode != 0, f"{row.get('status')}/{row.get('required')}")
 
     # ── 16. 候选输入契约：解析失败必须可见，strict 只吃版本化输入 ─────────────
-    print("\n[16/20] 候选输入契约：解析失败可见 / strict 只接受版本化输入")
+    print("\n[16/21] 候选输入契约：解析失败可见 / strict 只接受版本化输入")
     cd16 = os.path.join(base, "cand")
     os.makedirs(cd16, exist_ok=True)
 
@@ -1172,7 +1172,7 @@ def main() -> int:
           f"rc={rr.returncode}")
 
     # ── 17. 扫描完整性 / 阶段状态 / 结构引擎：降级可见，且 strict 能阻断 ─────
-    print("\n[17/20] 扫描完整性与阶段状态：降级可见、可阻断")
+    print("\n[17/21] 扫描完整性与阶段状态：降级可见、可阻断")
     sd17 = os.path.join(base, "scangate")
     os.makedirs(sd17, exist_ok=True)
     layer1_partial = os.path.join(sz, "out2.json")
@@ -1283,7 +1283,7 @@ def main() -> int:
           f"{row.get('status')}/{row.get('required')} rc={rr.returncode}")
 
     # ── 18. 结构化契约 / 固件清单 / EALB 校准 ────────────────────────────────
-    print("\n[18/20] 契约校验（contracts.py）、FirmwareManifest、EALB 校准")
+    print("\n[18/21] 契约校验（contracts.py）、FirmwareManifest、EALB 校准")
     cd18 = os.path.join(base, "contracts")
     os.makedirs(cd18, exist_ok=True)
     CONTRACTS = os.path.join(HERE, "contracts.py")
@@ -1408,7 +1408,7 @@ def main() -> int:
           json.dumps((ee.get("targets") or {}).get("minutes") or {},
                      ensure_ascii=False))
 
-    print("\n[19/20] sandbox_run.py — 不可信固件的隔离边界（fail-closed）")
+    print("\n[19/21] sandbox_run.py — 不可信固件的隔离边界（fail-closed）")
     SANDBOX = os.path.join(HERE, "sandbox_run.py")
     sb_dir = os.path.join(base, "sandbox")
     os.makedirs(sb_dir, exist_ok=True)
@@ -1474,7 +1474,7 @@ def main() -> int:
           rr.returncode == 4, f"rc={rr.returncode}")
 
     # ── 20. 基准评估：指标可复算、严格模式不吞未复核标签、回归可阻断 ──────────
-    print("\n[20/20] bench_eval.py — 基准评估（precision/recall/回归阻断）")
+    print("\n[20/21] bench_eval.py — 基准评估（precision/recall/回归阻断）")
     BENCH = os.path.join(HERE, "bench_eval.py")
     bench_manifest = os.path.join(os.path.dirname(HERE), "assets", "bench", "manifest.json")
     bd = os.path.join(base, "bench")
@@ -1554,6 +1554,333 @@ def main() -> int:
         check("bench：相对基线召回暴跌 → 退出码 3 且标记 regression",
               rr.returncode == 3 and db.get("regression") is True,
               f"rc={rr.returncode} reasons={db.get('regression_reasons')}")
+
+    # ── 21. 黑板：契约 / 事件日志 / 快照恢复 / 状态机 ────────────────────────
+    print("\n[21/21] board_* — 黑板契约、事件日志、快照恢复与状态转换")
+    BOARD = os.path.join(HERE, "board_store.py")
+    BEV = os.path.join(HERE, "board_events.py")
+    BTR = os.path.join(HERE, "board_transitions.py")
+    b21 = os.path.join(base, "board21")
+    os.makedirs(b21, exist_ok=True)
+    FW21 = "a" * 64
+    RUN21 = "RUN-SELFTEST"
+
+    def _wj(name: str, obj) -> str:
+        path = os.path.join(b21, name)
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(obj, fh, ensure_ascii=False, indent=2)
+        return path
+
+    def _rj(path: str):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return {}
+
+    def _pj(text: str):
+        try:
+            return json.loads(text)
+        except (TypeError, ValueError):
+            return {}
+
+    fact_ok = _wj("fact.json", {
+        "schema": "fact/1.0", "fact_id": "F-21", "run_id": RUN21,
+        "firmware_sha256": FW21, "type": "firmware",
+        "value": {"id": "FW-21"}, "evidence_refs": ["E-21"],
+        "source": {"type": "static", "tool": "selftest"},
+        "observed_at": "2026-01-01T00:00:00Z"})
+    check("contracts.py：Fact 合法样本通过",
+          run([CONTRACTS, "--kind", "fact", "--file", fact_ok]).returncode == 0)
+    fact_bad = _wj("fact-bad.json", {
+        "schema": "fact/1.0", "fact_id": "F-21", "run_id": RUN21,
+        "firmware_sha256": FW21, "type": "firmware",
+        "value": {"id": "FW-21"}, "source": {"type": "static"},
+        "observed_at": "2026-01-01T00:00:00Z"})
+    check("contracts.py：Fact 缺 evidence_refs → 拒绝",
+          run([CONTRACTS, "--kind", "fact", "--file", fact_bad]).returncode == 1)
+
+    intent_ok = _wj("intent.json", {
+        "schema": "intent/1.0", "intent_id": "I-21", "run_id": RUN21,
+        "firmware_sha256": FW21, "type": "dynamic-validation", "status": "open",
+        "from": ["F-21"], "description": "验证命令注入", "dedupe_key": "I-21-key",
+        "creator": "selftest", "created_at": "2026-01-01T00:00:00Z",
+        "target": "usr/sbin/httpd"})
+    check("contracts.py：Intent 合法样本通过",
+          run([CONTRACTS, "--kind", "intent", "--file", intent_ok]).returncode == 0)
+    intent_bad = _wj("intent-bad.json", {
+        "schema": "intent/1.0", "intent_id": "I-21", "run_id": RUN21,
+        "firmware_sha256": FW21, "type": "dynamic-validation", "status": "claimed",
+        "from": ["F-21"], "description": "缺少 worker", "dedupe_key": "I-21-key",
+        "creator": "selftest", "created_at": "2026-01-01T00:00:00Z",
+        "target": "usr/sbin/httpd"})
+    check("contracts.py：claimed Intent 缺 worker/claimed_at → 拒绝",
+          run([CONTRACTS, "--kind", "intent", "--file", intent_bad]).returncode == 1)
+
+    emu_ok = _wj("emu.json", {
+        "schema": "emulation-result/1.0", "emulation_id": "EM-21",
+        "run_id": RUN21, "intent_id": "I-21", "firmware_sha256": FW21,
+        "backend": "qiling", "backend_version": "1.4", "status": "SUCCESS",
+        "environment": {"arch": "mips"}, "started_at": "2026-01-01T00:00:00Z",
+        "finished_at": "2026-01-01T00:01:00Z"})
+    check("contracts.py：EmulationResult 合法样本通过",
+          run([CONTRACTS, "--kind", "emulation-result", "--file", emu_ok]).returncode == 0)
+    emu_bad = _wj("emu-bad.json", {
+        "schema": "emulation-result/1.0", "emulation_id": "EM-21",
+        "run_id": RUN21, "intent_id": "I-21", "firmware_sha256": FW21,
+        "backend": "qiling", "backend_version": "1.4", "status": "TIMED_OUT",
+        "environment": {"arch": "mips"}, "finished_at": "2026-01-01T00:01:00Z"})
+    check("contracts.py：TIMED_OUT 缺 failure → 拒绝",
+          run([CONTRACTS, "--kind", "emulation-result", "--file", emu_bad]).returncode == 1)
+
+    ws21 = os.path.join(b21, "main")
+    rr = run([BOARD, "init", "--workspace", ws21, "--run-id", RUN21,
+              "--firmware-sha256", FW21, "--manifest-id", "FW-21"])
+    check("board_store：init 生成事件日志与快照",
+          rr.returncode == 0
+          and os.path.isfile(os.path.join(ws21, "audit-events.jsonl"))
+          and os.path.isfile(os.path.join(ws21, "audit-board.json")),
+          f"rc={rr.returncode}")
+    board_json = os.path.join(ws21, "audit-board.json")
+    check("contracts.py：初始化后的 BoardState 通过契约",
+          run([CONTRACTS, "--kind", "board-state", "--file", board_json]).returncode == 0)
+    ev_path = os.path.join(ws21, "audit-events.jsonl")
+    event_json = os.path.join(b21, "event.json")
+    with open(ev_path, encoding="utf-8") as fh:
+        first_event = fh.readline()
+    with open(event_json, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(first_event)
+    check("contracts.py：BoardEvent 通过契约",
+          run([CONTRACTS, "--kind", "board-event", "--file", event_json]).returncode == 0)
+
+    cand21 = _wj("candidate.json", {
+        "id": "C-21", "status": "hypothesis", "type": "command-injection",
+        "file": "usr/sbin/httpd"})
+    run([BOARD, "add", "--workspace", ws21, "--kind", "candidate", "--file", cand21])
+    rr = run([BOARD, "add", "--workspace", ws21, "--kind", "candidate",
+              "--file", cand21])
+    dup = _pj(rr.stdout)
+    check("board_store：重复记录同一候选是幂等的（不重复落盘）",
+          rr.returncode == 0 and dup.get("duplicate") is True,
+          f"rc={rr.returncode}")
+
+    rr = run([BOARD, "transition", "--workspace", ws21, "--candidate", "C-21",
+              "--to", "validated", "--reason", "直接跳"])
+    check("状态机：hypothesis → validated 被拒绝",
+          rr.returncode == 1 and "ILLEGAL_TRANSITION" in rr.stderr,
+          f"rc={rr.returncode}")
+    check("状态机：hypothesis → pending_static_analysis 合法",
+          run([BOARD, "transition", "--workspace", ws21, "--candidate", "C-21",
+               "--to", "pending_static_analysis", "--reason", "静态分析"]).returncode == 0)
+    check("状态机：pending_static_analysis → pending_dynamic_validation 合法",
+          run([BOARD, "transition", "--workspace", ws21, "--candidate", "C-21",
+               "--to", "pending_dynamic_validation", "--reason", "进入动态"]).returncode == 0)
+
+    ev21 = _wj("evidence.json", {
+        "schema": "evidence/1.1", "evidence_id": "E-21", "run_id": RUN21,
+        "firmware_sha256": FW21, "type": "emulation",
+        "observed_at": "2026-01-01T00:00:00Z", "status": "parsed",
+        "source": {"type": "emulation", "tool": "qiling"},
+        "event": {"type": "execve", "trigger": True}})
+    check("board_store：记录证据",
+          run([BOARD, "add", "--workspace", ws21, "--kind", "evidence",
+               "--file", ev21]).returncode == 0)
+    policy21 = _wj("policy.json", {
+        "vuln_type": "command-injection",
+        "criteria": {"sink_reachable": True, "user_controlled_input": True,
+                     "command_execution": True}})
+    rr = run([BOARD, "transition", "--workspace", ws21, "--candidate", "C-21",
+              "--to", "validated", "--reason", "复现成功",
+              "--evidence", "E-21", "--policy", policy21])
+    shown = _pj(run([BOARD, "show", "--workspace", ws21]).stdout)
+    check("状态机：pending_dynamic_validation → validated（证据+类型化判据）",
+          rr.returncode == 0, f"rc={rr.returncode}")
+    state21 = _rj(board_json)
+    check("board_store：validated 写入快照且带转换历史",
+          any(c.get("id") == "C-21" and c.get("status") == "validated"
+              and c.get("history") for c in state21.get("candidates") or []))
+    rr = run([BOARD, "transition", "--workspace", ws21, "--candidate", "C-21",
+              "--to", "confirmed", "--reason", "动态复现",
+              "--evidence", "E-21", "--policy", policy21])
+    state21c = _rj(board_json)
+    check("状态机：validated → confirmed（动态复现后进入最终态）",
+          rr.returncode == 0
+          and any(c.get("id") == "C-21" and c.get("status") == "confirmed"
+                  for c in state21c.get("candidates") or []),
+          f"rc={rr.returncode}")
+    rr = run([BOARD, "transition", "--workspace", ws21, "--candidate", "C-21",
+              "--to", "validated", "--reason", "重开"])
+    check("状态机：终态不可再转换（TERMINAL_STATE）",
+          rr.returncode == 1 and "TERMINAL_STATE" in rr.stderr)
+    check("board_store：verify 校验快照与事件链一致",
+          run([BOARD, "verify", "--workspace", ws21]).returncode == 0)
+
+    bad_ev = _wj("evidence-bad-run.json", {
+        "schema": "evidence/1.1", "evidence_id": "E-BAD", "run_id": "RUN-OTHER",
+        "firmware_sha256": FW21, "type": "emulation",
+        "observed_at": "2026-01-01T00:00:00Z", "status": "parsed",
+        "source": {"type": "emulation", "tool": "qiling"},
+        "event": {"type": "execve", "trigger": True}})
+    pending = _wj("pending.json", {
+        "id": "C-X", "status": "pending_dynamic_validation",
+        "type": "command-injection", "run_id": RUN21,
+        "firmware_sha256": FW21})
+    out21 = os.path.join(b21, "transition-bad.json")
+    run([BTR, "check", "--candidate", pending, "--to", "validated",
+         "--evidence", bad_ev, "--policy", policy21, "--run-id", RUN21,
+         "--firmware-sha256", FW21, "--json", out21, "--quiet"])
+    check("状态机：跨 run 证据不得用于 validated（EVIDENCE_NOT_BOUND_TO_RUN）",
+          _rj(out21).get("code") == "EVIDENCE_NOT_BOUND_TO_RUN",
+          json.dumps(_rj(out21), ensure_ascii=False)[:160])
+
+    static_ev = _wj("evidence-static.json", {
+        "schema": "evidence/1.1", "evidence_id": "E-STA", "run_id": RUN21,
+        "firmware_sha256": FW21, "type": "static",
+        "observed_at": "2026-01-01T00:00:00Z", "status": "parsed",
+        "source": {"type": "static", "tool": "sink_scan", "path": "usr/sbin/httpd"}})
+    out21b = os.path.join(b21, "transition-static.json")
+    run([BTR, "check", "--candidate", pending, "--to", "validated",
+         "--evidence", static_ev, "--policy", policy21, "--run-id", RUN21,
+         "--firmware-sha256", FW21, "--json", out21b, "--quiet"])
+    check("状态机：静态证据不能证明命令执行（MISSING_TRIGGER_CONTEXT）",
+          _rj(out21b).get("code") == "MISSING_TRIGGER_CONTEXT",
+          _rj(out21b).get("code", ""))
+    out21c = os.path.join(b21, "transition-ok.json")
+    run([BTR, "check", "--candidate", pending, "--to", "validated",
+         "--evidence", ev21, "--policy", policy21, "--run-id", RUN21,
+         "--firmware-sha256", FW21, "--json", out21c, "--quiet"])
+    check("状态机：同 run 动态证据 + 全判据 → validated",
+          _rj(out21c).get("code") == "OK", _rj(out21c).get("code", ""))
+
+    risk_bad = _wj("risk.json", {
+        "candidate_id": "C-21", "status": "ACCEPTED_WITH_RISK",
+        "reason": "暂缓修复", "approved_by": "owner",
+        "evidence_refs": ["E-21"]})
+    check("风险处置：ACCEPTED_WITH_RISK 不得写成候选状态",
+          run([BTR, "risk", "--file", risk_bad]).returncode == 1)
+
+    ws_bt = os.path.join(b21, "backtrack")
+    run([BOARD, "init", "--workspace", ws_bt, "--run-id", RUN21,
+         "--firmware-sha256", FW21, "--phase", "P4"])
+    run([BOARD, "add", "--workspace", ws_bt, "--kind", "evidence", "--file", ev21])
+    rr = run([BOARD, "backtrack", "--workspace", ws_bt, "--from-phase", "P4",
+              "--to-phase", "P2", "--reason", "仿真不可用，回到静态复核",
+              "--evidence", "E-21"])
+    bt_state = _rj(os.path.join(ws_bt, "audit-board.json"))
+    check("黑板：BACKTRACK 记录回退并把 phase 置回 P2",
+          rr.returncode == 0 and bt_state.get("phase") == "P2"
+          and len(bt_state.get("backtracks") or []) == 1,
+          f"phase={bt_state.get('phase')} rc={rr.returncode}")
+    rr = run([BOARD, "backtrack", "--workspace", ws_bt, "--from-phase", "P4",
+              "--to-phase", "P1", "--reason", "阶段声明不符", "--evidence", "E-21"])
+    check("黑板：from_phase 与当前阶段不一致 → PHASE_MISMATCH",
+          rr.returncode == 1 and "PHASE_MISMATCH" in rr.stderr)
+
+    ws_re = os.path.join(b21, "recover")
+    run([BOARD, "init", "--workspace", ws_re, "--run-id", RUN21,
+         "--firmware-sha256", FW21])
+    run([BOARD, "add", "--workspace", ws_re, "--kind", "candidate", "--file", cand21])
+    os.remove(os.path.join(ws_re, "audit-board.json"))
+    shown = _pj(run([BOARD, "show", "--workspace", ws_re]).stdout)
+    check("黑板：快照删除后从事件日志恢复，并标记 recovered",
+          shown.get("recovered") is True and shown.get("revision", 0) >= 2,
+          f"recovered={shown.get('recovered')} rev={shown.get('revision')}")
+    check("黑板：恢复出的候选仍在",
+          os.path.isfile(os.path.join(ws_re, "audit-board.json"))
+          and any(c.get("id") == "C-21"
+                  for c in _rj(os.path.join(ws_re, "audit-board.json")).get("candidates") or []))
+
+    corrupt = os.path.join(b21, "corrupt.jsonl")
+    shutil.copyfile(os.path.join(ws_re, "audit-events.jsonl"), corrupt)
+    with open(corrupt, "a", encoding="utf-8", newline="\n") as fh:
+        fh.write("{not-json\n")
+    rr = run([BEV, "verify", "--events", corrupt])
+    check("事件日志：非法行必须报 PARSE_ERROR，不得静默跳过",
+          rr.returncode == 1 and "PARSE_ERROR" in rr.stdout)
+
+    imp_ws = os.path.join(b21, "import")
+    man21 = _wj("manifest.json", {
+        "id": "FW-21", "vendor": "Demo", "product": "Router", "version": "1.0",
+        "arch": "arm", "image": {"path": "fw.bin", "sha256": FW21, "size": 1}})
+    l1_21 = _wj("layer1.json", {
+        "schema": "layer1-sinks/1.3", "tool": "sink_scan", "findings": []})
+    cand_doc = os.path.join(b21, "cand.jsonl")
+    with open(cand_doc, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump({"schema": "candidates/1.0", "candidates": [
+            {"id": "C-21", "status": "hypothesis"}]}, fh, ensure_ascii=False)
+        fh.write("\n")
+    run([BOARD, "init", "--workspace", imp_ws, "--run-id", RUN21,
+         "--firmware-sha256", FW21])
+    rr1 = run([BOARD, "import", "--workspace", imp_ws, "--manifest", man21,
+               "--layer1", l1_21, "--candidates", cand_doc])
+    rr2 = run([BOARD, "import", "--workspace", imp_ws, "--manifest", man21,
+               "--layer1", l1_21, "--candidates", cand_doc])
+    rep1 = _pj(rr1.stdout)
+    rep2 = _pj(rr2.stdout)
+    check("黑板：Phase 0–5 产物可导入（manifest/layer1/candidates）",
+          rr1.returncode == 0
+          and (rep1.get("items") or {}).get("candidates", {}).get("added") == 1,
+          f"rc={rr1.returncode}")
+    check("黑板：重复导入产物不重复落盘",
+          rr2.returncode == 0
+          and (rep2.get("items") or {}).get("candidates", {}).get("duplicates") == 1)
+    check("黑板：导入后 verify 通过且计数一致",
+          run([BOARD, "verify", "--workspace", imp_ws]).returncode == 0
+          and (rep2.get("summary") or {}).get("counts", {}).get("candidates") == 1)
+
+    fact_store = _wj("fact-store.json", {
+        "schema": "fact/1.0", "fact_id": "F-21", "run_id": RUN21,
+        "firmware_sha256": FW21, "type": "firmware",
+        "value": {"id": "FW-21"}, "evidence_refs": ["E-21"],
+        "source": {"type": "static", "tool": "selftest"},
+        "observed_at": "2026-01-01T00:00:00Z"})
+    check("board_store：记录 Fact 并绑定已有证据",
+          run([BOARD, "add", "--workspace", ws21, "--kind", "fact",
+               "--file", fact_store]).returncode == 0)
+
+    intent_store = _wj("intent-store.json", {
+        "schema": "intent/1.0", "intent_id": "I-21", "run_id": RUN21,
+        "firmware_sha256": FW21, "type": "dynamic-validation", "status": "open",
+        "from": ["F-21"], "description": "验证命令注入", "dedupe_key": "I-21-key",
+        "creator": "selftest", "created_at": "2026-01-01T00:00:00Z",
+        "target": "usr/sbin/httpd"})
+    rr = run([BOARD, "add", "--workspace", ws21, "--kind", "intent",
+              "--file", intent_store])
+    check("board_store：记录 Intent 并绑定事实来源", rr.returncode == 0,
+          f"rc={rr.returncode}")
+    rr = run([BOARD, "intent", "--workspace", ws21, "--intent", "I-21",
+              "--to-status", "claimed", "--worker", "worker-1"])
+    st21 = _rj(board_json)
+    check("黑板：Intent claim 写入 worker 与 claimed_at",
+          rr.returncode == 0
+          and any(i.get("intent_id") == "I-21" and i.get("status") == "claimed"
+                  and i.get("worker") == "worker-1" and i.get("claimed_at")
+                  for i in st21.get("intents") or []),
+          f"rc={rr.returncode}")
+
+    hint_store = _wj("hint-store.json", {
+        "schema": "hint/1.0", "hint_id": "H-21", "run_id": RUN21,
+        "firmware_sha256": FW21, "content": "优先检查 upnpd 的 SOAP 处理",
+        "creator": "selftest", "created_at": "2026-01-01T00:00:00Z"})
+    check("board_store：记录 Hint（提示单独存放，不作为证据）",
+          run([BOARD, "add", "--workspace", ws21, "--kind", "hint",
+               "--file", hint_store]).returncode == 0)
+
+    emu_store = _wj("emulation-store.json", {
+        "schema": "emulation-result/1.0", "emulation_id": "EM-21",
+        "run_id": RUN21, "intent_id": "I-21", "firmware_sha256": FW21,
+        "backend": "qiling", "backend_version": "1.4", "status": "SUCCESS",
+        "environment": {"arch": "mips"}, "observations": [],
+        "started_at": "2026-01-01T00:00:00Z",
+        "finished_at": "2026-01-01T00:01:00Z"})
+    check("board_store：记录 EmulationResult 并关联 Intent",
+          run([BOARD, "add", "--workspace", ws21, "--kind", "emulation",
+               "--file", emu_store]).returncode == 0)
+    st21 = _rj(board_json)
+    check("黑板：Fact/Intent/Hint/Emulation 落盘后 verify 仍通过",
+          any(e.get("emulation_id") == "EM-21"
+              for e in st21.get("emulation_results") or [])
+          and run([BOARD, "verify", "--workspace", ws21]).returncode == 0)
 
     print()
     if FAILS:

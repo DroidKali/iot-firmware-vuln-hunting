@@ -1,6 +1,6 @@
 # 路线图（Roadmap）
 
-> 状态基线：2026-10-26。当前仓库已交付 Phase 0–5 确定性流水线、覆盖率/Strict 门禁、
+> 状态基线：2026-10-27（M1 已落地）。当前仓库已交付 Phase 0–5 确定性流水线、覆盖率/Strict 门禁、
 > 结构化契约、fail-closed 沙箱入口与合成基准；本文件描述在此之上的 **V2 渐进式架构**。
 >
 > 这是实施计划，不代表下列能力已经全部实现或通过测试。每个里程碑落地前都必须
@@ -11,8 +11,8 @@
 | 层次 | 当前状态（2026-10） | 目标状态 |
 |---|---|---|
 | 确定性流水线 | Phase 0–5 已落地；门禁可阻断 | 保持不变，作为控制平面与最终裁决者 |
-| 黑板 / 动态探索 | 未实现；探索靠 Agent 在会话内自行维护 | Fact / Candidate / Intent / Hint 持久化，可回放、可去重、可预算 |
-| 数据契约 | 11 种 schema，覆盖 Manifest / Task / Candidate / Finding / Evidence / GateResult 等 | 增加 Fact / Intent / EmulationResult / BoardState，并让状态转换受校验器约束 |
+| 黑板 / 动态探索 | M1 已落地：事实/候选/意图/提示持久化，事件日志 + 快照 + 去重 + 状态机；Planner / Scheduler 编排未实现 | Fact / Candidate / Intent / Hint 持久化，可回放、可去重、可预算 |
+| 数据契约 | 16 种 schema，含 Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent 与 `evidence/1.1`；状态转换由 `board_transitions.py` 校验 | 随适配器扩展 `EmulationResult` 后端字段，保持向后兼容 |
 | 沙箱 | `sandbox_run.py` 已 fail-closed，但尚未证明所有执行路径都经过它 | 所有解包、执行、仿真、外部工具调用统一入口；隔离失败不回落宿主机 |
 | EMBA / Qiling / QEMU | 仅作为人工选路与交叉验证建议，无适配器、无统一结果契约 | 适配器解析既有产物，按条件准入，输出统一 `EmulationResult` |
 | 检测质量评估 | 合成基准 + 回归门禁 | 增加合法来源、可追溯、人工复核的真实固件基准 |
@@ -202,9 +202,9 @@ G1–G7 必须是代码校验器，而不是 Prompt、README 或报告模板。�
 逐项核查遗留问题，区分「已实现 / 部分实现 / 有代码但未验证 / 未实现」；实际运行测试，
 记录命令、版本、退出码与结果。重点确认 Strict、Coverage、沙箱和结构化证据的真实调用路径。
 
-**现状**：2026-10 已完成一轮门禁、契约、沙箱入口与合成基准整改，selftest 覆盖
-20 组 / 165 条断言；但仍缺「所有执行路径逐条列出」的清单，沙箱也只在无容器环境下
-验证过 fail-closed。
+**现状**：2026-10 已完成一轮门禁、契约、沙箱入口与合成基准整改；M1 落地后
+selftest 覆盖 21 组 / 202 条断言。但仍缺「所有执行路径逐条列出」的清单，沙箱只在
+无容器运行时与桩运行时下验证过 fail-closed，尚未在 Linux + 真实容器上复验。
 
 **验收**：盘点结果以命令、版本、退出码记录并可复算；每条能力声明都能对应到源码或
 测试，而不是只引用 README。记录随审计交付物保存，不在仓库里堆能力声明式文档。
@@ -220,6 +220,13 @@ G1–G7 必须是代码校验器，而不是 Prompt、README 或报告模板。�
 - 黑板读写与事件日志（`audit-board.json` / `audit-events.jsonl`）；
 - `validate_transition` 与结构化失败原因；
 - Phase 0–5 的产物可以导入黑板，门禁仍只读原有结构化产物。
+
+**现状（2026-10-27，已落地）**：`contracts.py` 扩到 16 种 schema（含六个黑板对象与 `evidence/1.1`）；
+`board_events.py` 提供 append-only 日志、`seq` 校验与回放；`board_store.py` 提供快照、去重、
+导入与状态转换；`board_transitions.py` 提供候选状态机与类型化证据校验。selftest 第 21 组
+覆盖重复事件幂等、非法转换拒绝、跨 run 证据拒绝、快照删除后恢复、坏事件行报错和
+Phase 0–5 产物导入。**未实现**：Planner / Scheduler 自动派单、并发 claim / heartbeat、
+Intent 预算执行器。
 
 **验收**：重复事件可去重；非法状态转换被拒绝；快照可恢复；事件日志可回放；
 新增单测不改变现有 selftest 的门禁断言。

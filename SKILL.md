@@ -589,6 +589,8 @@ strings -a -t x usr/sbin/httpd | rg -i 'referer|cmd|ping|traceroute'
 
 静态链路完整 ≠ 可利用。固件场景还必须过三关：**能不能跑到这段代码**、**环境依赖（NVRAM/ioctl/硬件）能不能满足**、**有没有运行时防护**。
 
+黑板上对应 `pending_dynamic_validation → validated → confirmed`：`validated` 是静态/仿真链路闭合，`confirmed` 是动态复现后的最终态；两步都要过 `board_transitions.py check` 的类型化证据校验（证据绑定同一 run/固件、漏洞类型对应的证据类型与判据、触发上下文）。状态与事件日志是审计留痕，不替代 `coverage_gate.py` 的门禁判定。
+
 #### 前置：执行边界（在选路之前）
 
 **默认只做静态分析；任何"运行固件里的东西"都必须先过这张表。** 固件是攻击者可控输入：CGI、init 脚本、ELF 都可能带恶意载荷，解析器本身也可能是攻击面。
@@ -923,7 +925,7 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 | `references/emulation-fuzzing.md` | Phase 4 需要模拟与模糊的具体做法、踩坑与替代方案 |
 | `references/reporting.md` | Phase 5 需要报告字段、评分表、脱敏规范 |
 | `references/resource-index.md` | 需要外部资料：awesome-connected-things-sec 精编索引（按阶段映射） |
-| `references/data-contracts.md` | **跨阶段数据契约**：11 种 schema——FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / BenchResult 的字段、版本规则、strict 兼容边界、迁移清单 |
+| `references/data-contracts.md` | **跨阶段数据契约**：16 种 schema——FirmwareManifest / AuditTask / Candidate / Finding / Evidence（含 `evidence/1.1` 归一化） / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent 的字段、版本规则、strict 兼容边界、黑板事件与状态机、迁移清单 |
 
 ## 脚本
 
@@ -934,11 +936,14 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 | `scripts/coverage_gate.py` | Phase 5：覆盖率门禁校验 + **CVE 纪律检查**（`--report`）+ **审阅清单三方对齐**（`--review-list`）+ **G4 入口级覆盖**（`--entrypoints`）+ **G5 绕过矩阵**（`--bypass-check`）+ **G6 跨请求污点溯源**（`--cross-request`）+ **G7 跨请求污点图**（`--taint-graph`）+ **类型→Base 命中**（`--type-base`）+ **自动修复计划**（`--auto-recover`）+ **`--profile {light,standard,strict}` 档位与 `gate-config.json` 执行台账** |
 | `scripts/taint_graph.py` | Phase 3/5：跨请求污点图（BDG/ADG 最小实现）——`recover` 从反编译产物恢复常量键（literal / local-const / fill-composed），`build` 构图并校验「写请求 ≠ 触发读的请求、键一致、两端有证据、跨进程读带 via_control」；产出 `taint-graph.json` 供 G7 消费 |
 | `scripts/entrypoints_init.py` | Phase 3/5：从 `02-tiering.json` 生成入口枚举骨架 `entrypoints.json`（G4 的输入） |
-| `scripts/contracts.py` | Phase 0–5：数据契约校验（11 种 schema：FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest）；`--list` 列受支持版本，`--json` 出机器可读结果 |
+| `scripts/contracts.py` | Phase 0–5：数据契约校验（16 种 schema：FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent）；`--list` 列受支持版本，`--json` 出机器可读结果 |
+| `scripts/board_transitions.py` | M1 / Phase 3–5：候选状态机——`graph` 列合法转换，`check` 做类型化证据校验（run/固件绑定、证据类型、判据、触发上下文），`risk` 校验风险处置而非候选状态 |
+| `scripts/board_events.py` | M1：append-only 事件日志——`verify` 校验结构与 `seq` 连续性，`replay` 从日志重建快照；重复 `dedupe_key` 跳过，非法 JSON 行报错 |
+| `scripts/board_store.py` | M1：黑板存储与导入——`init` / `import` / `add` / `transition` / `intent` / `backtrack` / `replay` / `verify` / `show`；事件日志是真相源，快照可重建 |
 | `scripts/ealb_calib.py` | Phase 2：用实测工时样本校准 EALB；样本不足时只报 `heuristic`，达到门槛才标 `calibrated` |
 | `scripts/sandbox_run.py` | Phase 4：不可信固件的一次性隔离执行（`--network none`、只读根、cap-drop、非 root、内存/CPU/PID 限额）；无隔离运行时 **fail-closed**（退出 3），宿主机执行必须显式授权 |
 | `scripts/bench_eval.py` | Phase 5/回归：合成基准集上的 precision / recall / F1 / FPR 评估；`--baseline` 检测召回暴跌与 FPR 上升（退出码 3） |
-| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证其余九个脚本的判据，并把**文档示例命令与 CLI 参数表对拍**（20 组 / 165 条断言，结尾自报总数） |
+| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证其余十二个脚本的判据，并把**文档示例命令与 CLI 参数表对拍**；覆盖黑板事件/快照/状态机（21 组 / 202 条断言，结尾自报总数） |
 
 脚本都只用 Python 标准库，无第三方依赖，Windows / Linux / macOS 均可运行。用 `uv` 管理环境（`uv run` 自动建临时环境；无 `uv` 时直接 `python scripts/xxx.py` 亦可）。安装后建议先跑一次自检：
 

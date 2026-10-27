@@ -4,8 +4,8 @@
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">  
   <img alt="python" src="https://img.shields.io/badge/python-3.8%2B%20stdlib%20only-3776AB.svg?logo=python\&logoColor=white">  
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg">  
-  <img alt="files" src="https://img.shields.io/badge/package-54%20files%20%C2%B7%2018772%20lines-informational.svg">  
-  <img alt="selftest" src="https://img.shields.io/badge/selftest-165%20assertions%20passing-brightgreen.svg">  
+  <img alt="files" src="https://img.shields.io/badge/package-57%20files%20%C2%B7%2021460%20lines-informational.svg">  
+  <img alt="selftest" src="https://img.shields.io/badge/selftest-202%20assertions%20passing-brightgreen.svg">  
   <img alt="agent" src="https://img.shields.io/badge/type-Agent%20Skill-7B42BC.svg">  
 </p>
 
@@ -23,6 +23,7 @@
 - [七条铁律](#七条铁律)
 - [安装](#安装)
 - [快速开始](#快速开始)
+- [黑板（M1）](#黑板m1)
 - [路线图](#路线图)
 - [脚本](#脚本)
 - [参考文件](#参考文件)
@@ -168,13 +169,13 @@ npx skills add https://github.com/DroidKali/iot-firmware-vuln-hunting --agent '*
 
 常用管理命令：`npx skills list`（列出已装 Skill）、`npx skills update`（更新到最新）、`npx skills remove iot-firmware-vuln-hunting`（卸载）。
 
-**作为通用知识库使用** — 不安装也行：`git clone` 到任意位置，按 `SKILL.md` 的流程手工执行；十个脚本可独立运行。
+**作为通用知识库使用** — 不安装也行：`git clone` 到任意位置，按 `SKILL.md` 的流程手工执行；十三个脚本可独立运行。
 
 ### 前置依赖
 
 | 类别     | 说明                                                                                                                                                    |
 | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Python | 3.8+，**十个脚本只用标准库**，无第三方依赖，三平台均可运行。推荐用 [`uv`](https://github.com/astral-sh/uv) 管理（`uv run` 自动建临时环境）                                                    |
+| Python | 3.8+，**十三个脚本只用标准库**，无第三方依赖，三平台均可运行。推荐用 [`uv`](https://github.com/astral-sh/uv) 管理（`uv run` 自动建临时环境）                                                    |
 | 固件工具链  | 按判据**按需安装**，不必装齐：`unblob` / `binwalk` v3 / `moria` / `mithril` / `qemu-system-*` / `Qiling` / `AFL++` / `radare2`。Linux（Docker / WSL / Kali / AttifyOS）体验最好；Windows 宿主建议走 Docker |
 | 授权     | **只在获得书面授权（自有设备 / 客户授权 / SRC 范围）的目标上执行**，开工前把范围写进 `fw-audit/<target>/00-scope.md`                                                                     |
 
@@ -190,13 +191,15 @@ npx skills add https://github.com/DroidKali/iot-firmware-vuln-hunting --agent '*
 uv run scripts/selftest.py
 ```
 
-脚本会用纯 Python 手工构造合法 ELF64 与合成 rootfs，端到端跑通其余九个脚本，覆盖 **20 组 / 165 条断言**，其中包含「门禁必须拦下坏报告」的负向用例。断言总数由脚本自己在结尾打印，不需要去数日志。看到全绿即安装成功。
+脚本会用纯 Python 手工构造合法 ELF64 与合成 rootfs，端到端跑通其余十二个脚本，覆盖 **21 组 / 202 条断言**，其中包含「门禁必须拦下坏报告」的负向用例。断言总数由脚本自己在结尾打印，不需要去数日志。看到全绿即安装成功。
 
-`[14/20]` 把**文档当被测对象**：抓出 `README.md` / `SKILL.md` / `references/` / `assets/` 里每条 `scripts/*.py` 示例命令，逐个核对命令里出现的 `--flag` 是否真存在于脚本 `--help`（有子命令的会逐个进去问），并检查布尔开关后面没跟取值。这条守卫来自一次真实事故——文档把 `store_true` 的 `--tier` 写成 `--tier <rootfs>`，照抄必然报错，而所有单元测试都是绿的。
+`[14/21]` 把**文档当被测对象**：抓出 `README.md` / `SKILL.md` / `references/` / `assets/` 里每条 `scripts/*.py` 示例命令，逐个核对命令里出现的 `--flag` 是否真存在于脚本 `--help`（有子命令的会逐个进去问），并检查布尔开关后面没跟取值。这条守卫来自一次真实事故——文档把 `store_true` 的 `--tier` 写成 `--tier <rootfs>`，照抄必然报错，而所有单元测试都是绿的。
 
-`[15/20]` 用 DIR878 的动机样例（`SetNetwork` 写 `lan0_management_link`、`SetRouterLanSettings` 读进 `system`）跑通 BDG/ADG，并验证三条否决路径：同一 action 内读写必须判**一阶**、缺 evidence 必须失败、拼不出来的键必须记 `unknown` 而不是占位。
+`[15/21]` 用 DIR878 的动机样例（`SetNetwork` 写 `lan0_management_link`、`SetRouterLanSettings` 读进 `system`）跑通 BDG/ADG，并验证三条否决路径：同一 action 内读写必须判**一阶**、缺 evidence 必须失败、拼不出来的键必须记 `unknown` 而不是占位。
 
-`[16/20]`–`[20/20]` 覆盖本轮整改新增的契约与边界：候选清单里**非法 JSON 行必须逐行上报**、strict 只接受带 schema 的 envelope；扫描完整性/阶段状态降级必须可见且可阻断；`contracts.py` 校验 FirmwareManifest / AuditTask 并核对镜像哈希；`sandbox_run.py` 在无隔离运行时 **fail-closed**（退出 3），绝不静默回退宿主机；`bench_eval.py` 用合成基准复算 precision/recall，并验证相对基线的召回暴跌会以退出码 3 阻断。
+`[16/21]`–`[20/21]` 覆盖本轮整改新增的契约与边界：候选清单里**非法 JSON 行必须逐行上报**、strict 只接受带 schema 的 envelope；扫描完整性/阶段状态降级必须可见且可阻断；`contracts.py` 校验 FirmwareManifest / AuditTask 并核对镜像哈希；`sandbox_run.py` 在无隔离运行时 **fail-closed**（退出 3），绝不静默回退宿主机；`bench_eval.py` 用合成基准复算 precision/recall，并验证相对基线的召回暴跌会以退出码 3 阻断。
+
+`[21/21]` 覆盖 M1 黑板：Fact / Intent / EmulationResult / BoardState / BoardEvent 契约，事件日志去重与 `seq` 连续性，快照删除后从日志恢复，非法状态转换（`hypothesis → validated`）被拒绝，`validated → confirmed` 的类型化证据校验，以及 `BACKTRACK` 的当前阶段一致性。
 
 ### 2. 一次完整审计
 
@@ -255,6 +258,35 @@ uv run scripts/coverage_gate.py \
 
 ---
 
+## 黑板（M1）
+
+Phase 0–5 的**结构化产物仍是门禁的唯一真相源**；黑板是新增的探索状态层，负责把「事实 / 候选 / 意图 / 提示」持久化，让中断可恢复、重复动作可去重，但不改变 `coverage_gate.py` 的必填输入与判定口径。
+
+- `audit-events.jsonl`：append-only 事件日志，是**真相源**；`seq` 连续、`dedupe_key` 去重（时间戳不参与），空行可容忍，非法 JSON 行必须报 `PARSE_ERROR`。
+- `audit-board.json`：由事件日志重放得到的**快照**，仅作加速；删除或损坏后可从日志恢复，并标记 `recovered=true`。
+- 候选状态机：`validated` 表示静态 / 仿真链路闭合，`confirmed` 是动态复现后的最终态；进入两者都要过类型化证据校验。`ACCEPTED_WITH_RISK` 是风险处置，不是候选状态。
+- `BACKTRACK` 的 `from_phase` 必须等于黑板当前阶段，且只能向回退，否则报 `PHASE_MISMATCH` / `NOT_A_BACKTRACK`。
+
+```bash
+# 初始化：默认 phase=P0；导入中后期产物时可显式声明当前阶段
+uv run scripts/board_store.py init --workspace fw-audit/$TARGET/board \
+    --run-id RUN-001 --firmware-sha256 <64-hex> --manifest-id FW-2026-001
+
+# 导入已有 Phase 0–5 结构化产物（可只给其中几项）
+uv run scripts/board_store.py import --workspace fw-audit/$TARGET/board \
+    --manifest fw-audit/$TARGET/00-manifest.json \
+    --layer1 fw-audit/$TARGET/10-layer1-sinks.json \
+    --candidates fw-audit/$TARGET/20-findings-candidates.jsonl
+
+# 对账与查看：事件日志与快照必须一致
+uv run scripts/board_store.py verify --workspace fw-audit/$TARGET/board
+uv run scripts/board_store.py show --workspace fw-audit/$TARGET/board
+```
+
+事件结构、去重与状态机的完整字段见 [references/data-contracts.md](references/data-contracts.md) §12–§16。
+
+---
+
 ## 路线图
 
 当前主线是在不破坏 Phase 0–5 确定性流水线的前提下，增加 **Blackboard 动态探索层**：控制平面继续负责证据完整性、覆盖率、Strict 门禁、沙箱与预算，黑板只记录 Fact / Candidate / Intent / Hint 并驱动受控探索。模型和工具可以提出线索，但不能自行认定漏洞成立或绕过硬门禁。
@@ -274,7 +306,7 @@ uv run scripts/coverage_gate.py \
 
 ## 脚本
 
-十个脚本都**只用 Python 标准库**，无第三方依赖。
+十三个脚本都**只用 Python 标准库**，无第三方依赖。
 
 | 脚本                         | 行数   | 用途                                                              |
 | -------------------------- | ---- | --------------------------------------------------------------- |
@@ -283,11 +315,14 @@ uv run scripts/coverage_gate.py \
 | `scripts/taint_graph.py`   | 800  | Phase 3 / 5：跨请求污点图（BDG/ADG 最小实现）——`recover` 恢复动态拼接的键（literal / local-const / fill-composed），`build` 构图并校验「写请求 ≠ 触发读的请求、键一致、两端有证据、跨进程读带 via_control」，产出 `taint-graph.json` |
 | `scripts/coverage_gate.py` | 2759 | Phase 5：覆盖率门禁 + CVE 纪律检查（`--report`，V0–V4）+ 审阅清单三方对齐（`--review-list`）+ G4 入口级覆盖 + G5 绕过矩阵 + **G6 跨请求污点溯源** + **G7 跨请求污点图** + 类型→Base + 自动修复计划 + **扫描完整性/结构引擎/阶段状态/清单/审计任务契约** + **`--profile strict` 档位** + **`gate-config.json` 执行台账** |
 | `scripts/entrypoints_init.py` | 139 | Phase 3 / 5：从 `02-tiering.json` 生成 `entrypoints.json` 骨架（`--merge` 保留已手填数据） |
-| `scripts/contracts.py`     | 489  | Phase 0–5：跨阶段数据契约校验（11 种 schema：FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest），`--list` 列版本、`--json` 出机器可读结果 |
+| `scripts/contracts.py`     | 1006 | Phase 0–5：跨阶段数据契约校验（16 种 schema：FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent），`--list` 列版本、`--json` 出机器可读结果 |
+| `scripts/board_transitions.py` | 476 | Phase 3–5 / M1：Candidate 状态机与类型化验证——`graph` 输出合法转换，`check` 校验证据绑定/类型/判据/触发上下文，拒绝 `ACCEPTED_WITH_RISK` 充当候选状态 |
+| `scripts/board_events.py` | 479 | M1：append-only 黑板事件日志——`verify` 校验结构与 `seq` 连续性，`replay` 从日志重建 `audit-board.json`；非法 JSON 行报 `PARSE_ERROR`，不静默跳过 |
+| `scripts/board_store.py` | 650 | M1：黑板存储——`init` 建日志与快照，`import` 导入 Phase 0–5 产物，`transition` 走状态机，`backtrack` 记录回退，`verify` 对账 |
 | `scripts/ealb_calib.py`    | 319  | Phase 2：用实测工时样本校准 EALB——未达样本量时只报 `heuristic`，达标才允许标 `calibrated` |
 | `scripts/sandbox_run.py`   | 1059 | Phase 4：不可信固件的一次性隔离执行（无运行时 **fail-closed**，退出 3；宿主机执行必须显式 `--mode host --i-understand-host-risk`） |
 | `scripts/bench_eval.py`    | 2473 | Phase 5 / 回归：合成基准集上的 precision / recall / F1 / FPR 评估，`--baseline` 检测召回暴跌与 FPR 上升（退出码 3） |
-| `scripts/selftest.py`      | 1571 | 安装自检：合成固件与 rootfs，端到端验证其余九个脚本的判据 + **文档与 CLI 一致性** + 基准回归（20 组 / 165 条断言，结尾自报总数）                 |
+| `scripts/selftest.py`      | 1898 | 安装自检：合成固件与 rootfs，端到端验证其余十二个脚本的判据 + **文档与 CLI 一致性** + 基准回归 + 黑板事件/快照/状态机（21 组 / 202 条断言，结尾自报总数）                 |
 
 ### 覆盖率门禁判据
 
@@ -359,7 +394,7 @@ uv run scripts/coverage_gate.py \
 
 四类跳过原因分开记：`skip-dir`（设计如此）/ `excluded`（调用方排除）/ `too-large`（能力边界）/ `stat-failed`（异常）。v1.3 起再给出归一后的 `verdict`（`complete` / `scoped` / `partial` / `failed`）：`partial` 或 `failed` 进 Phase 5 门禁即阻断，`scoped` 需由 `--scan-waiver` 逐条列明豁免理由。**`complete: false` 时不得在报告里声称「已完整扫描」**——直接把 `scan_integrity` 贴进报告附录即可。
 
-> 旧实现只 `f.read(8 << 20)`，20 MB 的 CGI 二进制后半段一个字符串都扫不到，输出里还看不出来。回归测试 `[13/20]` 用 9.5 MiB 偏移与跨块边界两个样本把这条钉死；`[17/20]` 再验证「partial/failed 必须阻断、豁免必须逐条留痕」。
+> 旧实现只 `f.read(8 << 20)`，20 MB 的 CGI 二进制后半段一个字符串都扫不到，输出里还看不出来。回归测试 `[13/21]` 用 9.5 MiB 偏移与跨块边界两个样本把这条钉死；`[17/21]` 再验证「partial/failed 必须阻断、豁免必须逐条留痕」。
 
 ---
 
@@ -378,7 +413,7 @@ uv run scripts/coverage_gate.py \
 | `references/sink-patterns.md`     | 257 | 需要扩充或理解静态扫描规则（含 `structural` 结构级规则 schema），或手写 grep / YARA                        |
 | `references/vuln-taxonomy.md`     | 218 | 需要按攻击面 / 漏洞类型逐项核查（后门账号、命令注入、OTA、MQTT、U-Boot…）        |
 | `references/resource-index.md`    | 233 | 需要外部资料：awesome-connected-things-sec 精编索引（按阶段映射）      |
-| `references/data-contracts.md`   | 195 | **跨阶段数据契约**：FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / BenchResult 的字段、版本规则、strict 兼容边界、迁移清单 |
+| `references/data-contracts.md`   | 384 | **跨阶段数据契约**：16 种 schema——FirmwareManifest / AuditTask / Candidate / Finding / Evidence（含 `evidence/1.1` 归一化） / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent 的字段、版本规则、strict 兼容边界、黑板事件与状态机、迁移清单 |
 
 ---
 
@@ -400,7 +435,7 @@ iot-firmware-vuln-hunting/
 │   ├── sink-patterns.md          # 静态扫描模式库 schema 与规则说明
 │   ├── emulation-fuzzing.md      # 模拟与模糊测试实操
 │   ├── reporting.md              # 报告规范 + IoT 评分 + DKTSS
-│   └── data-contracts.md         # 11 种 schema 的数据契约 + strict 兼容边界 + 迁移清单
+│   └── data-contracts.md         # 16 种 schema 的数据契约 + 黑板事件/状态机 + strict 兼容边界
 ├── assets/
 │   ├── sink-rules.json           # 38 条规则 / 15 类（数据驱动扫描，含 cross-request 跨请求污点与 structural 结构级二次过滤）
 │   ├── ipc-functions.json        # IPC 原语词表：写/读端、键参数位置、控制/持久化标记、集中性阈值、sink 分类、AEH 模式
@@ -409,7 +444,7 @@ iot-firmware-vuln-hunting/
 │   ├── ealb-measures-sample.jsonl # EALB 实测工时样本（校准输入）
 │   ├── bench/                    # 合成基准集：manifest.json + samples/B-001…B-011
 │   └── report-template.md        # 固定 7 区块报告模板
-└── scripts/                      # 10 个纯标准库 Python 脚本
+└── scripts/                      # 13 个纯标准库 Python 脚本
     ├── fw_triage.py
     ├── sink_scan.py
     ├── taint_graph.py
@@ -419,6 +454,9 @@ iot-firmware-vuln-hunting/
     ├── ealb_calib.py
     ├── sandbox_run.py
     ├── bench_eval.py
+    ├── board_transitions.py
+    ├── board_events.py
+    ├── board_store.py
     └── selftest.py
 ```
 
