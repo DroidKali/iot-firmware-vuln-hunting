@@ -46,7 +46,7 @@ SUPPORTED: Dict[str, List[str]] = {
     "audit-stages": ["audit-stages/1.0"],
     "scan-waiver": ["scan-waiver/1.0"],
     "bench-manifest": ["bench-manifest/1.0"],
-    "sandbox-run": ["sandbox-run/1.0"],
+    "sandbox-run": ["sandbox-run/1.1", "sandbox-run/1.0"],
     # ── 黑板（M1）：事实、意图、提示、仿真结果、快照与事件 ──────────────────
     "fact": ["fact/1.0"],
     "intent": ["intent/1.0"],
@@ -543,16 +543,63 @@ def validate_bench_manifest(obj: Any) -> List[Dict[str, str]]:
     return out
 
 
+ADMISSION_DECISIONS = ("admitted", "rejected", "checked",
+                       "queue-timeout", "budget-exhausted")
+
+
 def validate_sandbox_run(obj: Any) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
     if not _schema(out, obj, "run", "sandbox-run"):
         return out
-    _enum(out, obj, "run", "mode", ("sandbox", "host-opt-in", "check"))
+    _enum(out, obj, "run", "mode",
+          ("sandbox", "host-opt-in", "fail-closed", "check"))
     _req(out, obj, "run", "command", list)
     _req(out, obj, "run", "policy", dict)
     if obj.get("host_fallback") is not False:
         _err(out, "run.host_fallback", "POLICY",
              "host_fallback 必须为 false：隔离不可用只能失败关闭")
+
+    # 1.1 的增量：admission 是机器可读的资源准入结论。没有它就无法区分
+    # 「命令失败」和「根本没被允许启动」，1.1 必须要求。
+    if obj.get("schema") == "sandbox-run/1.1":
+        adm = obj.get("admission")
+        if not isinstance(adm, dict):
+            _err(out, "run.admission", "MISSING", "1.1 必须带 admission 对象")
+            return out
+        _enum(out, adm, "run.admission", "decision", ADMISSION_DECISIONS)
+        if "code" not in adm:
+            _err(out, "run.admission.code", "MISSING", "admission.code 必填（可为 null）")
+        elif adm.get("code") is not None and not isinstance(adm.get("code"), str):
+            _err(out, "run.admission.code", "BAD_TYPE", "code 必须是字符串或 null")
+        _req(out, adm, "run.admission", "policy", dict)
+        _hex(out, adm, "run.admission", "policy_sha256")
+        slots = adm.get("slots")
+        if not isinstance(slots, dict):
+            _err(out, "run.admission.slots", "MISSING", "缺少 slots 对象")
+        else:
+            _opt_int(out, slots, "run.admission.slots", "limit", minimum=1)
+            _opt_int(out, slots, "run.admission.slots", "slot")
+            wait = slots.get("wait_s")
+            if isinstance(wait, bool) or not isinstance(wait, (int, float)):
+                _err(out, "run.admission.slots.wait_s", "BAD_TYPE",
+                     "wait_s 必须是数字")
+            if "queued" in slots and not isinstance(slots.get("queued"), bool):
+                _err(out, "run.admission.slots.queued", "BAD_TYPE", "queued 必须是布尔值")
+            if not isinstance(slots.get("state_dir"), str) or not slots.get("state_dir"):
+                _err(out, "run.admission.slots.state_dir", "MISSING",
+                     "state_dir 必须是非空字符串")
+        budget = adm.get("budget")
+        if not isinstance(budget, dict):
+            _err(out, "run.admission.budget", "MISSING", "缺少 budget 对象")
+        else:
+            for key in ("limit_s", "used_s", "remaining_s"):
+                val = budget.get(key)
+                if isinstance(val, bool) or not isinstance(val, (int, float)):
+                    _err(out, f"run.admission.budget.{key}", "BAD_TYPE",
+                         f"{key} 必须是数字")
+        req = adm.get("request")
+        if not isinstance(req, dict):
+            _err(out, "run.admission.request", "MISSING", "缺少 request 对象")
     return out
 
 

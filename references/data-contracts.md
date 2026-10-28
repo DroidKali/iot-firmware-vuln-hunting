@@ -1,4 +1,4 @@
-# 数据契约（FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / SandboxRun / BenchManifest / 黑板对象）
+# 数据契约（FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / SandboxRun / BenchManifest / 黑板对象 / 执行路径）
 
 本文件定义跨阶段传递的结构化数据，以及**校验入口、版本规则、兼容模式边界**。目标是消除「同一事实在 plan、报告、gate-config 里三种写法」的漂移：任何下游脚本要消费上游产物时，先看 schema 版本，再按本文件取字段。
 
@@ -165,23 +165,64 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 
 `WARN` 不参与 `result` 判定，但必须出现在报告里：它表示「降级但可继续」，例如结构引擎不可用而退回正则。
 
-## 8. SandboxRun（`sandbox-run/1.0`）
+## 8. SandboxRun（`sandbox-run/1.1`，兼容 1.0）
 
-不可信固件每次执行的留痕。由 `scripts/sandbox_run.py` 产出，动态证据用它证明「命令确实在隔离环境里跑过」。
+不可信固件每次执行的留痕。由 `scripts/sandbox_run.py` 产出，动态证据用它证明「命令确实在隔离环境里跑过」。1.1 增加资源准入（`admission`）；1.0 仍可校验，但缺少准入记录，不得用于证明并发/预算受控。
 
 | 字段 | 类型 | 必需 | 说明 |
 |---|---|---|---|
-| `schema` | string | ✅ | `sandbox-run/1.0` |
+| `schema` | string | ✅ | `sandbox-run/1.1` 或 `sandbox-run/1.0` |
 | `mode` | enum | ✅ | `sandbox`（容器）/ `host-opt-in`（显式授权宿主机）/ `check`（只探测）/ `fail-closed`（拒绝执行） |
 | `host_fallback` | bool | ✅ | **必须为 false**：隔离不可用只能失败关闭，不得回退宿主机 |
 | `command` | array | ✅ | 实际执行的 argv（容器模式含全部隔离参数） |
 | `policy` | object | ✅ | 生效的网络/内存/CPU/PID/只读/用户策略 |
-| `runtime` | object | — | 运行时名、版本、路径、探测结果 |
+| `admission` | object | 1.1 ✅ | 准入决策、策略哈希、请求资源、槽位等待与预算；见 §8.2 |
+| `runtime` | object | — | 运行时名、版本、路径、探测结果；`argv` 为实际用于启动运行时的前缀 |
 | `mounts.firmware` | object | — | `{path, sha256, read_only, target}`；`sha256` 是目录指纹 |
 | `exit_code` / `timed_out` | int / bool | — | 命令退出码与超时标志 |
 | `stdout_head` / `stderr_head` | string | — | 有界截断的输出摘要 |
 
-退出码：`0` 成功 / `1` 命令失败 / `2` 用法 / `3` 隔离不可用（fail-closed）/ `4` 策略拒绝 / `124` 超时。
+退出码：`0` 成功 / `1` 命令失败 / `2` 用法 / `3` 隔离不可用（fail-closed）/ `4` 策略或授权拒绝 / `5` 资源准入拒绝（排队超时或预算耗尽）/ `124` 超时。
+
+容器模式会为 `--out` 目录补 other rwx + sticky（保留 owner/group 位，通常 0755 → 1757）后再挂载：bind mount 不做 UID 映射，容器内固定以 uid 65534 运行，否则写 `/out` 会 `Permission denied`。host 模式不改用户原目录权限；调整结果写入 `notes`，不属于 `sandbox-run` 契约字段。
+
+### 8.1 SandboxPolicy（`sandbox-policy/1.0`）
+
+由 `scripts/resource_manager.py` 校验，**不在 `contracts.py` 的 16 种 schema 内**。策略是运维配置，不是每次运行的产物；其规范化 JSON 的 sha256 写入 `admission.policy_sha256`，用于证明「这次执行用的是哪份策略」。
+
+| 字段 | 默认 | 约束 | 说明 |
+|---|---|---|---|
+| `schema` | — | 必填 | `sandbox-policy/1.0` |
+| `max_concurrency` | 1 | 1–64 | 同时执行的槽位数；超出排队，**不得先启动再等** |
+| `queue_timeout_s` | 300 | 0–86400 | 排队上限；超时报 `QUEUE_TIMEOUT` |
+| `max_total_seconds` | 1800 | 1–86400 | 单次请求的墙钟总预算（含排队、探测、执行、清理） |
+| `max_timeout_s` | 300 | 1–86400 | 单条命令超时上限，且不得大于总预算 |
+| `max_memory_mb` | 1024 | 16–1048576 | 容器内存上限 |
+| `max_cpus` | 2.0 | 0.1–256 | CPU 上限 |
+| `max_pids` | 256 | 8–1048576 | PID 上限 |
+| `allowed_images` | null | null 或非空字符串数组 | 镜像白名单；null 表示不限 |
+| `allow_host` | true | bool | 是否允许显式授权的宿主机模式；收紧时设 false |
+
+未知字段直接 `UNKNOWN_FIELD`，不做静默忽略。CLI：`resource_manager.py validate --policy FILE`、`resource_manager.py defaults --json`；退出码 0 合法 / 1 不合法 / 2 用法。
+
+### 8.2 admission（`sandbox-run/1.1`）
+
+| 字段 | 说明 |
+|---|---|
+| `decision` | `admitted` / `rejected` / `checked` / `queue-timeout` / `budget-exhausted` |
+| `code` / `message` | 拒绝或降级的原因；成功时为 null / 空串 |
+| `policy` / `policy_sha256` / `policy_source` | 生效策略全文、其 sha256、来源（文件路径或 `defaults`） |
+| `request` | `{mode, timeout, memory, cpus, pids, image}`，即本次申请的资源 |
+| `slots` | `{limit, slot, wait_s, queued, state_dir}`；`wait_s` 是实际排队时间 |
+| `budget` | `{limit_s, used_s, remaining_s}`；`used_s` 从进程启动起算 |
+
+语义：`--check` 只探测、不占槽、不建状态目录；容器模式与显式宿主机模式都先占槽再执行；预算在排队阶段就已消耗，剩余不足 1 秒即拒绝启动。准入拒绝退出码为 5，且 JSON `command=[]`、`exit_code=null`——「没启动」必须能从记录里看出来。
+
+### 8.3 ExecPaths（`exec-paths/1.0`）
+
+`scripts/exec_paths.py` 用 AST 扫描 `scripts/*.py` 的子进程调用，防止新增执行路径绕过统一入口。字段：`schema` / `tool` / `version` / `generated_at` / `root` / `files_scanned` / `total_paths` / `counts` / `ok` / `paths` / `unclassified`。每条 path 记录 `file` / `line` / `api` / `scope` / `call` / `classification` / `input_trust` / `note`。
+
+分类：`sandbox-boundary`（固件执行边界，必须经 `sandbox_run.py`）、`host-static-analyzer`（只解析不可信字节、不执行）、`trusted-metadata`（可信本地元数据）、`test-harness`、`inventory`。出现未知文件即 `unclassified` 并退出 1。当前 15 个脚本共 9 条调用；`sink_scan.py:131` / `sink_scan.py:148` 的 ast-grep / semgrep 仍是 `host-static-analyzer`，是已知残留风险（只解析、不执行）。
 
 ## 9. BenchManifest / BenchResult（`bench-manifest/1.0` / `bench-result/1.0`）
 

@@ -21,16 +21,18 @@ import os
 import random
 import re
 import shutil
+import stat
 import struct
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 FAILS: list = []
 TOTAL = 0          # 实际执行的断言数：由脚本自己报，避免文档里的数字靠数日志漂移
-NGROUPS = 21       # 组数：与各处 [N/21] 表头一致，末尾会自校验，防止「13 组」再次漂移
+NGROUPS = 22       # 组数：与各处 [N/22] 表头一致，末尾会自校验，防止「13 组」再次漂移
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -167,11 +169,11 @@ VERIFIED_PARTIAL = """# 审计结论
 """
 
 
-def run(args: list) -> subprocess.CompletedProcess:
+def run(args: list, env=None) -> subprocess.CompletedProcess:
     # 子进程一律按 UTF-8 解码：Windows 默认用 GBK，中文/箭头/省略号会把
     # _readerthread 打崩，stdout/stderr 变成 None，断言随后 AttributeError。
     return subprocess.run([PY] + args, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace")
+                          encoding="utf-8", errors="replace", env=env)
 
 
 # ------------------------------------------------- 文档 ↔ CLI 一致性（第 14 组）
@@ -299,7 +301,7 @@ def main() -> int:
         with open(p, "w", encoding="utf-8", newline="\n") as f:
             f.write(txt)
 
-    print("\n[1/21] fw_triage.py — 度量 / 加固画像 / 分层")
+    print("\n[1/22] fw_triage.py — 度量 / 加固画像 / 分层")
     r = run([os.path.join(HERE, "fw_triage.py"), img, "--rootfs", root, "--tier",
              "--budget", "800", "--out", metrics, "--plan", plan, "--pretty"])
     check("fw_triage 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
@@ -327,7 +329,7 @@ def main() -> int:
     check("T3 含 www/index.html", "www/index.html" in set(t["t3_list"]))
     check("EALB > 0", t["ealoc_total"] > 0, str(t["ealoc_total"]))
 
-    print("\n[2/21] sink_scan.py — Layer 1 危险模式扫描")
+    print("\n[2/22] sink_scan.py — Layer 1 危险模式扫描")
     r = run([os.path.join(HERE, "sink_scan.py"), root, "--json", sinks])
     check("sink_scan 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
     if r.returncode != 0:
@@ -341,19 +343,19 @@ def main() -> int:
     check("etc/passwd 不再误报 P1-S-020", ("P1-S-020", "etc/passwd") not in key)
     check("文档目录被跳过", not any(f["file"].startswith("usr/share/doc") for f in sd["findings"]))
 
-    print("\n[3/21] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
+    print("\n[3/22] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vpart, "--tiering", tiering])
     check("不完整输入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
 
-    print("\n[4/21] coverage_gate.py — 覆盖率门禁（完整应通过）")
+    print("\n[4/22] coverage_gate.py — 覆盖率门禁（完整应通过）")
     out = os.path.join(base, "40-coverage.md")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vfull, "--tiering", tiering, "--out", out])
     check("完整输入 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("门禁报告已生成", os.path.isfile(out))
 
-    print("\n[5/21] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
+    print("\n[5/22] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
     bad_rep = os.path.join(base, "report-bad.md")
     with open(bad_rep, "w", encoding="utf-8") as fh:
         fh.write(
@@ -441,7 +443,7 @@ def main() -> int:
     check("⑥ 保留指针行（移动语义）→ 退出码 0", r.returncode == 0,
           r.stdout.strip()[-200:])
 
-    print("\n[6/21] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
+    print("\n[6/22] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
     review_bad = os.path.join(base, "25-review-list.md")
     with open(review_bad, "w", encoding="utf-8") as fh:
         fh.write("- [x] `www/cgi-bin/ping.cgi`\n"     # 有结论 → OK
@@ -473,7 +475,7 @@ def main() -> int:
     check("审阅清单一致 → 退出码 0", r.returncode == 0,
           r.stdout.strip()[-160:])
 
-    print("\n[7/21] coverage_gate.py — 报告 9 必填字段校验")
+    print("\n[7/22] coverage_gate.py — 报告 9 必填字段校验")
     f_bad = os.path.join(base, "report-fields-bad.md")
     with open(f_bad, "w", encoding="utf-8") as fh:
         fh.write(
@@ -509,7 +511,7 @@ def main() -> int:
     check("9 字段齐全 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("报告模板字段不误报", _template_fields_clean())
 
-    print("\n[8/21] coverage_gate.py — G4 入口级覆盖（文件级 100% ≠ 入口级 100%）")
+    print("\n[8/22] coverage_gate.py — G4 入口级覆盖（文件级 100% ≠ 入口级 100%）")
     tj_g4 = os.path.join(base, "02-tiering-g4.json")
     with open(tj_g4, "w", encoding="utf-8") as fh:
         json.dump({"rootfs_analysis": {"tiering": {"shards": [{"items": [
@@ -551,7 +553,7 @@ def main() -> int:
              "--entrypoints", ep_ok, "--out", os.path.join(base, "40-g4c.md")])
     check("入口枚举 + 全部处置 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
 
-    print("\n[9/21] coverage_gate.py — G5 绕过矩阵（「有防护」≠「防护有效」）")
+    print("\n[9/22] coverage_gate.py — G5 绕过矩阵（「有防护」≠「防护有效」）")
     vp_bad = os.path.join(base, "30-claim-bad.md")
     with open(vp_bad, "w", encoding="utf-8") as fh:
         fh.write("# 结论\n\n## F-001 · x\n\n- 影响: 已鉴权，不可利用\n")
@@ -581,7 +583,7 @@ def main() -> int:
     check("G5 端到端接入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
     check("检出绕过矩阵缺失", "绕过矩阵完备（G5）" in open(out_g5, encoding="utf-8").read())
 
-    print("\n[10/21] coverage_gate.py — G6 跨请求污点溯源（持久化来源须声明写入面）")
+    print("\n[10/22] coverage_gate.py — G6 跨请求污点溯源（持久化来源须声明写入面）")
     _F = ("- **类型**：命令注入\n- **位置**：`usr/sbin/httpd:0x1`\n- **优先级**：P1\n"
           "- **置信度**：CONFIRMED\n- **CVSS 3.1**：`AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H` = 9.8\n"
           "{src}- **Sink**：system()\n- **完整调用链**：1. a @0x1\n- **证据**：`[E1]` disasm\n")
@@ -616,7 +618,7 @@ def main() -> int:
              os.path.join(base, "40-g6b.md")])
     check("声明写入面端到端 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
 
-    print("\n[11/21] coverage_gate.py — G1/G2/G3 自动修复 + 类型→Base 命中")
+    print("\n[11/22] coverage_gate.py — G1/G2/G3 自动修复 + 类型→Base 命中")
     out_rec = os.path.join(base, "40-recover.md")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vpart, "--tiering", tiering,
@@ -650,7 +652,7 @@ def main() -> int:
     check("可映射类型 → 不报",
           not _cg.check_type_base(rep_mapped, base_md)["unmapped"])
 
-    print("\n[12/21] sink_scan.py — 结构级二次过滤（正则初筛 → 结构确认 / 否定 / 回退）")
+    print("\n[12/22] sink_scan.py — 结构级二次过滤（正则初筛 → 结构确认 / 否定 / 回退）")
     if HERE not in sys.path:
         sys.path.insert(0, HERE)
     import sink_scan as _ss  # noqa
@@ -729,7 +731,7 @@ def main() -> int:
         _ss.structural_match = _orig_sm
 
     # ── 13. 扫描完整性 + 门禁严格性（改进计划 §3 / §4 / §6 的回归）──────────
-    print("\n[13/21] 扫描完整性与门禁严格性")
+    print("\n[13/22] 扫描完整性与门禁严格性")
 
     sz = os.path.join(base, "scanint")
     os.makedirs(sz, exist_ok=True)
@@ -891,7 +893,7 @@ def main() -> int:
     check("组数常量与表头数量一致", n_hdr == NGROUPS, f"表头 {n_hdr} / 常量 {NGROUPS}")
 
     # ── 15. 高阶污点图：写面/读面必须分属不同 action ──────────────────────────
-    print("\n[15/21] taint_graph.py — 跨请求污点图（BDG/ADG）与 G7 门禁")
+    print("\n[15/22] taint_graph.py — 跨请求污点图（BDG/ADG）与 G7 门禁")
     tg = os.path.join(base, "tg")
     os.makedirs(tg, exist_ok=True)
     TG = os.path.join(HERE, "taint_graph.py")
@@ -1072,7 +1074,7 @@ def main() -> int:
           and r.returncode != 0, f"{row.get('status')}/{row.get('required')}")
 
     # ── 16. 候选输入契约：解析失败必须可见，strict 只吃版本化输入 ─────────────
-    print("\n[16/21] 候选输入契约：解析失败可见 / strict 只接受版本化输入")
+    print("\n[16/22] 候选输入契约：解析失败可见 / strict 只接受版本化输入")
     cd16 = os.path.join(base, "cand")
     os.makedirs(cd16, exist_ok=True)
 
@@ -1172,7 +1174,7 @@ def main() -> int:
           f"rc={rr.returncode}")
 
     # ── 17. 扫描完整性 / 阶段状态 / 结构引擎：降级可见，且 strict 能阻断 ─────
-    print("\n[17/21] 扫描完整性与阶段状态：降级可见、可阻断")
+    print("\n[17/22] 扫描完整性与阶段状态：降级可见、可阻断")
     sd17 = os.path.join(base, "scangate")
     os.makedirs(sd17, exist_ok=True)
     layer1_partial = os.path.join(sz, "out2.json")
@@ -1283,7 +1285,7 @@ def main() -> int:
           f"{row.get('status')}/{row.get('required')} rc={rr.returncode}")
 
     # ── 18. 结构化契约 / 固件清单 / EALB 校准 ────────────────────────────────
-    print("\n[18/21] 契约校验（contracts.py）、FirmwareManifest、EALB 校准")
+    print("\n[18/22] 契约校验（contracts.py）、FirmwareManifest、EALB 校准")
     cd18 = os.path.join(base, "contracts")
     os.makedirs(cd18, exist_ok=True)
     CONTRACTS = os.path.join(HERE, "contracts.py")
@@ -1408,7 +1410,7 @@ def main() -> int:
           json.dumps((ee.get("targets") or {}).get("minutes") or {},
                      ensure_ascii=False))
 
-    print("\n[19/21] sandbox_run.py — 不可信固件的隔离边界（fail-closed）")
+    print("\n[19/22] sandbox_run.py — 不可信固件的隔离边界（fail-closed）")
     SANDBOX = os.path.join(HERE, "sandbox_run.py")
     sb_dir = os.path.join(base, "sandbox")
     os.makedirs(sb_dir, exist_ok=True)
@@ -1474,7 +1476,7 @@ def main() -> int:
           rr.returncode == 4, f"rc={rr.returncode}")
 
     # ── 20. 基准评估：指标可复算、严格模式不吞未复核标签、回归可阻断 ──────────
-    print("\n[20/21] bench_eval.py — 基准评估（precision/recall/回归阻断）")
+    print("\n[20/22] bench_eval.py — 基准评估（precision/recall/回归阻断）")
     BENCH = os.path.join(HERE, "bench_eval.py")
     bench_manifest = os.path.join(os.path.dirname(HERE), "assets", "bench", "manifest.json")
     bd = os.path.join(base, "bench")
@@ -1556,7 +1558,7 @@ def main() -> int:
               f"rc={rr.returncode} reasons={db.get('regression_reasons')}")
 
     # ── 21. 黑板：契约 / 事件日志 / 快照恢复 / 状态机 ────────────────────────
-    print("\n[21/21] board_* — 黑板契约、事件日志、快照恢复与状态转换")
+    print("\n[21/22] board_* — 黑板契约、事件日志、快照恢复与状态转换")
     BOARD = os.path.join(HERE, "board_store.py")
     BEV = os.path.join(HERE, "board_events.py")
     BTR = os.path.join(HERE, "board_transitions.py")
@@ -1881,6 +1883,226 @@ def main() -> int:
           any(e.get("emulation_id") == "EM-21"
               for e in st21.get("emulation_results") or [])
           and run([BOARD, "verify", "--workspace", ws21]).returncode == 0)
+
+    print("\n[22/22] resource_manager.py — 资源准入、并发排队与执行路径清单")
+    RM = os.path.join(HERE, "resource_manager.py")
+    EXECP = os.path.join(HERE, "exec_paths.py")
+    q22 = os.path.join(base, "resource22")
+    os.makedirs(q22, exist_ok=True)
+    fw22 = os.path.join(q22, "fw")
+    os.makedirs(fw22, exist_ok=True)
+    with open(os.path.join(fw22, "README"), "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("synthetic rootfs\n")
+
+    def _w22(name: str, obj) -> str:
+        path = os.path.join(q22, name)
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(obj, fh, ensure_ascii=False, indent=2)
+        return path
+
+    def _r22(path: str):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return {}
+
+    def _env22(extra=None):
+        env = os.environ.copy()
+        env["PYTHONUTF8"] = "1"
+        env.update(extra or {})
+        return env
+
+    strict_pol = _w22("policy-strict.json", {
+        "schema": "sandbox-policy/1.0", "max_concurrency": 1,
+        "queue_timeout_s": 5, "max_total_seconds": 30, "max_timeout_s": 20,
+        "max_memory_mb": 512, "max_cpus": 1, "max_pids": 64,
+        "allowed_images": ["debian:bookworm-slim"], "allow_host": False})
+    rr = run([RM, "validate", "--policy", strict_pol])
+    pd = _pj(rr.stdout)
+    check("resource_manager：策略通过校验并给出策略 sha256",
+          rr.returncode == 0 and pd.get("ok") is True
+          and len(str(pd.get("sha256") or "")) == 64,
+          f"rc={rr.returncode}")
+
+    bad_pol = _w22("policy-bad.json", {
+        "schema": "sandbox-policy/1.0", "max_concurrency": 1,
+        "queue_timeout_s": 5, "max_total_seconds": 30, "max_timeout_s": 20,
+        "max_memory_mb": 512, "max_cpus": 1, "max_pids": 64,
+        "allow_host": True, "surprise": 1})
+    rr = run([RM, "validate", "--policy", bad_pol])
+    codes = [e.get("code") for e in (_pj(rr.stdout).get("errors") or [])
+             if isinstance(e, dict)]
+    check("resource_manager：未知策略字段被拒绝（UNKNOWN_FIELD）",
+          rr.returncode == 1 and "UNKNOWN_FIELD" in codes,
+          f"rc={rr.returncode} codes={codes}")
+
+    # 资源上限逐项拒绝：每项只越过一个上限，确保失败原因可归因。
+    def _reject(name, extra, code):
+        out = os.path.join(q22, name + ".json")
+        args = [SANDBOX, "--firmware", fw22, "--policy", strict_pol,
+                "--json", out, "--timeout", "10", "--pids", "64"] + extra
+        rr = run(args)
+        adm = _r22(out).get("admission") or {}
+        check("资源准入：" + name + " → " + code + "（退出 4，未执行）",
+              rr.returncode == 4 and adm.get("code") == code,
+              f"rc={rr.returncode} code={adm.get('code')}")
+
+    _reject("timeout-limit", ["--timeout", "30"], "TIMEOUT_LIMIT")
+    _reject("memory-limit", ["--memory", "2g"], "MEMORY_LIMIT")
+    _reject("cpu-limit", ["--cpus", "4"], "CPU_LIMIT")
+    _reject("pids-limit", ["--pids", "256"], "PIDS_LIMIT")
+    _reject("image-limit", ["--image", "evil:latest"], "IMAGE_NOT_ALLOWED")
+
+    out = os.path.join(q22, "host-forbidden.json")
+    rr = run([SANDBOX, "--firmware", fw22, "--mode", "host",
+              "--i-understand-host-risk", "--cmd", "echo ok",
+              "--policy", strict_pol, "--timeout", "10", "--pids", "64",
+              "--json", out])
+    adm = _r22(out).get("admission") or {}
+    check("资源准入：策略禁止 host 模式 → HOST_FORBIDDEN（不得回落）",
+          rr.returncode == 4 and adm.get("code") == "HOST_FORBIDDEN",
+          f"rc={rr.returncode} code={adm.get('code')}")
+
+    slot_pol = _w22("policy-slots.json", {
+        "schema": "sandbox-policy/1.0", "max_concurrency": 1,
+        "queue_timeout_s": 10, "max_total_seconds": 120, "max_timeout_s": 60,
+        "max_memory_mb": 1024, "max_cpus": 2, "max_pids": 256,
+        "allowed_images": None, "allow_host": True})
+    slots = os.path.join(q22, "slots")
+    # 用系统自带的等待命令占住槽位：不依赖编译器，也避免 Windows 上
+    # cmd /c 对「带空格的解释器路径」加引号时的解析差异。
+    cmd_slow = "ping -n 4 127.0.0.1" if os.name == "nt" else "sleep 4"
+    host_args = [SANDBOX, "--firmware", fw22, "--mode", "host",
+                 "--i-understand-host-risk", "--policy", slot_pol,
+                 "--state-dir", slots, "--timeout", "20", "--cmd", cmd_slow]
+    p1 = subprocess.Popen([PY] + host_args + ["--json", os.path.join(q22, "p1.json")],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, encoding="utf-8", errors="replace")
+    time.sleep(0.8)
+    q_out = os.path.join(q22, "queue-timeout.json")
+    rr = run(host_args[:-2] + ["--cmd", "echo ok", "--queue-timeout", "0.2",
+                               "--json", q_out])
+    qd = _r22(q_out)
+    check("资源准入：并发槽位被占用时排队，排队超时 → 退出 5 且未启动命令",
+          rr.returncode == 5
+          and (qd.get("admission") or {}).get("code") == "QUEUE_TIMEOUT"
+          and qd.get("command") == [] and qd.get("exit_code") is None,
+          f"rc={rr.returncode} code={(qd.get('admission') or {}).get('code')}")
+
+    q_ok = os.path.join(q22, "queue-ok.json")
+    rr = run(host_args[:-2] + ["--cmd", "echo ok", "--queue-timeout", "10",
+                               "--json", q_ok])
+    qd = _r22(q_ok)
+    check("资源准入：排队后获得槽位并执行，wait_s > 0 记入 JSON",
+          rr.returncode == 0
+          and (qd.get("admission") or {}).get("decision") == "admitted"
+          and ((qd.get("admission") or {}).get("slots") or {}).get("wait_s", 0) > 0.05,
+          f"rc={rr.returncode} wait={(qd.get('admission') or {}).get('slots', {}).get('wait_s')}")
+    p1.communicate(timeout=30)
+    check("资源准入：槽位持有进程正常结束（锁可释放）",
+          p1.returncode == 0, f"rc={p1.returncode}")
+
+    p2 = subprocess.Popen([PY] + host_args + ["--json", os.path.join(q22, "p2.json")],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, encoding="utf-8", errors="replace")
+    time.sleep(0.8)
+    b_out = os.path.join(q22, "budget.json")
+    rr = run(host_args[:-2] + ["--cmd", "echo ok", "--queue-timeout", "5",
+                               "--budget", "1.5", "--json", b_out])
+    bd = _r22(b_out)
+    check("资源准入：排队耗尽总预算 → 退出 5 且未启动命令",
+          rr.returncode == 5
+          and (bd.get("admission") or {}).get("code") == "BUDGET_EXHAUSTED"
+          and bd.get("command") == [],
+          f"rc={rr.returncode} code={(bd.get('admission') or {}).get('code')}")
+    p2.communicate(timeout=30)
+
+    fake = os.path.join(q22, "fake_runtime.py")
+    with open(fake, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write('import json, os, sys, time\n'
+                 'def rec(ev):\n'
+                 '    p = os.environ.get("FAKE_DOCKER_LOG")\n'
+                 '    if p:\n'
+                 '        with open(p, "a", encoding="utf-8") as f:\n'
+                 '            f.write(json.dumps({"event": ev, "argv": sys.argv[1:]},'
+                 ' ensure_ascii=False) + "\\n")\n'
+                 'if len(sys.argv) > 1 and sys.argv[1] == "version":\n'
+                 '    rec("version"); print("1.0-fake"); sys.exit(0)\n'
+                 'if len(sys.argv) > 1 and sys.argv[1] == "run":\n'
+                 '    rec("run"); time.sleep(float(os.environ.get("FAKE_SLEEP", "0")));'
+                 ' sys.exit(int(os.environ.get("FAKE_EXIT", "0")))\n'
+                 'if len(sys.argv) > 1 and sys.argv[1] == "rm":\n'
+                 '    rec("rm"); sys.exit(0)\n'
+                 'sys.exit(2)\n')
+    flog = os.path.join(q22, "fake.log")
+    if os.path.isfile(flog):
+        os.remove(flog)
+    fenv = _env22({"FAKE_DOCKER_LOG": flog})
+    s_out = os.path.join(q22, "sandbox-ok.json")
+    rr = run([SANDBOX, "--runtime-bin", fake, "--firmware", fw22,
+              "--policy", slot_pol, "--state-dir", slots, "--timeout", "10",
+              "--json", s_out], env=fenv)
+    sd = _r22(s_out)
+    check("sandbox：自定义运行时走隔离链路（--runtime-bin 只接受可信配置）",
+          rr.returncode == 0 and sd.get("mode") == "sandbox"
+          and (sd.get("command") or [])[:2] == [PY, fake]
+          and (sd.get("admission") or {}).get("decision") == "admitted",
+          f"rc={rr.returncode} mode={sd.get('mode')}")
+    check("contracts.py：sandbox-run/1.1（含 admission）通过契约校验",
+          os.path.isfile(s_out)
+          and run([CONTRACTS, "--kind", "sandbox-run", "--file", s_out]).returncode == 0)
+
+    # 容器固定以 uid 65534 运行，而 bind mount 不做 UID 映射。输出目录若保持
+    # 0700/0755，容器内写 /out 会 Permission denied（真实 Ubuntu+Docker 实测过）。
+    perm_out = os.path.join(q22, "sandbox-out")
+    p_out = os.path.join(q22, "sandbox-perm.json")
+    rr = run([SANDBOX, "--runtime-bin", fake, "--firmware", fw22,
+              "--out", perm_out, "--policy", slot_pol, "--state-dir", slots,
+              "--timeout", "10", "--json", p_out], env=fenv)
+    perm_mode = stat.S_IMODE(os.stat(perm_out).st_mode) if os.path.isdir(perm_out) else 0
+    check("sandbox：输出目录补 other 写位，容器内 uid 65534 可落产物",
+          rr.returncode == 0 and bool(perm_mode & 0o002),
+          f"rc={rr.returncode} mode={oct(perm_mode)}")
+
+    t_out = os.path.join(q22, "sandbox-timeout.json")
+    rr = run([SANDBOX, "--runtime-bin", fake, "--firmware", fw22,
+              "--policy", slot_pol, "--state-dir", slots, "--timeout", "1",
+              "--json", t_out],
+             env=_env22({"FAKE_DOCKER_LOG": flog, "FAKE_SLEEP": "5"}))
+    td = _r22(t_out)
+    out_path = ((td.get("mounts") or {}).get("out") or {}).get("path") or ""
+    log_text = ""
+    if os.path.isfile(flog):
+        log_text = open(flog, encoding="utf-8").read()
+    check("sandbox：超时 → 退出 124、记录 timed_out、调用 rm 清理容器",
+          rr.returncode == 124 and td.get("timed_out") is True
+          and '"event": "rm"' in log_text,
+          f"rc={rr.returncode} log={log_text[-120:]}")
+    check("sandbox：超时后临时输出目录被删除，不在宿主机留下产物",
+          bool(out_path) and not os.path.exists(out_path),
+          out_path)
+
+    ep_out = os.path.join(q22, "exec-paths.json")
+    rr = run([EXECP, "--root", HERE, "--json", ep_out])
+    epd = _r22(ep_out)
+    counts = epd.get("counts") or {}
+    check("exec_paths：执行路径清单完整，sandbox 边界与静态分析器均分类",
+          rr.returncode == 0 and epd.get("ok") is True
+          and counts.get("sandbox-boundary", 0) >= 3
+          and counts.get("host-static-analyzer", 0) >= 2
+          and not (epd.get("unclassified") or []),
+          f"rc={rr.returncode} counts={counts}")
+
+    badroot = os.path.join(q22, "unclassified")
+    os.makedirs(badroot, exist_ok=True)
+    with open(os.path.join(badroot, "bad.py"), "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("import subprocess\nsubprocess.run(['true'])\n")
+    bad_out = os.path.join(q22, "exec-bad.json")
+    rr = run([EXECP, "--root", badroot, "--json", bad_out])
+    check("exec_paths：出现未分类执行路径时退出 1（新调用点不得静默漏网）",
+          rr.returncode == 1 and _r22(bad_out).get("ok") is False,
+          f"rc={rr.returncode}")
 
     print()
     if FAILS:

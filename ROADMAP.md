@@ -202,9 +202,11 @@ G1–G7 必须是代码校验器，而不是 Prompt、README 或报告模板。�
 逐项核查遗留问题，区分「已实现 / 部分实现 / 有代码但未验证 / 未实现」；实际运行测试，
 记录命令、版本、退出码与结果。重点确认 Strict、Coverage、沙箱和结构化证据的真实调用路径。
 
-**现状**：2026-10 已完成一轮门禁、契约、沙箱入口与合成基准整改；M1 落地后
-selftest 覆盖 21 组 / 202 条断言。但仍缺「所有执行路径逐条列出」的清单，沙箱只在
-无容器运行时与桩运行时下验证过 fail-closed，尚未在 Linux + 真实容器上复验。
+**现状**：2026-10 已完成一轮门禁、契约、沙箱入口与合成基准整改；M2 落地后
+selftest 覆盖 22 组 / 221 条断言，`exec_paths.py` 已给出 15 个脚本 / 9 条子进程调用的
+分类清单。沙箱已在无运行时、Python 桩运行时与 **Ubuntu 24.04.5 + Docker 29.9.0** 下验证
+fail-closed、资源准入、超时清理与容器内权限；`sink_scan.py` 的 ast-grep / semgrep
+仍属宿主机静态解析。
 
 **验收**：盘点结果以命令、版本、退出码记录并可复算；每条能力声明都能对应到源码或
 测试，而不是只引用 README。记录随审计交付物保存，不在仓库里堆能力声明式文档。
@@ -236,8 +238,21 @@ Intent 预算执行器。
 所有执行路径统一经过 Sandbox Runner；实现预算、并发准入、超时、资源限制和失败关闭；
 用测试证明隔离失败不会静默转到宿主机执行。
 
-**现状**：`sandbox_run.py` 已 fail-closed，并限制网络、权限、CPU、内存、PID、
-运行时间；但 Qiling / QEMU / 解包工具是否全部走它，尚无逐路径证明。
+**现状（2026-10-28，已落地）**：`resource_manager.py` 提供 `sandbox-policy/1.0`、跨进程
+文件锁槽位与墙钟预算；`sandbox_run.py` 升到 `sandbox-run/1.1`，容器与显式宿主机路径
+都先准入，退出码 **5** 表示排队超时或预算耗尽；`exec_paths.py` 用 AST 盘点执行路径并对
+未分类调用退出 1；selftest 第 22 组覆盖策略拒绝、排队、预算、超时清理、输出目录权限与清单。
+
+**真实环境复验（2026-10-28）**：Ubuntu 24.04.5 LTS、内核 6.8.0-147、Docker 29.9.0、
+`debian:bookworm-slim`。容器内实测 `uid=65534`、仅 `lo`、`CapEff=0`、`NoNewPrivs=1`、
+内存上限 512 MiB、固件与根文件系统只读；`/out` 初版因宿主机目录 0755 而 `Permission denied`，
+修复为补 other rwx + sticky（0755 → 1757）后可写。隐藏 docker 后 auto 退出 3，且不创建
+输出目录；`sleep 30` + `--timeout 2` 退出 124，容器与临时输出目录均被清理；持槽时
+`--queue-timeout 1` 退出 5，`--queue-timeout 15` 排队 4.2s 后成功；`--budget 2` 在排队中
+耗尽预算退出 5；该环境全量 selftest 为 221 条断言 / 22 组全通过。
+
+**未完成**：Qiling / QEMU / 解包工具尚未全部接入 `sandbox_run.py`；ast-grep / semgrep
+仍是 `host-static-analyzer`。
 
 **交付物**
 

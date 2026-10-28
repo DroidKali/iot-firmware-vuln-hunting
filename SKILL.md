@@ -604,7 +604,7 @@ strings -a -t x usr/sbin/httpd | rg -i 'referer|cmd|ping|traceroute'
 | Phase 4 模糊测试（AFL++，D10–D11） | **是** | 必须隔离 |
 | 辅助工具（binwalk / mithril / strings） | 解析，不执行 | 可在宿主机；不要给外网、不要挂载真实设备 |
 
-统一入口是 `scripts/sandbox_run.py`（纯标准库，Linux 用 docker/podman；Windows 需 Docker Desktop/WSL2）：
+统一入口是 `scripts/sandbox_run.py`（纯标准库，Linux 用 docker/podman；Windows 需 Docker Desktop/WSL2）；它前面的准入层是 `scripts/resource_manager.py`（策略、跨进程槽位、墙钟预算）。两者都**只做执行边界，不做漏洞判定**。
 
 ```bash
 # 只探测能力，不碰固件内容；退出码 0=可用 3=不可用
@@ -618,14 +618,35 @@ uv run scripts/sandbox_run.py \
     --cmd      "cd /firmware && timeout 30 ./usr/sbin/httpd -h"
 ```
 
-**四条硬规则：**
+**五条硬规则：**
 
 1. **fail-closed**：隔离运行时不可用时，脚本以 **退出码 3** 拒绝执行，并在 JSON 里写 `mode="fail-closed"`、`host_fallback=false`。**没有自动回退宿主机这条路径**——"探测失败"与"沙箱可用"在报告里必须长得不一样。
 2. **宿主机执行只能显式授权**：`--mode host --i-understand-host-risk`，输出标记 `mode="host-opt-in"`、`policy.host_execution="explicit-opt-in"`。只用于完全可信的自建 rootfs。
-3. **隔离参数固定**：`--network none`、`--read-only`、`--cap-drop=ALL`、`no-new-privileges`、`--user 65534:65534`、`--memory 512m --cpus 1 --pids-limit 128`、`/tmp` noexec、固件 `:ro`、输出目录与固件目录**不得重叠**。超时由 Python 侧 kill 并清理容器。
+3. **隔离参数固定**：`--network none`、`--read-only`、`--cap-drop=ALL`、`no-new-privileges`、`--user 65534:65534`、`--memory 512m --cpus 1 --pids-limit 128`、`/tmp` noexec、固件 `:ro`、输出目录与固件目录**不得重叠**。超时由 Python 侧 kill 并清理容器。容器内 uid 65534 与宿主机目录不做 UID 映射，sandbox 模式会为 `--out` 补 other rwx + sticky（0755 → 1757）后再挂载；host 模式不改用户原目录权限。
 4. **留痕**：JSON 记录容器命令行、运行时版本、固件目录指纹（`sha256`）、退出码、stdout/stderr 头部、超时标志。动态结论必须能指回这份记录；**在宿主机直接跑固件二进制得到的结论不予采信**。
+5. **先准入再启动**：`sandbox-run/1.1` 的 `admission` 必须记录策略哈希、申请资源、槽位等待与预算余量；`--check` 不占槽。准入被拒（退出 5）时不得留下部分产物，也不得改用宿主机重跑。
 
-#### 4.0 选路判据：要证明什么 → 需要哪组原子能力
+#### 资源准入
+
+资源准入在启动前完成，超限**排队而不是先启动**；排队与执行都计入同一份墙钟预算：
+
+```bash
+# 策略可收紧：并发、排队上限、总预算、单命令超时、内存/CPU/PID、镜像白名单
+uv run scripts/resource_manager.py validate --policy sandbox-policy.json
+
+uv run scripts/sandbox_run.py \
+    --firmware fw-audit/$TARGET/01-extract \
+    --out      fw-audit/$TARGET/45-sandbox \
+    --policy   sandbox-policy.json \
+    --slots 1 --queue-timeout 60 --budget 300 \
+    --cmd      "cd /firmware && timeout 30 ./usr/sbin/httpd -h"
+```
+
+`--slots` / `--queue-timeout` / `--budget` 只能收紧策略，不能放宽；准入拒绝退出码为 **5**，JSON 里 `command=[]`、`exit_code=null`，能从记录里区分「没启动」与「跑了但失败」。
+
+**真实环境复验（2026-10-28）**：Ubuntu 24.04.5 LTS + Docker 29.9.0 + `debian:bookworm-slim`。容器内确认 `uid=65534`、仅 `lo`、`CapEff=0`、`NoNewPrivs=1`、内存 512 MiB、固件与根文件系统只读；`/out` 在补 other rwx + sticky 后可写。隐藏 docker 后 auto 退出 3 且不创建输出目录；`sleep 30` + `--timeout 2` 退出 124 且容器与临时目录清理；持槽时 `--queue-timeout 1` 退出 5、`--queue-timeout 15` 排队后成功；`--budget 2` 排队中耗尽预算退出 5。
+
+### 4.0 选路判据：要证明什么 → 需要哪组原子能力
 
 **先问一个更高层的问题：你要把哪一条 HYPOTHESIS 升成 CONFIRMED？** 判据不是「哪个工具更强」，而是**结论类型决定能力组合**。完整决策树（含每个失败分支的处置）见 `references/atomic-capabilities.md` §3.2：
 
@@ -925,7 +946,7 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 | `references/emulation-fuzzing.md` | Phase 4 需要模拟与模糊的具体做法、踩坑与替代方案 |
 | `references/reporting.md` | Phase 5 需要报告字段、评分表、脱敏规范 |
 | `references/resource-index.md` | 需要外部资料：awesome-connected-things-sec 精编索引（按阶段映射） |
-| `references/data-contracts.md` | **跨阶段数据契约**：16 种 schema——FirmwareManifest / AuditTask / Candidate / Finding / Evidence（含 `evidence/1.1` 归一化） / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent 的字段、版本规则、strict 兼容边界、黑板事件与状态机、迁移清单 |
+| `references/data-contracts.md` | **跨阶段数据契约**：16 种 schema——FirmwareManifest / AuditTask / Candidate / Finding / Evidence（含 `evidence/1.1` 归一化） / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent 的字段、版本规则、strict 兼容边界、黑板事件与状态机、**沙箱策略/资源准入/执行路径清单**、迁移清单 |
 
 ## 脚本
 
@@ -941,9 +962,11 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 | `scripts/board_events.py` | M1：append-only 事件日志——`verify` 校验结构与 `seq` 连续性，`replay` 从日志重建快照；重复 `dedupe_key` 跳过，非法 JSON 行报错 |
 | `scripts/board_store.py` | M1：黑板存储与导入——`init` / `import` / `add` / `transition` / `intent` / `backtrack` / `replay` / `verify` / `show`；事件日志是真相源，快照可重建 |
 | `scripts/ealb_calib.py` | Phase 2：用实测工时样本校准 EALB；样本不足时只报 `heuristic`，达到门槛才标 `calibrated` |
-| `scripts/sandbox_run.py` | Phase 4：不可信固件的一次性隔离执行（`--network none`、只读根、cap-drop、非 root、内存/CPU/PID 限额）；无隔离运行时 **fail-closed**（退出 3），宿主机执行必须显式授权 |
+| `scripts/sandbox_run.py` | Phase 4 / M2：不可信固件的一次性隔离执行（`--network none`、只读根、cap-drop、非 root、内存/CPU/PID 限额）；无隔离运行时 **fail-closed**（退出 3），宿主机执行必须显式授权；`sandbox-run/1.1` 记录资源准入（退出 5） |
+| `scripts/resource_manager.py` | M2：`sandbox-policy/1.0` 策略校验、跨进程文件锁槽位、墙钟预算；`validate` / `defaults`；超限排队而不是先启动 |
+| `scripts/exec_paths.py` | M2：AST 盘点 `scripts/*.py` 的子进程调用并分类（`sandbox-boundary` / `host-static-analyzer` / `trusted-metadata` / `test-harness`）；未分类即退出 1 |
 | `scripts/bench_eval.py` | Phase 5/回归：合成基准集上的 precision / recall / F1 / FPR 评估；`--baseline` 检测召回暴跌与 FPR 上升（退出码 3） |
-| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证其余十二个脚本的判据，并把**文档示例命令与 CLI 参数表对拍**；覆盖黑板事件/快照/状态机（21 组 / 202 条断言，结尾自报总数） |
+| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证其余十四个脚本的判据，并把**文档示例命令与 CLI 参数表对拍**；覆盖黑板事件/快照/状态机与资源准入（22 组 / 221 条断言，结尾自报总数） |
 
 脚本都只用 Python 标准库，无第三方依赖，Windows / Linux / macOS 均可运行。用 `uv` 管理环境（`uv run` 自动建临时环境；无 `uv` 时直接 `python scripts/xxx.py` 亦可）。安装后建议先跑一次自检：
 

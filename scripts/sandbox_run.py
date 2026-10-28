@@ -24,12 +24,19 @@ sandbox_run.py — 不可信固件的一次性隔离执行边界（fail-closed�
   /bin/sh -c 执行（便于占位符与管道，镜像需自带 /bin/sh）；超时由 Python 侧
   subprocess 实现（超时 kill 客户端，并尽力 docker rm -f 掉可能残留的容器）。
 
+资源准入（M2）：
+  执行前先过 resource_manager.py 的策略检查：并发槽位（跨进程文件锁，超限排队
+  而不是先启动）、总预算（排队 + 探测 + 执行 + 清理都计入）、单命令超时、内存、
+  CPU、PID 与镜像白名单。策略用 --policy 指定，缺省策略见
+  resource_manager.py defaults --json；槽位目录默认在系统临时目录下。
+
 退出码：
   0   命令在隔离环境内成功执行（exit 0）
   1   命令已执行但返回非零（真实退出码见 JSON 的 exit_code）
   2   输入 / 参数错误
   3   隔离环境不可用（fail-closed，绝不回退宿主机）
-  4   策略拒绝（host 未显式授权、挂载重叠、固件目录不存在等）
+  4   策略拒绝（host 未显式授权、挂载重叠、固件目录不存在、超出资源上限等）
+  5   资源准入失败（排队超时 / 预算耗尽；没有启动任何命令）
   124 容器命令超时
 
 示例：
@@ -44,6 +51,11 @@ sandbox_run.py — 不可信固件的一次性隔离执行边界（fail-closed�
       --cmd "ls -l {firmware}/bin && cp {firmware}/etc/passwd {out}/" \
       --timeout 60 --md sandbox-run.md
 
+  # 资源准入：1 个并发槽位、60 秒总预算、排队最多 10 秒
+  python scripts/sandbox_run.py --firmware 01-extract --policy sandbox-policy.json \
+      --state-dir .sandbox-slots --slots 1 --budget 60 --queue-timeout 10 \
+      --cmd "ls -l {firmware}/bin" --json sandbox-run.json
+
   # 宿主机执行：必须显式授权，且只用于可完全信任的自建 rootfs
   python scripts/sandbox_run.py --firmware ./my-rootfs --mode host \
       --i-understand-host-risk --cmd "echo hi"
@@ -56,6 +68,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -65,8 +78,10 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-VERSION = "1.0"
-SCHEMA = "sandbox-run/1.0"
+import resource_manager as rm
+
+VERSION = "1.1"
+SCHEMA = "sandbox-run/1.1"
 TOOL = "sandbox_run.py"
 
 # 默认值：都是「最保守且能跑起来」的选择，改任何一项都要能被 JSON 复算出来。
@@ -91,6 +106,7 @@ EXIT_COMMAND_FAILED = 1
 EXIT_USAGE = 2
 EXIT_UNAVAILABLE = 3
 EXIT_POLICY = 4
+EXIT_ADMISSION = 5
 EXIT_TIMEOUT = 124
 
 # 失败关闭时 stderr 必须出现的原话（文档与测试都对它做断言，不要改写）。
@@ -262,41 +278,69 @@ def _within(child: str, parent: str) -> bool:
 
 # ------------------------------------------------------------ 运行时探测
 
-def detect_runtime(prefer: str = "auto") -> Dict[str, Any]:
+def _probe_runtime(name: str, path: Optional[str], argv_prefix: List[str],
+                   requested: str) -> Dict[str, Any]:
+    """探测一个候选运行时；argv_prefix 是调用它的前缀（如 python wrapper）。"""
+    rec: Dict[str, Any] = {"name": name, "path": path, "version": None,
+                           "available": False, "probe": "not-found",
+                           "argv": list(argv_prefix)}
+    if not path:
+        return rec
+    argv = list(argv_prefix) + ["version", "--format", "{{.Server.Version}}"]
+    try:
+        p = subprocess.run(argv, capture_output=True,
+                           timeout=RUNTIME_PROBE_TIMEOUT)
+        out = _text(p.stdout).strip()
+        err = _text(p.stderr).strip()
+        if p.returncode == 0 and out:
+            rec["available"] = True
+            rec["version"] = out.splitlines()[0].strip()
+            rec["probe"] = "ok"
+        elif err:
+            rec["probe"] = "exit=%s: %s" % (
+                p.returncode, err.splitlines()[0][:200])
+        else:
+            rec["probe"] = "exit=%s: 版本输出为空" % p.returncode
+    except subprocess.TimeoutExpired:
+        rec["probe"] = "timeout>%ss" % RUNTIME_PROBE_TIMEOUT
+    except OSError as exc:
+        rec["probe"] = "exec-error: %s" % exc
+    return rec
+
+
+def detect_runtime(prefer: str = "auto", bin_path: Optional[str] = None) -> Dict[str, Any]:
     """探测容器运行时是否**真正可用**，返回可直接写进 JSON 的记录。
 
-    判定必须同时满足：PATH 上能找到可执行文件；<rt> version --format
+    判定必须同时满足：能找到可执行文件；<rt> version --format
     "{{.Server.Version}}" 在 5 秒内以 0 退出且打印出版本号。
     只 which 到文件不算可用——客户端在、守护进程没起，照样跑不了容器，而这正是
     「以为隔离了其实没有」的典型来源。显式 --runtime docker/podman 时只测该运行时。
+
+    --runtime-bin 可指向一个自定义运行时封装；.py 文件会用当前 Python 解释器
+    启动（便于测试桩和带 DOCKER_HOST 的小包装）。封装是否真的调用容器运行时，
+    工具无法从版本号证明——它和 docker 二进制一样属于可信配置，记录在 JSON 里。
     """
+    if bin_path:
+        path = os.path.abspath(bin_path)
+        if not os.path.isfile(path):
+            rec = {"name": "custom", "path": path, "version": None,
+                   "available": False, "probe": "not-found", "argv": []}
+            return {"name": "custom", "version": None, "available": False,
+                    "path": path, "probe": "not-found", "requested": "custom",
+                    "argv": [], "tried": [rec]}
+        argv = ([sys.executable, path] if path.lower().endswith(".py") else [path])
+        rec = _probe_runtime("custom", path, argv, "custom")
+        rec["requested"] = "custom"
+        return {"name": "custom", "version": rec["version"],
+                "available": rec["available"], "path": path,
+                "probe": rec["probe"], "requested": "custom",
+                "argv": argv, "tried": [rec]}
+
     order = ["docker", "podman"] if prefer == "auto" else [prefer]
     tried: List[Dict[str, Any]] = []
-
     for name in order:
         path = shutil.which(name)
-        rec: Dict[str, Any] = {"name": name, "path": path, "version": None,
-                               "available": False, "probe": "not-found"}
-        if path:
-            argv = [path, "version", "--format", "{{.Server.Version}}"]
-            try:
-                p = subprocess.run(argv, capture_output=True,
-                                   timeout=RUNTIME_PROBE_TIMEOUT)
-                out = _text(p.stdout).strip()
-                err = _text(p.stderr).strip()
-                if p.returncode == 0 and out:
-                    rec["available"] = True
-                    rec["version"] = out.splitlines()[0].strip()
-                    rec["probe"] = "ok"
-                elif err:
-                    rec["probe"] = "exit=%s: %s" % (
-                        p.returncode, err.splitlines()[0][:200])
-                else:
-                    rec["probe"] = "exit=%s: 版本输出为空" % p.returncode
-            except subprocess.TimeoutExpired:
-                rec["probe"] = "timeout>%ss" % RUNTIME_PROBE_TIMEOUT
-            except OSError as exc:
-                rec["probe"] = "exec-error: %s" % exc
+        rec = _probe_runtime(name, path, [path] if path else [], prefer)
         tried.append(rec)
         if rec["available"]:
             break
@@ -305,13 +349,13 @@ def detect_runtime(prefer: str = "auto") -> Dict[str, Any]:
     if chosen:
         return {"name": chosen["name"], "version": chosen["version"],
                 "available": True, "path": chosen["path"], "probe": "ok",
-                "requested": prefer, "tried": tried}
+                "requested": prefer, "argv": chosen["argv"], "tried": tried}
 
     reason = "；".join("%s=%s" % (r["name"], r["probe"]) for r in tried)
     return {"name": None if prefer == "auto" else tried[0]["name"],
             "version": None, "available": False, "path": None,
             "probe": (reason or "无候选运行时")[:500],
-            "requested": prefer, "tried": tried}
+            "requested": prefer, "argv": [], "tried": tried}
 
 
 # ------------------------------------------------------------ 命令组装
@@ -326,11 +370,15 @@ def expand_cmd(cmd: str, firmware: str, out: str) -> str:
     return (cmd or "").replace("{firmware}", firmware).replace("{out}", out)
 
 
-def build_container_argv(runtime_path: str, image: str, firmware: str, out: str,
+def build_container_argv(runtime_argv: List[str], image: str, firmware: str, out: str,
                          args: argparse.Namespace,
                          name: Optional[str] = None) -> List[str]:
-    """组装一次性容器的 argv（数组顺序即审计顺序，JSON 的 command 原样记录）。"""
-    argv: List[str] = [runtime_path, "run", "--rm"]
+    """组装一次性容器的 argv（数组顺序即审计顺序，JSON 的 command 原样记录）。
+
+    runtime_argv 是调用运行时的前缀：标准 docker/podman 只有一项，--runtime-bin
+    包装脚本可能是 [python, wrapper.py]。前缀完全由调用者提供，不经过 shell。
+    """
+    argv: List[str] = list(runtime_argv) + ["run", "--rm"]
     if name:
         # 给容器一个可定位的名字：超时只杀得掉客户端，容器要靠这个名字 rm -f
         argv += ["--name", name]
@@ -428,23 +476,24 @@ def run_proc(argv: List[str], timeout_s: float) -> Dict[str, Any]:
     return res
 
 
-def cleanup_container(runtime_path: str, name: str, notes: List[str]) -> None:
+def cleanup_container(runtime_argv: List[str], name: str, notes: List[str]) -> None:
     """尽力删除超时后可能残留的容器。
 
     杀 docker CLI 不等于容器退出（CLI 只是 API 客户端），一个还在跑固件的容器
     必须被清掉，否则「一次性」就是空话。失败也要留痕，让人能手工收尾。
     """
+    shown = " ".join(runtime_argv)
     try:
-        p = subprocess.run([runtime_path, "rm", "-f", name],
+        p = subprocess.run(list(runtime_argv) + ["rm", "-f", name],
                            capture_output=True, timeout=15)
         if p.returncode == 0:
             notes.append("超时后已删除可能残留的容器：%s" % name)
         else:
             notes.append("超时后删除容器 %s 失败（exit=%s）：请手工执行 %s rm -f %s"
-                         % (name, p.returncode, runtime_path, name))
+                         % (name, p.returncode, shown, name))
     except (OSError, subprocess.TimeoutExpired) as exc:
         notes.append("超时后清理容器 %s 异常：%s（请手工执行 %s rm -f %s）"
-                     % (name, exc, runtime_path, name))
+                     % (name, exc, shown, name))
 
 
 # ------------------------------------------------------------ 策略
@@ -578,6 +627,33 @@ def render_md(doc: Dict[str, Any]) -> str:
         "| 超时 | %s s |" % esc(pol.get("timeout_s")),
         "| 宿主机执行 | `%s` |" % esc(pol.get("host_execution")),
         "",
+    ]
+
+    adm = doc.get("admission") or {}
+    if adm:
+        slots = adm.get("slots") or {}
+        budget = adm.get("budget") or {}
+        lines += [
+            "## 资源准入",
+            "",
+            "| 项 | 值 |",
+            "|---|---|",
+            "| 决策 | `%s`（code=%s） |" % (esc(adm.get("decision")),
+                                               esc(adm.get("code"))),
+            "| 策略 | `%s…`（来源 %s） |" % (
+                esc((adm.get("policy_sha256") or "")[:12]),
+                esc(adm.get("policy_source"))),
+            "| 槽位 | %s / %s（等待 %ss） |" % (
+                esc(slots.get("slot")), esc(slots.get("limit")),
+                esc(slots.get("wait_s"))),
+            "| 预算 | %s s（已用 %s s，剩余 %s s） |" % (
+                esc(budget.get("limit_s")), esc(budget.get("used_s")),
+                esc(budget.get("remaining_s"))),
+            "| 说明 | %s |" % esc(adm.get("message")),
+            "",
+        ]
+
+    lines += [
         "## 挂载与指纹",
         "",
         "| 挂载点 | 宿主机路径 | 只读 | sha256 |",
@@ -647,6 +723,14 @@ def print_summary(doc: Dict[str, Any]) -> None:
          % ("未执行" if doc.get("exit_code") is None else doc.get("exit_code"),
             doc.get("duration_s"), "是" if doc.get("timed_out") else "否",
             doc.get("ok")), sys.stderr)
+    adm = doc.get("admission") or {}
+    if adm:
+        slots = adm.get("slots") or {}
+        budget = adm.get("budget") or {}
+        _say("[sandbox] 准入：%s（code=%s）；槽位 %s/%s；等待 %ss；预算剩余 %ss"
+             % (adm.get("decision"), adm.get("code") or "—",
+                slots.get("slot"), slots.get("limit"), slots.get("wait_s"),
+                budget.get("remaining_s")), sys.stderr)
 
 
 # ------------------------------------------------------------ 参数
@@ -697,6 +781,20 @@ def build_parser() -> argparse.ArgumentParser:
                          "可用占位符 {firmware} → /firmware、{out} → /out" % DEFAULT_CMD)
     ap.add_argument("--check", action="store_true",
                     help="只探测隔离能力并输出 JSON，不执行任何固件内容（退出 0/3）")
+    ap.add_argument("--policy",
+                    help="资源准入策略 JSON（缺省用 resource_manager 默认策略）")
+    ap.add_argument("--state-dir",
+                    help="跨进程并发槽位目录（缺省在系统临时目录；不放固件内容）")
+    ap.add_argument("--slots", type=int, default=None,
+                    help="本次允许的并发槽位；不得超过策略 max_concurrency")
+    ap.add_argument("--queue-timeout", type=float, default=None,
+                    help="等待槽位的最长秒数；不得超过策略 queue_timeout_s")
+    ap.add_argument("--budget", type=float, default=None,
+                    help="本次总预算秒数（排队+探测+执行+清理）；"
+                         "不得超过策略 max_total_seconds")
+    ap.add_argument("--runtime-bin",
+                    help="自定义容器运行时封装（.py 用当前解释器启动）；"
+                         "与 docker 二进制同属可信配置，记入 JSON")
     ap.add_argument("--verbose", action="store_true",
                     help="把探测与命令细节额外打印到 stderr")
     return ap
@@ -730,6 +828,20 @@ def main(argv=None) -> int:
     started_at = utc_now()
     notes: List[str] = []
 
+    # 资源准入状态。策略在参数校验后加载；这里的初值保证任何提前退出都有完整
+    # admission 块，而不是一个解释不了的空对象。
+    policy: Dict[str, Any] = rm.default_policy()
+    policy_sha: str = rm.policy_sha256(policy)
+    policy_source: str = "defaults"
+    policy_errors: List[Dict[str, Any]] = []
+    slots_limit: int = int(policy["max_concurrency"])
+    queue_timeout: float = float(policy["queue_timeout_s"])
+    budget_limit: float = float(policy["max_total_seconds"])
+    state_dir: str = rm.default_state_dir()
+    slot_pool: Optional[rm.SlotPool] = None
+    slot_no: Optional[int] = None
+    slot_wait: float = 0.0
+
     # mode 记录的是**实际生效**的模式：sandbox / host-opt-in / fail-closed。
     # 初值取 fail-closed：任何提前退出的路径都不该让 JSON 看起来像"跑过沙箱"。
     ctx: Dict[str, Any] = {
@@ -746,10 +858,53 @@ def main(argv=None) -> int:
         "stderr_bytes": 0,
         "ok": False,
         "out_tmp": None,
+        "admission": None,
     }
 
+    def release_slot() -> None:
+        """释放并发槽位；重复调用安全。任何退出路径都必须经过这里。"""
+        nonlocal slot_pool
+        if slot_pool is not None:
+            try:
+                slot_pool.release()
+            except OSError as exc:
+                notes.append("释放并发槽位失败：%s" % exc)
+            finally:
+                slot_pool = None
+
+    def budget_snapshot() -> Dict[str, Any]:
+        used = round(time.monotonic() - t0, 3)
+        return {"limit_s": round(budget_limit, 3), "used_s": used,
+                "remaining_s": round(max(0.0, budget_limit - used), 3)}
+
+    def admission_snapshot(decision: str, code: Optional[str] = None,
+                           message: Optional[str] = None) -> Dict[str, Any]:
+        rec: Dict[str, Any] = {
+            "decision": decision,
+            "code": code,
+            "message": message,
+            "policy": policy,
+            "policy_sha256": policy_sha,
+            "policy_source": policy_source,
+            "request": {"mode": args.mode, "timeout": args.timeout,
+                        "memory": args.memory, "cpus": args.cpus,
+                        "pids": args.pids, "image": args.image},
+            "slots": {"limit": slots_limit, "slot": slot_no,
+                      "wait_s": round(slot_wait, 3),
+                      "queued": bool(slot_wait > 0), "state_dir": state_dir},
+            "budget": budget_snapshot(),
+        }
+        if policy_errors:
+            rec["policy_errors"] = policy_errors
+        return rec
+
+    ctx["admission"] = admission_snapshot("pending")
+
     def finish(code: int) -> int:
-        """统一收尾：补时间 / 字节数 → 写 JSON、Markdown → stderr 摘要。"""
+        """统一收尾：释放槽位 / 补时间 / 写 JSON、Markdown → stderr 摘要。"""
+        release_slot()
+        if ctx["admission"] and ctx["admission"].get("decision") == "pending":
+            ctx["admission"] = admission_snapshot("rejected")
         if ctx["out_tmp"]:
             tmp = ctx["out_tmp"]
             ctx["out_tmp"] = None
@@ -784,6 +939,7 @@ def main(argv=None) -> int:
             "command": ctx["command"],
             "mounts": ctx["mounts"],
             "policy": ctx["policy"] or _null_policy(),
+            "admission": ctx["admission"] or admission_snapshot("rejected"),
             "started_at": started_at,
             "finished_at": utc_now(),
             "duration_s": elapsed,
@@ -848,7 +1004,77 @@ def main(argv=None) -> int:
     if problem:
         return fail(EXIT_USAGE, problem)
 
-    # ---- 2. host 模式必须先拿到显式授权 ----
+    # ---- 2. 资源策略：先加载，再做任何可能消耗资源的事 ----
+    policy, policy_errors, policy_sha, policy_source = rm.load_policy(args.policy)
+    if policy_errors:
+        detail = "；".join("%s: %s" % (e.get("path"), e.get("message"))
+                          for e in policy_errors[:4])
+        ctx["admission"] = admission_snapshot(
+            "rejected", "POLICY_INVALID", "资源策略不合法：" + detail)
+        return fail(EXIT_POLICY, "资源策略不合法（%s）：%s"
+                    % (args.policy or "defaults", detail))
+
+    slots_limit = int(policy["max_concurrency"])
+    if args.slots is not None:
+        if args.slots < 1:
+            ctx["admission"] = admission_snapshot(
+                "rejected", "SLOTS_LIMIT", "--slots 必须 >= 1")
+            return fail(EXIT_POLICY, "--slots 必须 >= 1（收到 %s）" % args.slots)
+        if args.slots > int(policy["max_concurrency"]):
+            ctx["admission"] = admission_snapshot(
+                "rejected", "SLOTS_LIMIT", "--slots 超过策略上限")
+            return fail(EXIT_POLICY,
+                        "--slots %s 超过策略 max_concurrency=%s；"
+                        "调高并发只能改策略，不能用命令行绕过"
+                        % (args.slots, policy["max_concurrency"]))
+        slots_limit = args.slots
+
+    queue_timeout = float(policy["queue_timeout_s"])
+    if args.queue_timeout is not None:
+        if args.queue_timeout < 0:
+            ctx["admission"] = admission_snapshot(
+                "rejected", "QUEUE_LIMIT", "--queue-timeout 不能为负")
+            return fail(EXIT_POLICY, "--queue-timeout 不能为负（收到 %s）"
+                        % args.queue_timeout)
+        if args.queue_timeout > float(policy["queue_timeout_s"]):
+            ctx["admission"] = admission_snapshot(
+                "rejected", "QUEUE_LIMIT", "--queue-timeout 超过策略上限")
+            return fail(EXIT_POLICY,
+                        "--queue-timeout %ss 超过策略 queue_timeout_s=%ss"
+                        % (args.queue_timeout, policy["queue_timeout_s"]))
+        queue_timeout = float(args.queue_timeout)
+
+    budget_limit = float(policy["max_total_seconds"])
+    if args.budget is not None:
+        if args.budget <= 0:
+            ctx["admission"] = admission_snapshot(
+                "rejected", "BUDGET_LIMIT", "--budget 必须大于 0")
+            return fail(EXIT_POLICY, "--budget 必须大于 0（收到 %s）" % args.budget)
+        if args.budget > float(policy["max_total_seconds"]):
+            ctx["admission"] = admission_snapshot(
+                "rejected", "BUDGET_LIMIT", "--budget 超过策略上限")
+            return fail(EXIT_POLICY,
+                        "--budget %ss 超过策略 max_total_seconds=%ss"
+                        % (args.budget, policy["max_total_seconds"]))
+        budget_limit = float(args.budget)
+
+    state_dir = (os.path.abspath(args.state_dir) if args.state_dir
+                 else rm.default_state_dir())
+
+    request_errors = rm.check_request(
+        policy, timeout=args.timeout, memory=args.memory, cpus=args.cpus,
+        pids=args.pids, image=args.image, mode=args.mode)
+    if request_errors:
+        first = request_errors[0]
+        detail = "；".join("%s: %s" % (e.get("path"), e.get("message"))
+                          for e in request_errors[:4])
+        ctx["admission"] = admission_snapshot(
+            "rejected", first.get("code"), "资源请求超出策略：" + detail)
+        return fail(EXIT_POLICY, "资源请求超出策略：%s" % detail)
+
+    ctx["admission"] = admission_snapshot("pending")
+
+    # ---- 3. host 模式必须先拿到显式授权 ----
     # 放在最前：连固件都不看，就能拒绝一次「忘了加授权」的宿主机执行。
     if args.mode == "host" and not args.i_understand_host_risk:
         return fail(EXIT_POLICY,
@@ -865,7 +1091,16 @@ def main(argv=None) -> int:
         if not os.path.isdir(fw_abs):
             return fail(EXIT_POLICY, "--firmware 必须是目录：%s" % fw_abs)
         fw_abs = os.path.realpath(fw_abs)
-    elif not args.check:
+
+    if fw_abs and _within(_norm_path(state_dir), _norm_path(fw_abs)):
+        ctx["admission"] = admission_snapshot(
+            "rejected", "STATE_DIR_IN_FIRMWARE",
+            "槽位目录不得落在固件目录内")
+        return fail(EXIT_POLICY,
+                    "槽位目录不得落在固件目录内：state-dir=%s firmware=%s"
+                    "（锁文件和 owner 元数据不应污染固件证据）"
+                    % (state_dir, fw_abs))
+    if not fw_abs and not args.check:
         return fail(EXIT_USAGE, "--firmware 是必填项（只有 --check 可以省略）")
 
     # ---- 4. 输出目录：这里只算路径，真正要执行时才创建 ----
@@ -886,6 +1121,36 @@ def main(argv=None) -> int:
                         "（可写输出覆盖只读固件时，:ro 挂载形同虚设）"
                         % (fw_abs, out_abs))
 
+    def prepare_out_for_container() -> None:
+        """让容器内的 uid 65534 能写入 bind mount 的输出目录。
+
+        docker/podman 的 bind mount 不做 UID 映射：宿主机上由 root 或普通用户
+        创建的 0755 目录，进容器后对 65534 只有 r-x，写 /out 会 Permission denied。
+        这里补 other 的 rwx 与 sticky（保留 owner/group 位）：other 写让容器能落
+        产物，sticky 让其他本地用户不能删除容器创建的文件。只在 sandbox 模式调用，
+        host 模式沿用用户原目录权限。非 POSIX 平台 chmod 语义有限，失败只记 notes，
+        由命令自身的 exit_code 暴露问题，不静默假装可写。
+        """
+        if not out_abs:
+            return
+        try:
+            st = os.stat(out_abs)
+        except OSError as exc:
+            notes.append("无法检查输出目录权限：%s" % exc)
+            return
+        mode = stat.S_IMODE(st.st_mode)
+        wanted = mode | 0o1007
+        if wanted == mode:
+            return
+        try:
+            os.chmod(out_abs, wanted)
+        except OSError as exc:
+            notes.append("输出目录权限无法调整为容器可写（%04o）：%s" % (mode, exc))
+            return
+        notes.append("输出目录 %s 原模式 %04o，已补 other rwx + sticky 为 %04o"
+                     "（容器以 uid %s 写入，bind mount 不做 UID 映射）"
+                     % (out_abs, mode, wanted, CONTAINER_UID))
+
     def ensure_out() -> Optional[int]:
         """执行前准备输出目录（未给 --out 时用临时目录，结束后由 finish 删除）。
 
@@ -898,6 +1163,8 @@ def main(argv=None) -> int:
                     os.makedirs(out_abs, exist_ok=True)
                 except OSError as exc:
                     return fail(EXIT_USAGE, "无法创建输出目录 %s：%s" % (out_abs, exc))
+            if args.mode != "host":
+                prepare_out_for_container()
             return None
         try:
             out_abs = os.path.realpath(tempfile.mkdtemp(prefix="sandbox-run-out-"))
@@ -905,10 +1172,53 @@ def main(argv=None) -> int:
             return fail(EXIT_USAGE, "无法创建临时输出目录：%s" % exc)
         ctx["out_tmp"] = out_abs
         notes.append("未指定 --out，已创建临时输出目录 %s（结束后删除）" % out_abs)
+        if args.mode != "host":
+            prepare_out_for_container()
+        return None
+
+    def acquire_slot() -> Optional[int]:
+        """占用一个并发槽位；拿不到就按 admission 失败收尾（返回退出码）。
+
+        槽位必须在 ensure_out / dir_hash / 启动命令之前拿到：先启动再发现超限，
+        等于让宿主机先承受一次峰值。
+        """
+        nonlocal slot_pool, slot_no, slot_wait
+        try:
+            slot_pool = rm.SlotPool(state_dir, slots_limit)
+            slot_no, slot_wait = slot_pool.acquire(
+                queue_timeout, budget_deadline=t0 + budget_limit,
+                owner={"pid": os.getpid(), "mode": args.mode,
+                       "cmd": (args.cmd or "")[:200]})
+        except rm.AdmissionError as exc:
+            slot_pool = None
+            decision = ("budget-exhausted" if exc.code == "BUDGET_EXHAUSTED"
+                        else "queue-timeout")
+            ctx["admission"] = admission_snapshot(decision, exc.code, exc.message)
+            return fail(exc.exit_code, exc.message)
+        except OSError as exc:
+            slot_pool = None
+            ctx["admission"] = admission_snapshot(
+                "rejected", "STATE_DIR_ERROR",
+                "槽位目录不可用：%s" % exc)
+            return fail(EXIT_ADMISSION, "槽位目录不可用：%s" % exc)
+
+        if slot_wait > 0:
+            notes.append("资源准入：排队 %.2fs 后获得槽位 %s/%s"
+                         % (slot_wait, slot_no, slots_limit))
+        remaining = budget_limit - (time.monotonic() - t0)
+        if remaining < 1.0:
+            release_slot()
+            ctx["admission"] = admission_snapshot(
+                "budget-exhausted", "BUDGET_EXHAUSTED",
+                "获取槽位后剩余预算不足 1 秒")
+            return fail(EXIT_ADMISSION,
+                        "获取槽位后剩余预算不足 1 秒（预算 %.1fs，已用 %.1fs）；"
+                        "未启动任何命令" % (budget_limit, time.monotonic() - t0))
+        ctx["admission"] = admission_snapshot("admitted")
         return None
 
     # ---- 6. 运行时探测 ----
-    runtime = detect_runtime(args.runtime)
+    runtime = detect_runtime(args.runtime, args.runtime_bin)
     ctx["runtime"] = runtime
     if args.verbose:
         for rec in runtime.get("tried") or []:
@@ -930,11 +1240,15 @@ def main(argv=None) -> int:
             ctx["mounts"]["out"] = {"path": out_abs, "read_only": False,
                                     "target": OUT_TARGET}
         if fw_abs and out_abs:
+            rt_argv = (runtime.get("argv")
+                       or [runtime.get("path") or runtime.get("name") or "docker"])
             ctx["command"] = build_container_argv(
-                runtime.get("path") or (runtime.get("name") or "docker"),
-                args.image, fw_abs, out_abs, args, None)
+                rt_argv, args.image, fw_abs, out_abs, args, None)
             notes.append("command 为预览：--check 不执行任何内容")
         if not runtime["available"]:
+            ctx["admission"] = admission_snapshot(
+                "checked", "RUNTIME_UNAVAILABLE",
+                "只做能力探测；运行时不可用，未占槽位")
             _say("[check] 运行时 %s 不可用：%s"
                  % (args.runtime, runtime.get("probe") or "未知原因"), sys.stderr)
             _say("[hint] 安装并启动 docker 或 podman 后重试；"
@@ -947,10 +1261,15 @@ def main(argv=None) -> int:
         if args.mode == "host":
             notes.append("host 模式下 --check 仍按隔离能力给出 0/3；"
                          "host 执行本身不受隔离能力限制")
+        ctx["admission"] = admission_snapshot(
+            "checked", None, "只做能力探测，未占槽位、未执行命令")
         return finish(EXIT_OK)
 
     # ---- 8. 决定这次到底在哪儿执行 ----
     if args.mode == "host":
+        rc = acquire_slot()
+        if rc is not None:
+            return rc
         rc = ensure_out()
         if rc is not None:
             return rc
@@ -979,9 +1298,22 @@ def main(argv=None) -> int:
         ctx["command"] = argv
         if args.verbose:
             _say("[exec] %s" % " ".join(argv), sys.stderr)
-        absorb(run_proc(argv, args.timeout))
+        remaining = budget_limit - (time.monotonic() - t0)
+        if remaining < 0.5:
+            ctx["admission"] = admission_snapshot(
+                "budget-exhausted", "BUDGET_EXHAUSTED",
+                "准备执行时预算已耗尽")
+            return fail(EXIT_ADMISSION,
+                        "准备执行时预算已耗尽（预算 %.1fs）；未启动命令"
+                        % budget_limit)
+        effective_timeout = min(float(args.timeout), max(0.1, remaining))
+        if effective_timeout < float(args.timeout):
+            notes.append("总预算只剩 %.1fs，命令超时由 %ss 截短为 %.1fs"
+                         % (remaining, args.timeout, effective_timeout))
+        absorb(run_proc(argv, effective_timeout))
         if ctx["timed_out"]:
-            notes.append("命令超过 %ss 未结束，已被 kill（退出码 124）" % args.timeout)
+            notes.append("命令超过 %.1fs 未结束，已被 kill（退出码 124）"
+                         % effective_timeout)
             return finish(EXIT_TIMEOUT)
         if ctx["exit_code"] == 0:
             ctx["ok"] = True
@@ -1011,6 +1343,9 @@ def main(argv=None) -> int:
         return finish(EXIT_UNAVAILABLE)
 
     # 有可用运行时：真正执行
+    rc = acquire_slot()
+    if rc is not None:
+        return rc
     rc = ensure_out()
     if rc is not None:
         return rc
@@ -1025,22 +1360,34 @@ def main(argv=None) -> int:
         notes.append("请求 --network %s：容器仍以 --network none 启动（不接任何外部网络）；"
                      "容器内 lo 的启用取决于镜像与命令，本工具不授予 CAP_NET_ADMIN"
                      % args.network)
-    notes.append("容器不注入任何宿主机环境变量（无凭据）；"
-                 "输出目录由 uid %s 写入，宿主机属主不允许时命令会失败并记录 exit_code"
+    notes.append("容器不注入任何宿主机环境变量（无凭据）；输出目录已按 uid %s "
+                 "调整 other rwx + sticky，写入失败仍会如实记录 exit_code"
                  % CONTAINER_UID)
 
     name = "iotfw-sandbox-" + uuid.uuid4().hex[:12]
-    argv = build_container_argv(runtime.get("path") or runtime["name"],
-                                args.image, fw_abs, out_abs, args, name)
+    rt_argv = runtime.get("argv") or [runtime.get("path") or runtime["name"]]
+    argv = build_container_argv(rt_argv, args.image, fw_abs, out_abs, args, name)
     ctx["command"] = argv
     if args.verbose:
         _say("[exec] %s" % " ".join(argv), sys.stderr)
 
-    absorb(run_proc(argv, args.timeout))
+    remaining = budget_limit - (time.monotonic() - t0)
+    if remaining < 0.5:
+        ctx["admission"] = admission_snapshot(
+            "budget-exhausted", "BUDGET_EXHAUSTED", "准备执行时预算已耗尽")
+        return fail(EXIT_ADMISSION,
+                    "准备执行时预算已耗尽（预算 %.1fs）；未启动容器" % budget_limit)
+    effective_timeout = min(float(args.timeout), max(0.1, remaining))
+    if effective_timeout < float(args.timeout):
+        notes.append("总预算只剩 %.1fs，命令超时由 %ss 截短为 %.1fs"
+                     % (remaining, args.timeout, effective_timeout))
+
+    absorb(run_proc(argv, effective_timeout))
 
     if ctx["timed_out"]:
-        cleanup_container(runtime.get("path") or runtime["name"], name, notes)
-        notes.append("命令超过 %ss 未结束，已被 kill（退出码 124）" % args.timeout)
+        cleanup_container(rt_argv, name, notes)
+        notes.append("命令超过 %.1fs 未结束，已被 kill（退出码 124）"
+                     % effective_timeout)
         return finish(EXIT_TIMEOUT)
 
     if ctx["exit_code"] == 0:
