@@ -1,0 +1,2 @@
+[32m[+] Emulated binary usr/sbin/upnpd generated output in /tmp/qemu_tmp_upnpd.txt.[0m
+[32m[+] Emulated binary bin/busybox generated output in /tmp/qemu_tmp_busybox.txt.[0m

@@ -4,10 +4,10 @@
 
 为什么需要它
 ------------
-本 skill 的判定链路里有 16 种 schema：FirmwareManifest / AuditTask / Candidate /
+本 skill 的判定链路里有 17 种 schema：FirmwareManifest / AuditTask / Candidate /
 Finding / Evidence / GateResult / AuditStages / ScanWaiver / SandboxRun /
-BenchManifest，以及黑板层的 Fact / Intent / Hint / EmulationResult /
-BoardState / BoardEvent。它们此前散落在各自的脚本输出里，字段名、必填项、枚举值、
+BenchManifest / EmbaImport，以及黑板层的 Fact / Intent / Hint /
+EmulationResult / BoardState / BoardEvent。它们此前散落在各自的脚本输出里，字段名、必填项、枚举值、
 schema 版本各写各的，Markdown 文案一变就可能影响判定。
 本模块把这些契约收敛到一处：
 
@@ -47,6 +47,7 @@ SUPPORTED: Dict[str, List[str]] = {
     "scan-waiver": ["scan-waiver/1.0"],
     "bench-manifest": ["bench-manifest/1.0"],
     "sandbox-run": ["sandbox-run/1.1", "sandbox-run/1.0"],
+    "emba-import": ["emba-import/1.0"],
     # ── 黑板（M1）：事实、意图、提示、仿真结果、快照与事件 ──────────────────
     "fact": ["fact/1.0"],
     "intent": ["intent/1.0"],
@@ -70,6 +71,8 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 FACT_TYPES = (
     "firmware", "file", "elf", "architecture", "service", "config",
     "credential", "syscall", "api-call", "network", "scan", "stage", "other",
+    # M3：EMBA 适配器显式区分三类观察，类型不同才不能被互相「升级」
+    "dependency", "runtime-process", "port-response",
 )
 SOURCE_TYPES = ("static", "dynamic", "emulation", "tool-report", "manual")
 EVIDENCE_TYPES = ("static", "dynamic", "emulation", "fuzzing", "manual")
@@ -603,6 +606,211 @@ def validate_sandbox_run(obj: Any) -> List[Dict[str, str]]:
     return out
 
 
+def validate_emba_import(obj: Any) -> List[Dict[str, str]]:
+    """EmbaImport：离线解析 EMBA 日志得到的观察包。
+
+    契约重点不是「字段多」，而是三件事：
+    * 每条事实都能追到一条已存在的证据，且 run/固件绑定一致；
+    * 三类观察的类型与 value.observation 必须匹配，不能把静态服务写成进程或端口；
+    * status 与 errors、counts 必须自洽，缺日志不得伪装成 parsed。
+    """
+    out: List[Dict[str, str]] = []
+    if not _schema(out, obj, "emba", "emba-import"):
+        return out
+    _req(out, obj, "emba", "run_id", str)
+    _hex(out, obj, "emba", "firmware_sha256")
+    _enum(out, obj, "emba", "status", ("parsed", "partial", "failed"))
+    adapter = obj.get("adapter")
+    if not isinstance(adapter, dict):
+        _err(out, "emba.adapter", "MISSING", "缺少 adapter 对象")
+    else:
+        _req(out, adapter, "emba.adapter", "name", str)
+        _req(out, adapter, "emba.adapter", "version", str)
+    tool = obj.get("tool")
+    if not isinstance(tool, dict):
+        _err(out, "emba.tool", "MISSING", "缺少 tool 对象")
+    else:
+        _req(out, tool, "emba.tool", "name", str)
+        _req(out, tool, "emba.tool", "version", str)
+    if "expect_version" in obj and obj["expect_version"] is not None \
+            and not isinstance(obj["expect_version"], str):
+        _err(out, "emba.expect_version", "BAD_TYPE", "expect_version 必须是字符串或 null")
+
+    run_id = obj.get("run_id")
+    fw = obj.get("firmware_sha256")
+
+    inputs = _list_of_dicts(out, obj, "emba", "inputs")
+    for i, row in enumerate(inputs):
+        path = f"emba.inputs[{i}]"
+        _req(out, row, path, "role", str)
+        _req(out, row, path, "path", str)
+        _hex(out, row, path, "sha256")
+        _opt_int(out, row, path, "size")
+
+    evidence = _list_of_dicts(out, obj, "emba", "evidence")
+    ev_ids: set = set()
+    ev_by_id: Dict[str, Dict[str, Any]] = {}
+    for i, row in enumerate(evidence):
+        path = f"emba.evidence[{i}]"
+        out.extend(validate_evidence_record(row, path))
+        eid = row.get("evidence_id")
+        if isinstance(eid, str) and eid:
+            if eid in ev_ids:
+                _err(out, f"{path}.evidence_id", "DUPLICATE_ID",
+                     f"证据 ID 重复：{eid}")
+            ev_ids.add(eid)
+            ev_by_id[eid] = row
+        _bind(out, row, path, run_id, fw)
+
+    facts = _list_of_dicts(out, obj, "emba", "facts")
+    fact_ids: set = set()
+    fact_by_id: Dict[str, Dict[str, Any]] = {}
+    for i, row in enumerate(facts):
+        path = f"emba.facts[{i}]"
+        out.extend(validate_fact(row))
+        fid = row.get("fact_id")
+        if isinstance(fid, str) and fid:
+            if fid in fact_ids:
+                _err(out, f"{path}.fact_id", "DUPLICATE_ID",
+                     f"事实 ID 重复：{fid}")
+            fact_ids.add(fid)
+            fact_by_id[fid] = row
+        _bind(out, row, path, run_id, fw)
+        refs = row.get("evidence_refs")
+        if isinstance(refs, list):
+            for ref in refs:
+                if not isinstance(ref, str):
+                    continue
+                if ref not in ev_ids:
+                    _err(out, f"{path}.evidence_refs", "DANGLING_EVIDENCE",
+                         f"事实引用了不存在的证据：{ref!r}")
+        typ = row.get("type")
+        value = row.get("value") if isinstance(row.get("value"), dict) else {}
+        obs_kind = value.get("observation")
+        ref_types = {ev_by_id[r].get("type") for r in (refs or [])
+                     if isinstance(r, str) and r in ev_by_id}
+        if typ == "service":
+            if obs_kind != "static-discovery":
+                _err(out, f"{path}.value.observation", "OBSERVATION_MISMATCH",
+                     "service 只能表示静态发现（static-discovery）")
+            if ref_types and "static" not in ref_types:
+                _err(out, f"{path}.evidence_refs", "EVIDENCE_TYPE_MISMATCH",
+                     "service 必须引用 static 证据")
+        elif typ == "runtime-process":
+            if obs_kind != "runtime-process":
+                _err(out, f"{path}.value.observation", "OBSERVATION_MISMATCH",
+                     "runtime-process 必须标记 runtime-process")
+            if ref_types and "emulation" not in ref_types:
+                _err(out, f"{path}.evidence_refs", "EVIDENCE_TYPE_MISMATCH",
+                     "runtime-process 必须引用 emulation 证据")
+        elif typ == "port-response":
+            if obs_kind != "port-response":
+                _err(out, f"{path}.value.observation", "OBSERVATION_MISMATCH",
+                     "port-response 必须标记 port-response")
+            if ref_types and "dynamic" not in ref_types:
+                _err(out, f"{path}.evidence_refs", "EVIDENCE_TYPE_MISMATCH",
+                     "port-response 必须引用 dynamic 证据")
+
+    observations = _list_of_dicts(out, obj, "emba", "observations")
+    for i, row in enumerate(observations):
+        path = f"emba.observations[{i}]"
+        _req(out, row, path, "fact_id", str)
+        _enum(out, row, path, "type", FACT_TYPES)
+        if "observation" in row and row["observation"] is not None \
+                and not isinstance(row["observation"], str):
+            _err(out, f"{path}.observation", "BAD_TYPE", "observation 必须是字符串")
+        fid = row.get("fact_id")
+        if isinstance(fid, str) and fid and fid not in fact_ids:
+            _err(out, f"{path}.fact_id", "DANGLING_REF",
+                 f"observations 引用了不存在的事实：{fid!r}")
+        elif isinstance(fid, str) and fid in fact_by_id:
+            ftype = fact_by_id[fid].get("type")
+            if row.get("type") != ftype:
+                _err(out, f"{path}.type", "TYPE_MISMATCH",
+                     f"观察类型 {row.get('type')!r} 与事实类型 {ftype!r} 不一致")
+
+    errors = _list_of_dicts(out, obj, "emba", "errors")
+    for i, row in enumerate(errors):
+        path = f"emba.errors[{i}]"
+        _req(out, row, path, "code", str)
+        _req(out, row, path, "message", str)
+        if "path" in row and row["path"] is not None and not isinstance(row["path"], str):
+            _err(out, f"{path}.path", "BAD_TYPE", "path 必须是字符串")
+        _opt_int(out, row, path, "line")
+    limitations = obj.get("limitations")
+    if limitations is not None:
+        if not isinstance(limitations, list) \
+                or any(not isinstance(x, str) for x in limitations):
+            _err(out, "emba.limitations", "BAD_TYPE", "limitations 必须是字符串数组")
+
+    counts = obj.get("counts")
+    if not isinstance(counts, dict):
+        _err(out, "emba.counts", "MISSING", "缺少 counts 对象")
+    else:
+        for key, actual in (("evidence", len(evidence)), ("facts", len(facts)),
+                            ("errors", len(errors))):
+            val = counts.get(key)
+            if not isinstance(val, int) or isinstance(val, bool) or val < 0:
+                _err(out, f"emba.counts.{key}", "BAD_VALUE",
+                     f"{key} 必须是非负整数")
+            elif val != actual:
+                _err(out, f"emba.counts.{key}", "COUNT_MISMATCH",
+                     f"counts.{key}={val}，实际 {actual}")
+        by_type = counts.get("by_type")
+        if not isinstance(by_type, dict):
+            _err(out, "emba.counts.by_type", "MISSING", "缺少 counts.by_type 对象")
+        else:
+            actual_types: Dict[str, int] = {}
+            for row in facts:
+                typ = row.get("type")
+                if isinstance(typ, str):
+                    actual_types[typ] = actual_types.get(typ, 0) + 1
+            for typ, val in by_type.items():
+                if typ not in FACT_TYPES:
+                    _err(out, f"emba.counts.by_type.{typ}", "BAD_ENUM",
+                         f"未知事实类型：{typ!r}")
+                if not isinstance(val, int) or isinstance(val, bool) or val < 0:
+                    _err(out, f"emba.counts.by_type.{typ}", "BAD_VALUE",
+                         "类型计数必须是非负整数")
+                elif val != actual_types.get(typ, 0):
+                    _err(out, f"emba.counts.by_type.{typ}", "COUNT_MISMATCH",
+                         f"by_type.{typ}={val}，实际 {actual_types.get(typ, 0)}")
+            for typ in sorted(actual_types):
+                if typ not in by_type:
+                    _err(out, f"emba.counts.by_type.{typ}", "COUNT_MISMATCH",
+                         f"缺少类型计数 {typ}")
+        for key, kind in (("static-discovery", "static-discovery"),
+                          ("runtime-process", "runtime-process"),
+                          ("port-response", "port-response")):
+            if key not in counts:
+                continue
+            val = counts.get(key)
+            actual = sum(1 for row in facts
+                         if (row.get("value") or {}).get("observation") == kind)
+            if not isinstance(val, int) or isinstance(val, bool) or val < 0:
+                _err(out, f"emba.counts.{key}", "BAD_VALUE",
+                     "观察计数必须是非负整数")
+            elif val != actual:
+                _err(out, f"emba.counts.{key}", "COUNT_MISMATCH",
+                     f"counts.{key}={val}，实际 {actual}")
+
+    status = obj.get("status")
+    if status == "parsed" and errors:
+        _err(out, "emba.status", "STATUS_INCONSISTENT",
+             "status=parsed 但 errors 非空")
+    if status in ("partial", "failed") and not errors:
+        _err(out, "emba.status", "STATUS_INCONSISTENT",
+             f"status={status} 但 errors 为空")
+    if status == "failed":
+        fatal_codes = {"F50_MISSING", "F50_EMPTY", "F50_CORRUPT",
+                       "EMBA_VERSION_MISSING", "EMBA_VERSION_MISMATCH",
+                       "FIRMWARE_MISMATCH"}
+        if not any(row.get("code") in fatal_codes for row in errors):
+            _err(out, "emba.status", "STATUS_INCONSISTENT",
+                 "status=failed 但没有致命错误码")
+    return out
+
+
 def validate_fact(obj: Any) -> List[Dict[str, str]]:
     """Fact：有来源、带适用范围、绑定 run 与固件的客观观察。"""
     out: List[Dict[str, str]] = []
@@ -955,6 +1163,7 @@ VALIDATORS = {
     "scan-waiver": validate_scan_waiver,
     "bench-manifest": validate_bench_manifest,
     "sandbox-run": validate_sandbox_run,
+    "emba-import": validate_emba_import,
     "fact": validate_fact,
     "intent": validate_intent,
     "hint": validate_hint,

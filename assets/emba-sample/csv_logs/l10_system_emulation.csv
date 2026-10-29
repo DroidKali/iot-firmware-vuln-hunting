@@ -1,0 +1,2 @@
+FIRMWARE_PATH;RESULT_SOURCE;Booted state;ICMP state;TCP-0 state;TCP state;online services cnt;available network services;IP address;Network mode;ARCHIVE_PATH_;R_PATH
+fw.bin;L10;Booted yes;ICMP ok;TCP-0 ok;TCP ok;2;80/tcp,443/tcp;IP address: 192.168.0.1;Network mode: default (eth0|eth0|0|/etc/init.d/S40network|/sbin/init);archive;rootfs

@@ -13,6 +13,8 @@
 Phase 0–5 产物导入
 -------------------
 manifest / layer1 / stages 各生成一条 evidence + 一条 fact，candidate 逐条导入。
+EMBA 适配器产物（emba-import/1.0）按 evidence 先、fact 后的顺序导入；适配器
+已经把「静态发现 / 运行进程 / 端口响应」编码成不同 Fact.type，黑板不再做二次解释。
 导入不改变原产物，也不改变 coverage_gate 的判定：门禁仍只读原有结构化文件，
 黑板只是把「已经发生过什么」变成可回放的事实。
 
@@ -48,6 +50,7 @@ try:
                                    validate_risk_disposition)
     from contracts import summarize as _contract_summary
     from contracts import validate_board_state as _validate_board_state
+    from contracts import validate_emba_import as _validate_emba_import
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"无法加载同目录模块：{exc}")
 
@@ -412,6 +415,57 @@ class BoardStore:
         })
         return {"evidence": eid, "fact": fid}
 
+
+    # ── EMBA 适配器产物导入 ─────────────────────────────────────────────────
+    def _check_emba(self, path: str) -> Dict[str, Any]:
+        doc = _read_json(path)
+        if not isinstance(doc, dict):
+            raise StoreError("EMBA_INVALID", f"{path}: 顶层必须是对象")
+        errors = _validate_emba_import(doc)
+        if errors:
+            raise StoreError("EMBA_INVALID",
+                             f"{path}: " + _contract_summary(errors))
+        if doc.get("run_id") != self.state["run_id"]:
+            raise StoreError("RUN_MISMATCH",
+                             f"EMBA run_id={doc.get('run_id')!r} 与黑板 "
+                             f"{self.state['run_id']!r} 不一致")
+        if str(doc.get("firmware_sha256") or "").lower() != \
+                str(self.state["firmware_sha256"]).lower():
+            raise StoreError("FIRMWARE_MISMATCH",
+                             "EMBA firmware_sha256 与黑板不一致")
+        if doc.get("status") == "failed":
+            codes = [str(e.get("code")) for e in doc.get("errors") or []]
+            raise StoreError("EMBA_FAILED",
+                             "EMBA 解析失败，拒绝导入黑板：" + ", ".join(codes))
+        return doc
+
+    def _import_emba(self, path: str,
+                     doc: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        doc = doc if doc is not None else self._check_emba(path)
+        ev_added = ev_dup = 0
+        for row in doc.get("evidence") or []:
+            res = self.record_evidence(row)
+            if res.get("duplicate"):
+                ev_dup += 1
+            else:
+                ev_added += 1
+        fact_added = fact_dup = 0
+        by_type: Dict[str, int] = {}
+        for row in doc.get("facts") or []:
+            res = self.record_fact(row)
+            typ = str(row.get("type"))
+            by_type[typ] = by_type.get(typ, 0) + 1
+            if res.get("duplicate"):
+                fact_dup += 1
+            else:
+                fact_added += 1
+        return {"input": {"evidence": len(doc.get("evidence") or []),
+                          "facts": len(doc.get("facts") or [])},
+                "evidence": {"added": ev_added, "duplicates": ev_dup},
+                "facts": {"added": fact_added, "duplicates": fact_dup},
+                "by_type": by_type,
+                "status": doc.get("status")}
+
     def _load_candidates(self, path: str) -> List[Dict[str, Any]]:
         """读取候选：兼容 JSONL 逐行、envelope、裸数组与单个对象。
 
@@ -481,11 +535,13 @@ class BoardStore:
     def import_artifacts(self, manifest: Optional[str] = None,
                          layer1: Optional[str] = None,
                          stages: Optional[str] = None,
-                         candidates: Optional[str] = None) -> Dict[str, Any]:
+                         candidates: Optional[str] = None,
+                         emba: Optional[str] = None) -> Dict[str, Any]:
         report: Dict[str, Any] = {"schema": "board-import/1.0",
                                   "workspace": self.workspace, "items": {}}
-        # 先解析最容易出错的候选，避免「导入一半才报错」留下半份状态。
+        # 先解析最容易出错的输入，避免「导入一半才报错」留下半份状态。
         cand_rows = self._load_candidates(candidates) if candidates else None
+        emba_doc = self._check_emba(emba) if emba else None
         if manifest:
             report["items"]["manifest"] = self._import_manifest(manifest)
         if layer1:
@@ -494,6 +550,8 @@ class BoardStore:
             report["items"]["stages"] = self._import_stages(stages)
         if candidates:
             report["items"]["candidates"] = self._import_candidates(candidates, cand_rows)
+        if emba:
+            report["items"]["emba"] = self._import_emba(emba, emba_doc)
         report["summary"] = self.summary()
         return report
 
@@ -522,6 +580,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--layer1")
     p.add_argument("--stages")
     p.add_argument("--candidates")
+    p.add_argument("--emba", help="adapter_emba.py 输出的 emba-import/1.0")
 
     p = sub.add_parser("add", help="追加一条记录")
     p.add_argument("--workspace", required=True)
@@ -577,7 +636,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         store = BoardStore.load(args.workspace)
         if args.cmd == "import":
             report = store.import_artifacts(args.manifest, args.layer1,
-                                            args.stages, args.candidates)
+                                            args.stages, args.candidates,
+                                            args.emba)
             print(json.dumps(report, ensure_ascii=False, indent=2))
             return 0
         if args.cmd == "add":

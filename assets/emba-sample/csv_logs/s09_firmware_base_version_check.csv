@@ -1,0 +1,3 @@
+EMBA source module;binary/file;rule identifier;version_rule;version_detected;csv_rule;license;static/emulation
+S09;usr/sbin/dropbear;dropbear;dropbear;2022.83;csv;MIT;static
+S09;usr/lib/libcurl.so;curl;libcurl;7.68.0;csv;MIT;static

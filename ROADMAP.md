@@ -1,6 +1,6 @@
 # 路线图（Roadmap）
 
-> 状态基线：2026-10-27（M1 已落地）。当前仓库已交付 Phase 0–5 确定性流水线、覆盖率/Strict 门禁、
+> 状态基线：2026-10-29（M1–M3 已落地；M4 方法论已落地，执行器未实现）。当前仓库已交付 Phase 0–5 确定性流水线、覆盖率/Strict 门禁、
 > 结构化契约、fail-closed 沙箱入口与合成基准；本文件描述在此之上的 **V2 渐进式架构**。
 >
 > 这是实施计划，不代表下列能力已经全部实现或通过测试。每个里程碑落地前都必须
@@ -12,14 +12,15 @@
 |---|---|---|
 | 确定性流水线 | Phase 0–5 已落地；门禁可阻断 | 保持不变，作为控制平面与最终裁决者 |
 | 黑板 / 动态探索 | M1 已落地：事实/候选/意图/提示持久化，事件日志 + 快照 + 去重 + 状态机；Planner / Scheduler 编排未实现 | Fact / Candidate / Intent / Hint 持久化，可回放、可去重、可预算 |
-| 数据契约 | 16 种 schema，含 Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent 与 `evidence/1.1`；状态转换由 `board_transitions.py` 校验 | 随适配器扩展 `EmulationResult` 后端字段，保持向后兼容 |
+| 数据契约 | 17 种 schema，含 Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent、`evidence/1.1` 与 `emba-import/1.0`；状态转换由 `board_transitions.py` 校验 | 随适配器扩展 `EmulationResult` 后端字段，保持向后兼容 |
 | 沙箱 | `sandbox_run.py` 已 fail-closed，但尚未证明所有执行路径都经过它 | 所有解包、执行、仿真、外部工具调用统一入口；隔离失败不回落宿主机 |
-| EMBA / Qiling / QEMU | 仅作为人工选路与交叉验证建议，无适配器、无统一结果契约 | 适配器解析既有产物，按条件准入，输出统一 `EmulationResult` |
+| EMBA / Qiling / QEMU | M3 的 EMBA 适配仅用于导入既有日志；M4 主路径是按 `references/emulation-methodology.md` 用 QEMU 做轻量整机仿真，不依赖 EMBA；QEMU/Qiling 执行器未实现 | 适配器只消费既有产物；整机仿真按架构/内核/init/网络判据执行，输出统一 `EmulationResult` |
 | 检测质量评估 | 合成基准 + 回归门禁 | 增加合法来源、可追溯、人工复核的真实固件基准 |
 | EALB | 校准工具已就绪，样本不足时标 `heuristic` | 用真实工时样本校准，并在报告中限定适用范围 |
 
-**近期优先级**：M1（契约与黑板）→ M2（资源与沙箱统一）→ M3（EMBA 适配器）→
-M4（Qiling 定向仿真）→ M5（真实固件基准）。M0 的盘点动作持续进行，不单独占一个版本。
+**近期优先级**：M1（契约与黑板）、M2（资源与沙箱统一）、M3（EMBA 适配器）已落地；
+M4 的方法论已落地，下一步是 `emu_plan.py` / `emu_run.py`（整机仿真执行器，Qiling 为分支）→
+M5（真实固件基准）。M0 的盘点动作持续进行，不单独占一个版本。
 
 ## 1. 设计原则
 
@@ -202,8 +203,8 @@ G1–G7 必须是代码校验器，而不是 Prompt、README 或报告模板。�
 逐项核查遗留问题，区分「已实现 / 部分实现 / 有代码但未验证 / 未实现」；实际运行测试，
 记录命令、版本、退出码与结果。重点确认 Strict、Coverage、沙箱和结构化证据的真实调用路径。
 
-**现状**：2026-10 已完成一轮门禁、契约、沙箱入口与合成基准整改；M2 落地后
-selftest 覆盖 22 组 / 221 条断言，`exec_paths.py` 已给出 15 个脚本 / 9 条子进程调用的
+**现状**：2026-10 已完成一轮门禁、契约、沙箱入口与合成基准整改；M3 落地后
+selftest 覆盖 23 组 / 246 条断言，`exec_paths.py` 已给出 16 个脚本 / 9 条子进程调用的
 分类清单。沙箱已在无运行时、Python 桩运行时与 **Ubuntu 24.04.5 + Docker 29.9.0** 下验证
 fail-closed、资源准入、超时清理与容器内权限；`sink_scan.py` 的 ast-grep / semgrep
 仍属宿主机静态解析。
@@ -223,7 +224,7 @@ fail-closed、资源准入、超时清理与容器内权限；`sink_scan.py` 的
 - `validate_transition` 与结构化失败原因；
 - Phase 0–5 的产物可以导入黑板，门禁仍只读原有结构化产物。
 
-**现状（2026-10-27，已落地）**：`contracts.py` 扩到 16 种 schema（含六个黑板对象与 `evidence/1.1`）；
+**现状（2026-10-27，已落地）**：`contracts.py` 当时扩到 16 种 schema（含六个黑板对象与 `evidence/1.1`；M3 后为 17 种）；
 `board_events.py` 提供 append-only 日志、`seq` 校验与回放；`board_store.py` 提供快照、去重、
 导入与状态转换；`board_transitions.py` 提供候选状态机与类型化证据校验。selftest 第 21 组
 覆盖重复事件幂等、非法转换拒绝、跨 run 证据拒绝、快照删除后恢复、坏事件行报错和
@@ -269,17 +270,53 @@ Intent 预算执行器。
 先解析已有 EMBA 产物，再按需增加受控调用；用真实产物 fixture 验证服务、ELF、架构、
 依赖和失败状态解析；确保静态发现、运行进程、端口响应各自有明确语义。
 
+**现状（2026-10-29，已落地）**：新增 `scripts/adapter_emba.py`，离线解析 F50 / P99 / S09 /
+L15 / L10 / S115，输出 `emba-import/1.0`；F50 必需，缺可选日志为 `partial`，坏行报
+`PARSE_ERROR`，缺 F50 / 版本不符 / 固件哈希不符为结构化失败。三类观察落成不同
+`Fact.type`（`service` / `runtime-process` / `port-response`），证据类型分别为
+`static` / `emulation` / `dynamic`，不存在互升路径。`contracts.py` 增加 `emba-import/1.0`
+校验器，`board_store.py import --emba` 在写入前核对 run / 固件 / status；重复解析输出
+字节一致，重复导入保持幂等。selftest 第 23 组覆盖上述路径。仓库内 `assets/emba-sample/`
+是按本机 EMBA HEAD `65b7870fb` 的真实写入点构造的**合成夹具**：F50 的
+`write_csv_log()` 会固定追加 NA 填充列，L10 的值带 `IP address:` / `Network mode:`
+展示前缀，S09 表头第 4 列 `version_rule` 实际写入的是 app name；适配器分别做了
+NA 过滤、前缀剥离与字段正名，并由 selftest 第 23 组钉住。
+
+**未完成**：尚未用真实设备导出的 EMBA 日志复验；受控调用 EMBA（按需启动）未实现。
+
+**EMBA 的定位**：它只是**可选的产物来源**，不是本 skill 的前提。没有现成日志时，
+不要为了导入去跑 EMBA；直接走 M4 的轻量整机仿真方法论。
+
 **验收**：同一份 EMBA 产物重复解析结果稳定；缺字段/版本不符时返回结构化失败；
 三类观察在黑板中类型不同、不能互相升级；不启动任何仿真即可完成解析。
 
-### M4：Qiling 定向仿真
+### M4：轻量整机仿真（EMBA 方法论，不依赖 EMBA）
 
-从目标明确、依赖可控的二进制开始；实现事件过滤、上下文捕获、Evidence 归一化；
-区分 syscall / API / 库函数 Hook；用负例证明普通运行事件不会被误报为漏洞。
+把 EMBA 的整机仿真流程提炼成不依赖它的判据与命令：架构/内核/init/镜像/网络/观测/失败
+分类。优先用 `qemu-system-*` + 最小 ext2 镜像 + user-mode 网络，不安装 EMBA、不跑它的
+模块流水线。
 
-**验收**：至少一个真实二进制在受控输入下产生可复核 Evidence；过滤规则版本化；
-原始日志可追溯；普通 `connect()` 事件不会被标成 RCE；`BLOCKED` 与 `FAILED`
-可区分。
+**现状（2026-10-29）**：已新增 `references/emulation-methodology.md`，覆盖 P0–P5、架构与
+QEMU 矩阵、镜像构建、启动阶梯、网络模型、证据字段与失败分类；`emu_plan.py` /
+`emu_run.py` 尚未实现，仓库内也尚未跑过真实 QEMU 启动。
+
+**交付物**
+
+- `references/emulation-methodology.md`（已落地）；
+- `emu_plan.py`：只读探测 rootfs，输出启动计划（架构、init 候选、内核需求、镜像参数、
+  QEMU argv、blockers），不执行；
+- `emu_run.py`：经 `sandbox_run.py` 执行 QEMU，采集串口、退出码与清理结果，输出
+  `EmulationResult`；
+- 一个真实 rootfs 的可复现启动记录（命令、内核 sha256、串口日志、退出码）。
+
+**验收**：在未安装 EMBA 的 Linux 环境，至少一个真实 rootfs 在预算内启动到 shell 或
+init；失败时有结构化状态与下一步；不把「启动成功」或「端口开放」升级为漏洞结论。
+
+**定向分支（Qiling）**：整机起不来但目标二进制明确、依赖可控时，走 `adapter_qiling.py`；
+实现事件过滤、上下文捕获、Evidence 归一化，区分 syscall / API / 库函数 Hook；用负例
+证明普通运行事件不会被误报为漏洞。该分支的验收保持：至少一个真实二进制在受控输入下
+产生可复核 Evidence；过滤规则版本化；原始日志可追溯；普通 `connect()` 事件不会被标成
+RCE；`BLOCKED` 与 `FAILED` 可区分。
 
 ### M5：真实固件基准
 
@@ -303,12 +340,15 @@ scripts/
   board_store.py        # 新增：快照、查询、去重
   board_events.py       # 新增：append-only 事件日志与回放
   board_transitions.py  # 新增：validate_transition 与状态机
-  adapter_emba.py       # 新增：EMBA 产物解析
-  adapter_qiling.py     # 新增：Qiling 执行与事件归一化
+  adapter_emba.py       # 已新增：EMBA 产物离线解析（emba-import/1.0，可选）
+  emu_plan.py           # 待新增：只读探测 + 启动计划（不执行）
+  emu_run.py            # 待新增：经 sandbox_run 执行 QEMU 并归一化
+  adapter_qiling.py     # 待新增：Qiling 执行与事件归一化
   sandbox_run.py        # 现有：作为统一执行入口
   coverage_gate.py      # 现有：消费黑板导出的结构化产物
 references/
   data-contracts.md     # 现有：同步新增 schema
+  emulation-methodology.md # 已新增：不依赖 EMBA 的整机仿真方法论
   ...
 tests/                  # 新增时再引入；当前先用 selftest.py 承载集成回归
 ```
@@ -327,6 +367,7 @@ tests/                  # 新增时再引入；当前先用 selftest.py 承载�
 |---|---|
 | Fact 缺少来源/范围 | 绑定 Evidence、固件 hash 和运行上下文 |
 | EMBA 静态结果被当作运行时事实 | 类型化 Fact，明确来源类别 |
+| 把 EMBA 当仿真前提，安装/跑批耗时数小时 | 只导入既有日志；主路径按 `emulation-methodology.md` 用 QEMU 轻量启动 |
 | Qiling 日志噪声大 | 过滤、上下文捕获、归一化三层处理 |
 | Gate 只在 Prompt 中 | 代码校验器和状态转换测试 |
 | 沙箱仅覆盖主路径 | 统一入口并测试失败关闭 |
@@ -363,6 +404,7 @@ tests/                  # 新增时再引入；当前先用 selftest.py 承载�
 - 任一 Fact 都能追到 Evidence、固件 hash 与运行上下文；
 - Fact / Candidate / Intent / EmulationResult / BoardState 均有代码校验器；
 - 所有解包、执行、仿真与外部工具调用都经过 Sandbox Runner，隔离失败 fail-closed；
+- 整机仿真主路径不依赖 EMBA，能在只有 QEMU + 基础镜像的环境复现；
 - `Candidate → VERIFIED` 只能由漏洞类型专属 `validate_transition` 改变；
 - Evidence Integrity / Coverage / Strict / Risk Disposition 四层相互独立；
 - 真实固件基准可复现地给出 Precision / Recall / 成本，合成基准只作回归；

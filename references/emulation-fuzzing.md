@@ -62,6 +62,8 @@ Q1 要验证的结论类型？
 
 ## 2. 整机模拟（D1：手工 qemu-system 起步；FAT / Firmadyne / FirmAE 作对照）
 
+> 完整方法论（可行性判定、rootfs 归一化、镜像构建、架构/QEMU 矩阵、启动阶梯、user-mode/TAP 选择、证据与失败分类）见 **`references/emulation-methodology.md`**；本节只给最短起步与故障表。不要把 EMBA 当作仿真的前提。
+
 ### 手工 qemu-system 起步（D1 的首选实现）
 
 **先手工起**——错误信息最原始，panic 会直接告诉你该修什么；编排工具会把这些信息包起来，反而不好定位。

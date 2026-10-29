@@ -1,0 +1,2 @@
+P99;usr/sbin/upnpd;ELF32;2's complement, little endian;MIPS;0x50001007;mips;ELF 32-bit LSB executable, MIPS, dynamically linked;d41d8cd98f00b204e9800998ecf8427e
+P99;bin/busybox;ELF32;2's complement, little endian;ARM;0x50002000;arm;ELF 32-bit LSB executable, ARM, statically linked;d41d8cd98f00b204e9800998ecf8427e

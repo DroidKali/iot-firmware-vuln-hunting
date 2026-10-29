@@ -32,7 +32,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 FAILS: list = []
 TOTAL = 0          # 实际执行的断言数：由脚本自己报，避免文档里的数字靠数日志漂移
-NGROUPS = 22       # 组数：与各处 [N/22] 表头一致，末尾会自校验，防止「13 组」再次漂移
+NGROUPS = 23       # 组数：与各处 [N/23] 表头一致，末尾会自校验，防止「13 组」再次漂移
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -301,7 +301,7 @@ def main() -> int:
         with open(p, "w", encoding="utf-8", newline="\n") as f:
             f.write(txt)
 
-    print("\n[1/22] fw_triage.py — 度量 / 加固画像 / 分层")
+    print("\n[1/23] fw_triage.py — 度量 / 加固画像 / 分层")
     r = run([os.path.join(HERE, "fw_triage.py"), img, "--rootfs", root, "--tier",
              "--budget", "800", "--out", metrics, "--plan", plan, "--pretty"])
     check("fw_triage 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
@@ -329,7 +329,7 @@ def main() -> int:
     check("T3 含 www/index.html", "www/index.html" in set(t["t3_list"]))
     check("EALB > 0", t["ealoc_total"] > 0, str(t["ealoc_total"]))
 
-    print("\n[2/22] sink_scan.py — Layer 1 危险模式扫描")
+    print("\n[2/23] sink_scan.py — Layer 1 危险模式扫描")
     r = run([os.path.join(HERE, "sink_scan.py"), root, "--json", sinks])
     check("sink_scan 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
     if r.returncode != 0:
@@ -343,19 +343,19 @@ def main() -> int:
     check("etc/passwd 不再误报 P1-S-020", ("P1-S-020", "etc/passwd") not in key)
     check("文档目录被跳过", not any(f["file"].startswith("usr/share/doc") for f in sd["findings"]))
 
-    print("\n[3/22] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
+    print("\n[3/23] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vpart, "--tiering", tiering])
     check("不完整输入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
 
-    print("\n[4/22] coverage_gate.py — 覆盖率门禁（完整应通过）")
+    print("\n[4/23] coverage_gate.py — 覆盖率门禁（完整应通过）")
     out = os.path.join(base, "40-coverage.md")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vfull, "--tiering", tiering, "--out", out])
     check("完整输入 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("门禁报告已生成", os.path.isfile(out))
 
-    print("\n[5/22] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
+    print("\n[5/23] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
     bad_rep = os.path.join(base, "report-bad.md")
     with open(bad_rep, "w", encoding="utf-8") as fh:
         fh.write(
@@ -443,7 +443,7 @@ def main() -> int:
     check("⑥ 保留指针行（移动语义）→ 退出码 0", r.returncode == 0,
           r.stdout.strip()[-200:])
 
-    print("\n[6/22] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
+    print("\n[6/23] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
     review_bad = os.path.join(base, "25-review-list.md")
     with open(review_bad, "w", encoding="utf-8") as fh:
         fh.write("- [x] `www/cgi-bin/ping.cgi`\n"     # 有结论 → OK
@@ -475,7 +475,7 @@ def main() -> int:
     check("审阅清单一致 → 退出码 0", r.returncode == 0,
           r.stdout.strip()[-160:])
 
-    print("\n[7/22] coverage_gate.py — 报告 9 必填字段校验")
+    print("\n[7/23] coverage_gate.py — 报告 9 必填字段校验")
     f_bad = os.path.join(base, "report-fields-bad.md")
     with open(f_bad, "w", encoding="utf-8") as fh:
         fh.write(
@@ -511,7 +511,7 @@ def main() -> int:
     check("9 字段齐全 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("报告模板字段不误报", _template_fields_clean())
 
-    print("\n[8/22] coverage_gate.py — G4 入口级覆盖（文件级 100% ≠ 入口级 100%）")
+    print("\n[8/23] coverage_gate.py — G4 入口级覆盖（文件级 100% ≠ 入口级 100%）")
     tj_g4 = os.path.join(base, "02-tiering-g4.json")
     with open(tj_g4, "w", encoding="utf-8") as fh:
         json.dump({"rootfs_analysis": {"tiering": {"shards": [{"items": [
@@ -553,7 +553,7 @@ def main() -> int:
              "--entrypoints", ep_ok, "--out", os.path.join(base, "40-g4c.md")])
     check("入口枚举 + 全部处置 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
 
-    print("\n[9/22] coverage_gate.py — G5 绕过矩阵（「有防护」≠「防护有效」）")
+    print("\n[9/23] coverage_gate.py — G5 绕过矩阵（「有防护」≠「防护有效」）")
     vp_bad = os.path.join(base, "30-claim-bad.md")
     with open(vp_bad, "w", encoding="utf-8") as fh:
         fh.write("# 结论\n\n## F-001 · x\n\n- 影响: 已鉴权，不可利用\n")
@@ -583,7 +583,7 @@ def main() -> int:
     check("G5 端到端接入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
     check("检出绕过矩阵缺失", "绕过矩阵完备（G5）" in open(out_g5, encoding="utf-8").read())
 
-    print("\n[10/22] coverage_gate.py — G6 跨请求污点溯源（持久化来源须声明写入面）")
+    print("\n[10/23] coverage_gate.py — G6 跨请求污点溯源（持久化来源须声明写入面）")
     _F = ("- **类型**：命令注入\n- **位置**：`usr/sbin/httpd:0x1`\n- **优先级**：P1\n"
           "- **置信度**：CONFIRMED\n- **CVSS 3.1**：`AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H` = 9.8\n"
           "{src}- **Sink**：system()\n- **完整调用链**：1. a @0x1\n- **证据**：`[E1]` disasm\n")
@@ -618,7 +618,7 @@ def main() -> int:
              os.path.join(base, "40-g6b.md")])
     check("声明写入面端到端 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
 
-    print("\n[11/22] coverage_gate.py — G1/G2/G3 自动修复 + 类型→Base 命中")
+    print("\n[11/23] coverage_gate.py — G1/G2/G3 自动修复 + 类型→Base 命中")
     out_rec = os.path.join(base, "40-recover.md")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vpart, "--tiering", tiering,
@@ -652,7 +652,7 @@ def main() -> int:
     check("可映射类型 → 不报",
           not _cg.check_type_base(rep_mapped, base_md)["unmapped"])
 
-    print("\n[12/22] sink_scan.py — 结构级二次过滤（正则初筛 → 结构确认 / 否定 / 回退）")
+    print("\n[12/23] sink_scan.py — 结构级二次过滤（正则初筛 → 结构确认 / 否定 / 回退）")
     if HERE not in sys.path:
         sys.path.insert(0, HERE)
     import sink_scan as _ss  # noqa
@@ -731,7 +731,7 @@ def main() -> int:
         _ss.structural_match = _orig_sm
 
     # ── 13. 扫描完整性 + 门禁严格性（改进计划 §3 / §4 / §6 的回归）──────────
-    print("\n[13/22] 扫描完整性与门禁严格性")
+    print("\n[13/23] 扫描完整性与门禁严格性")
 
     sz = os.path.join(base, "scanint")
     os.makedirs(sz, exist_ok=True)
@@ -893,7 +893,7 @@ def main() -> int:
     check("组数常量与表头数量一致", n_hdr == NGROUPS, f"表头 {n_hdr} / 常量 {NGROUPS}")
 
     # ── 15. 高阶污点图：写面/读面必须分属不同 action ──────────────────────────
-    print("\n[15/22] taint_graph.py — 跨请求污点图（BDG/ADG）与 G7 门禁")
+    print("\n[15/23] taint_graph.py — 跨请求污点图（BDG/ADG）与 G7 门禁")
     tg = os.path.join(base, "tg")
     os.makedirs(tg, exist_ok=True)
     TG = os.path.join(HERE, "taint_graph.py")
@@ -1074,7 +1074,7 @@ def main() -> int:
           and r.returncode != 0, f"{row.get('status')}/{row.get('required')}")
 
     # ── 16. 候选输入契约：解析失败必须可见，strict 只吃版本化输入 ─────────────
-    print("\n[16/22] 候选输入契约：解析失败可见 / strict 只接受版本化输入")
+    print("\n[16/23] 候选输入契约：解析失败可见 / strict 只接受版本化输入")
     cd16 = os.path.join(base, "cand")
     os.makedirs(cd16, exist_ok=True)
 
@@ -1174,7 +1174,7 @@ def main() -> int:
           f"rc={rr.returncode}")
 
     # ── 17. 扫描完整性 / 阶段状态 / 结构引擎：降级可见，且 strict 能阻断 ─────
-    print("\n[17/22] 扫描完整性与阶段状态：降级可见、可阻断")
+    print("\n[17/23] 扫描完整性与阶段状态：降级可见、可阻断")
     sd17 = os.path.join(base, "scangate")
     os.makedirs(sd17, exist_ok=True)
     layer1_partial = os.path.join(sz, "out2.json")
@@ -1285,7 +1285,7 @@ def main() -> int:
           f"{row.get('status')}/{row.get('required')} rc={rr.returncode}")
 
     # ── 18. 结构化契约 / 固件清单 / EALB 校准 ────────────────────────────────
-    print("\n[18/22] 契约校验（contracts.py）、FirmwareManifest、EALB 校准")
+    print("\n[18/23] 契约校验（contracts.py）、FirmwareManifest、EALB 校准")
     cd18 = os.path.join(base, "contracts")
     os.makedirs(cd18, exist_ok=True)
     CONTRACTS = os.path.join(HERE, "contracts.py")
@@ -1410,7 +1410,7 @@ def main() -> int:
           json.dumps((ee.get("targets") or {}).get("minutes") or {},
                      ensure_ascii=False))
 
-    print("\n[19/22] sandbox_run.py — 不可信固件的隔离边界（fail-closed）")
+    print("\n[19/23] sandbox_run.py — 不可信固件的隔离边界（fail-closed）")
     SANDBOX = os.path.join(HERE, "sandbox_run.py")
     sb_dir = os.path.join(base, "sandbox")
     os.makedirs(sb_dir, exist_ok=True)
@@ -1476,7 +1476,7 @@ def main() -> int:
           rr.returncode == 4, f"rc={rr.returncode}")
 
     # ── 20. 基准评估：指标可复算、严格模式不吞未复核标签、回归可阻断 ──────────
-    print("\n[20/22] bench_eval.py — 基准评估（precision/recall/回归阻断）")
+    print("\n[20/23] bench_eval.py — 基准评估（precision/recall/回归阻断）")
     BENCH = os.path.join(HERE, "bench_eval.py")
     bench_manifest = os.path.join(os.path.dirname(HERE), "assets", "bench", "manifest.json")
     bd = os.path.join(base, "bench")
@@ -1558,7 +1558,7 @@ def main() -> int:
               f"rc={rr.returncode} reasons={db.get('regression_reasons')}")
 
     # ── 21. 黑板：契约 / 事件日志 / 快照恢复 / 状态机 ────────────────────────
-    print("\n[21/22] board_* — 黑板契约、事件日志、快照恢复与状态转换")
+    print("\n[21/23] board_* — 黑板契约、事件日志、快照恢复与状态转换")
     BOARD = os.path.join(HERE, "board_store.py")
     BEV = os.path.join(HERE, "board_events.py")
     BTR = os.path.join(HERE, "board_transitions.py")
@@ -1884,7 +1884,7 @@ def main() -> int:
               for e in st21.get("emulation_results") or [])
           and run([BOARD, "verify", "--workspace", ws21]).returncode == 0)
 
-    print("\n[22/22] resource_manager.py — 资源准入、并发排队与执行路径清单")
+    print("\n[22/23] resource_manager.py — 资源准入、并发排队与执行路径清单")
     RM = os.path.join(HERE, "resource_manager.py")
     EXECP = os.path.join(HERE, "exec_paths.py")
     q22 = os.path.join(base, "resource22")
@@ -2103,6 +2103,218 @@ def main() -> int:
     check("exec_paths：出现未分类执行路径时退出 1（新调用点不得静默漏网）",
           rr.returncode == 1 and _r22(bad_out).get("ok") is False,
           f"rc={rr.returncode}")
+
+    print("\n[23/23] adapter_emba.py — 离线解析 EMBA 产物、三类观察与黑板导入")
+    ADAPTER = os.path.join(HERE, "adapter_emba.py")
+    q23 = os.path.join(base, "emba23")
+    src23 = os.path.join(os.path.dirname(HERE), "assets", "emba-sample")
+    logs23 = os.path.join(q23, "logs")
+    os.makedirs(q23, exist_ok=True)
+    shutil.copytree(src23, logs23)
+    FW23 = "b" * 64
+    RUN23 = "RUN-EMBA-23"
+
+    def _w23(name: str, obj) -> str:
+        path = os.path.join(q23, name)
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(obj, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+        return path
+
+    def _r23(path: str):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return {}
+
+    def _copy23(name: str) -> str:
+        dst = os.path.join(q23, name)
+        shutil.copytree(logs23, dst)
+        return dst
+
+    def _emba(name: str, logs: str = "", extra=None):
+        out = os.path.join(q23, name + ".json")
+        args = [ADAPTER, "parse", "--logs", logs or logs23,
+                "--run-id", RUN23, "--firmware-sha256", FW23,
+                "--json", "--out", out] + list(extra or [])
+        rr = run(args)
+        return rr, _r23(out), out
+
+    rr, d23, emba_ok = _emba("ok")
+    facts23 = d23.get("facts") or []
+    evid23 = d23.get("evidence") or []
+    by_type23 = {}
+    for f in facts23:
+        by_type23.setdefault(f.get("type"), []).append(f)
+    check("adapter_emba：离线解析 EMBA 夹具成功，不启动仿真/EMBA",
+          rr.returncode == 0 and d23.get("status") == "parsed"
+          and not d23.get("errors"),
+          f"rc={rr.returncode} status={d23.get('status')}")
+    check("adapter_emba：从 F50 提取 EMBA 版本并绑定 run/固件",
+          (d23.get("tool") or {}).get("version") == "1.4.0"
+          and d23.get("run_id") == RUN23
+          and d23.get("firmware_sha256") == FW23,
+          str(d23.get("tool")))
+    check("adapter_emba：事实/证据计数与内容一致",
+          len(facts23) == 12 and len(evid23) == 12
+          and (d23.get("counts") or {}).get("facts") == 12
+          and (d23.get("counts") or {}).get("evidence") == 12,
+          f"facts={len(facts23)} evidence={len(evid23)}")
+    check("adapter_emba：静态服务 / 运行进程 / 端口响应三类事实齐全且类型互异",
+          all(by_type23.get(t) for t in
+              ("service", "runtime-process", "port-response")),
+          str(sorted(by_type23)))
+    expect_obs = {"service": "static-discovery",
+                  "runtime-process": "runtime-process",
+                  "port-response": "port-response"}
+    check("adapter_emba：三类观察的 value.observation 与 Fact.type 一一对应",
+          all((f.get("value") or {}).get("observation") == want
+              for typ, want in expect_obs.items()
+              for f in by_type23.get(typ, [])),
+          "observation 与 type 必须同源")
+    ev_by_id = {e.get("evidence_id"): e for e in evid23}
+    expect_ev = {"service": "static", "runtime-process": "emulation",
+                 "port-response": "dynamic"}
+    check("adapter_emba：三类观察引用不同证据类型，不能互相升级",
+          all((ev_by_id.get(ref) or {}).get("type") == want
+              for typ, want in expect_ev.items()
+              for f in by_type23.get(typ, [])
+              for ref in f.get("evidence_refs") or []),
+          str(expect_ev))
+    pr_val = (by_type23.get("port-response") or [{}])[0].get("value") or {}
+    pr_ports = {p.get("port") for p in pr_val.get("ports") or []}
+    pr_trigger = any(((ev_by_id.get(r) or {}).get("event") or {}).get("trigger") is True
+                     for r in (by_type23.get("port-response") or [{}])[0].get("evidence_refs") or [])
+    check("adapter_emba：端口响应解析出 80/tcp 与 443/tcp，且带触发事件",
+          pr_ports == {80, 443} and pr_trigger, str(pr_val))
+    fw_val = (by_type23.get("firmware") or [{}])[0].get("value") or {}
+    stage_val = (by_type23.get("stage") or [{}])[0].get("value") or {}
+    check("adapter_emba：真实 F50 的 NA 列填充不污染数字字段与状态值",
+          fw_val.get("files") == 1234 and fw_val.get("directories") == 321
+          and (fw_val.get("cves") or {}).get("cve_counter") == 5
+          and stage_val.get("system_emulation_state") == "booted;IP_DET",
+          f"files={fw_val.get('files')} state={stage_val.get('system_emulation_state')}")
+    check("adapter_emba：L10 的 IP address / Network mode 展示前缀已剥离",
+          pr_val.get("ip") == "192.168.0.1"
+          and pr_val.get("network_mode") == "default"
+          and (pr_val.get("ip_raw") or "").startswith("IP address:"),
+          f"ip={pr_val.get('ip')} mode={pr_val.get('network_mode')}")
+    dep_vals = [(d.get("value") or {}) for d in by_type23.get("dependency") or []]
+    check("adapter_emba：S09 表头 version_rule 实为 app_name，类型列按 static/emulation 解析",
+          {v.get("app_name") for v in dep_vals} == {"dropbear", "libcurl"}
+          and all(v.get("mode") == "static" for v in dep_vals),
+          str(dep_vals))
+    rr2, d23b, emba_ok2 = _emba("ok-again")
+    same_bytes = (open(emba_ok, "rb").read() == open(emba_ok2, "rb").read())
+    check("adapter_emba：同一份产物重复解析字节稳定（ID/排序/时间不漂移）",
+          rr2.returncode == 0 and same_bytes and d23 == d23b)
+    check("contracts.py：emba-import 通过契约校验",
+          run([CONTRACTS, "--kind", "emba-import",
+               "--file", emba_ok]).returncode == 0)
+    rr_strict, _, _ = _emba("strict", extra=["--strict"])
+    check("adapter_emba：完整产物在 --strict 下仍为 parsed（rc0）",
+          rr_strict.returncode == 0, f"rc={rr_strict.returncode}")
+
+    logs_nof50 = _copy23("logs-nof50")
+    os.remove(os.path.join(logs_nof50, "csv_logs", "f50_base_aggregator.csv"))
+    rr_nf, d_nf, emba_nf = _emba("nof50", logs_nof50)
+    nf_codes = [e.get("code") for e in d_nf.get("errors") or []]
+    check("adapter_emba：缺 F50 → status=failed + F50_MISSING（rc1）",
+          rr_nf.returncode == 1 and d_nf.get("status") == "failed"
+          and "F50_MISSING" in nf_codes,
+          f"rc={rr_nf.returncode} codes={nf_codes}")
+    rr_ver, d_ver, _ = _emba("version", extra=["--expect-version", "9.9.9"])
+    ver_codes = [e.get("code") for e in d_ver.get("errors") or []]
+    check("adapter_emba：EMBA 版本不符 → EMBA_VERSION_MISMATCH（rc1）",
+          rr_ver.returncode == 1 and "EMBA_VERSION_MISMATCH" in ver_codes,
+          f"rc={rr_ver.returncode} codes={ver_codes}")
+    fw_file = os.path.join(q23, "not-firmware.bin")
+    with open(fw_file, "wb") as fh:
+        fh.write(b"not the firmware")
+    rr_fw, d_fw, _ = _emba("fwmismatch", extra=["--firmware", fw_file])
+    fw_codes = [e.get("code") for e in d_fw.get("errors") or []]
+    check("adapter_emba：--firmware 实算哈希与声明不符 → FIRMWARE_MISMATCH（rc1）",
+          rr_fw.returncode == 1 and "FIRMWARE_MISMATCH" in fw_codes,
+          f"rc={rr_fw.returncode} codes={fw_codes}")
+
+    logs_nol10 = _copy23("logs-nol10")
+    os.remove(os.path.join(logs_nol10, "csv_logs", "l10_system_emulation.csv"))
+    rr_pa, d_pa, _ = _emba("partial", logs_nol10)
+    pa_codes = [e.get("code") for e in d_pa.get("errors") or []]
+    check("adapter_emba：缺可选日志 → status=partial + MISSING_ARTIFACT（rc0）",
+          rr_pa.returncode == 0 and d_pa.get("status") == "partial"
+          and "MISSING_ARTIFACT" in pa_codes,
+          f"rc={rr_pa.returncode} codes={pa_codes}")
+    rr_ps, _, _ = _emba("partial-strict", logs_nol10, ["--strict"])
+    check("adapter_emba：partial 在 --strict 下退出 3，不伪装成完整解析",
+          rr_ps.returncode == 3, f"rc={rr_ps.returncode}")
+
+    logs_err = _copy23("logs-error")
+    with open(os.path.join(logs_err, "emba_error.log"), "w",
+              encoding="utf-8", newline="\n") as fh:
+        fh.write("qemu: could not load firmware image\n")
+    rr_er, d_er, _ = _emba("errlog", logs_err)
+    er_codes = [e.get("code") for e in d_er.get("errors") or []]
+    check("adapter_emba：非空 emba_error.log → partial + EMBA_ERROR_LOG",
+          rr_er.returncode == 0 and d_er.get("status") == "partial"
+          and "EMBA_ERROR_LOG" in er_codes,
+          f"rc={rr_er.returncode} codes={er_codes}")
+
+    ws23 = os.path.join(q23, "board")
+    run([BOARD, "init", "--workspace", ws23, "--run-id", RUN23,
+         "--firmware-sha256", FW23])
+    imp1 = run([BOARD, "import", "--workspace", ws23,
+                "--emba", emba_ok])
+    rep1 = _pj(imp1.stdout)
+    imp2 = run([BOARD, "import", "--workspace", ws23,
+                "--emba", emba_ok])
+    rep2 = _pj(imp2.stdout)
+    item1 = (rep1.get("items") or {}).get("emba") or {}
+    item2 = (rep2.get("items") or {}).get("emba") or {}
+    check("黑板：EMBA 产物按 evidence→fact 导入，计数与适配器一致",
+          imp1.returncode == 0
+          and ((item1.get("evidence") or {}).get("added") == 12)
+          and ((item1.get("facts") or {}).get("added") == 12),
+          f"rc={imp1.returncode} item={item1}")
+    check("黑板：重复导入 EMBA 产物全部去重，不重复落盘",
+          imp2.returncode == 0
+          and ((item2.get("evidence") or {}).get("duplicates") == 12)
+          and ((item2.get("facts") or {}).get("duplicates") == 12),
+          f"rc={imp2.returncode} item={item2}")
+    st23 = _r23(os.path.join(ws23, "audit-board.json"))
+    fact_types23 = {f.get("type") for f in st23.get("facts") or []}
+    check("黑板：三类观察以不同 Fact.type 共存，verify 通过",
+          {"service", "runtime-process", "port-response"} <= fact_types23
+          and (st23.get("counters") or {}).get("facts") == 12
+          and run([BOARD, "verify", "--workspace", ws23]).returncode == 0,
+          str(sorted(fact_types23)))
+
+    ws_bad = os.path.join(q23, "board-run-mismatch")
+    run([BOARD, "init", "--workspace", ws_bad, "--run-id", "RUN-OTHER",
+         "--firmware-sha256", FW23])
+    rr_bad = run([BOARD, "import", "--workspace", ws_bad, "--emba", emba_ok])
+    check("黑板：EMBA 产物的 run_id 与黑板不一致 → RUN_MISMATCH（rc1）",
+          rr_bad.returncode == 1 and "RUN_MISMATCH" in rr_bad.stderr,
+          f"rc={rr_bad.returncode} err={rr_bad.stderr.strip()[:120]}")
+    ws_fail = os.path.join(q23, "board-emba-failed")
+    run([BOARD, "init", "--workspace", ws_fail, "--run-id", RUN23,
+         "--firmware-sha256", FW23])
+    rr_fail = run([BOARD, "import", "--workspace", ws_fail, "--emba", emba_nf])
+    check("黑板：status=failed 的 EMBA 产物拒绝导入（EMBA_FAILED，rc1）",
+          rr_fail.returncode == 1 and "EMBA_FAILED" in rr_fail.stderr,
+          f"rc={rr_fail.returncode} err={rr_fail.stderr.strip()[:120]}")
+
+    bad_obs = json.loads(json.dumps(d23))
+    for row in bad_obs.get("facts") or []:
+        if row.get("type") == "service":
+            row["value"]["observation"] = "runtime-process"
+            break
+    bad_obs_path = _w23("bad-observation.json", bad_obs)
+    rr_bo = run([CONTRACTS, "--kind", "emba-import", "--file", bad_obs_path])
+    check("contracts.py：把静态服务改写成运行进程 → OBSERVATION_MISMATCH",
+          rr_bo.returncode == 1 and "OBSERVATION_MISMATCH" in rr_bo.stdout,
+          f"rc={rr_bo.returncode}")
 
     print()
     if FAILS:

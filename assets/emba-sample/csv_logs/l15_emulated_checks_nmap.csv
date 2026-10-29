@@ -1,0 +1,2 @@
+EMBA source module;binary/file;rule identifier;version_rule;version_detected;csv_rule;license;static/emulation
+L15;usr/sbin/upnpd;upnpd;miniupnpd;2.3.1;csv;BSD;static

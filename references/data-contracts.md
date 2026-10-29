@@ -1,8 +1,8 @@
-# 数据契约（FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / SandboxRun / BenchManifest / 黑板对象 / 执行路径）
+# 数据契约（FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / SandboxRun / BenchManifest / EmbaImport / 黑板对象 / 执行路径）
 
 本文件定义跨阶段传递的结构化数据，以及**校验入口、版本规则、兼容模式边界**。目标是消除「同一事实在 plan、报告、gate-config 里三种写法」的漂移：任何下游脚本要消费上游产物时，先看 schema 版本，再按本文件取字段。
 
-配套校验器：`scripts/contracts.py`（纯标准库）。`--list` 当前列出 16 种 schema；候选的整文件 envelope 由 `candidates` 文档校验器单独处理。
+配套校验器：`scripts/contracts.py`（纯标准库）。`--list` 当前列出 17 种 schema；候选的整文件 envelope 由 `candidates` 文档校验器单独处理。
 
 ```bash
 # 列出支持的所有 schema
@@ -188,7 +188,7 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 
 ### 8.1 SandboxPolicy（`sandbox-policy/1.0`）
 
-由 `scripts/resource_manager.py` 校验，**不在 `contracts.py` 的 16 种 schema 内**。策略是运维配置，不是每次运行的产物；其规范化 JSON 的 sha256 写入 `admission.policy_sha256`，用于证明「这次执行用的是哪份策略」。
+由 `scripts/resource_manager.py` 校验，**不在 `contracts.py` 的 17 种 schema 内**。策略是运维配置，不是每次运行的产物；其规范化 JSON 的 sha256 写入 `admission.policy_sha256`，用于证明「这次执行用的是哪份策略」。
 
 | 字段 | 默认 | 约束 | 说明 |
 |---|---|---|---|
@@ -222,7 +222,7 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 
 `scripts/exec_paths.py` 用 AST 扫描 `scripts/*.py` 的子进程调用，防止新增执行路径绕过统一入口。字段：`schema` / `tool` / `version` / `generated_at` / `root` / `files_scanned` / `total_paths` / `counts` / `ok` / `paths` / `unclassified`。每条 path 记录 `file` / `line` / `api` / `scope` / `call` / `classification` / `input_trust` / `note`。
 
-分类：`sandbox-boundary`（固件执行边界，必须经 `sandbox_run.py`）、`host-static-analyzer`（只解析不可信字节、不执行）、`trusted-metadata`（可信本地元数据）、`test-harness`、`inventory`。出现未知文件即 `unclassified` 并退出 1。当前 15 个脚本共 9 条调用；`sink_scan.py:131` / `sink_scan.py:148` 的 ast-grep / semgrep 仍是 `host-static-analyzer`，是已知残留风险（只解析、不执行）。
+分类：`sandbox-boundary`（固件执行边界，必须经 `sandbox_run.py`）、`host-static-analyzer`（只解析不可信字节、不执行）、`trusted-metadata`（可信本地元数据）、`test-harness`、`inventory`。出现未知文件即 `unclassified` 并退出 1。当前 16 个脚本共 9 条调用；`sink_scan.py:131` / `sink_scan.py:148` 的 ast-grep / semgrep 仍是 `host-static-analyzer`，是已知残留风险（只解析、不执行）。
 
 ## 9. BenchManifest / BenchResult（`bench-manifest/1.0` / `bench-result/1.0`）
 
@@ -259,8 +259,9 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 5. 阶段状态写 `30-stages.json`（`audit-stages/1.0`），必需阶段非 `success` 即阻断。
 6. 报告 ④ 区块与 `findings/1.0` 对齐；证据统一引用 `E-###`。
 7. 黑板初始化：`board_store.py init --workspace ... --run-id ... --firmware-sha256 ...` 生成 `audit-events.jsonl`（首事件 `BOARD_INITIALIZED`）和 `audit-board.json` 快照；`--phase` 默认 `P0`，只在补录或已确认当前阶段时显式指定。
-8. `board_store.py import --workspace ... --manifest ... --layer1 ... --stages ... --candidates ...` 把 Phase 0–5 的结构化产物导入黑板。导入只新增 Fact / Evidence / Candidate，不改写原文件；门禁仍读原来的 manifest / layer1 / stages / candidates。
+8. `board_store.py import --workspace ... --manifest ... --layer1 ... --stages ... --candidates ...` 把 Phase 0–5 的结构化产物导入黑板；已有 EMBA 日志时追加 `--emba 05-emba-import.json`。导入只新增 Fact / Evidence / Candidate，不改写原文件；门禁仍读原来的 manifest / layer1 / stages / candidates。
 9. 候选状态只能经 `board_store.py transition`（内部调用 `board_transitions.validate_transition`）；回退用 `board_store.py backtrack`，且 `from_phase` 必须等于黑板当前 `phase`。
+10. 已有 EMBA 产物先经 `adapter_emba.py parse` 生成 `emba-import/1.0`，再 `board_store.py import --emba`；适配阶段不启动 EMBA、Qiling 或 QEMU。
 
 ## 12. 黑板事件与快照（`board-event/1.0`）
 
@@ -313,7 +314,7 @@ Fact 是**有来源、绑定了运行与固件的客观观察**，不是判断�
 | `fact_id` | string | ✅ | 建议 `FACT-*` |
 | `run_id` | string | ✅ | 与黑板一致 |
 | `firmware_sha256` | string | ✅ | 64 位十六进制 |
-| `type` | enum | ✅ | `firmware` / `file` / `elf` / `architecture` / `service` / `config` / `credential` / `syscall` / `api-call` / `network` / `scan` / `stage` / `other` |
+| `type` | enum | ✅ | `firmware` / `file` / `elf` / `architecture` / `service` / `config` / `credential` / `syscall` / `api-call` / `network` / `scan` / `stage` / `dependency` / `runtime-process` / `port-response` / `other` |
 | `value` | object | ✅ | 非空；字段由 `type` 决定，必须能独立读懂 |
 | `evidence_refs` | array | ✅ | 非空字符串数组，指向黑板上已存在的证据 |
 | `source` | object | ✅ | `{type, tool?, tool_version?, rule_id?, rule_version?, path?, location?}`；`type` 为 `static` / `dynamic` / `emulation` / `tool-report` / `manual` |
@@ -423,3 +424,63 @@ BoardState 是快照文件的结构，所有条目都必须绑定同一个 `run_
 - 其余失败码：`BAD_CANDIDATE` / `BAD_STATE` / `ILLEGAL_TRANSITION` / `TYPE_RULE_MISSING` / `CANDIDATE_TYPE_MISMATCH` / `EVIDENCE_REQUIRED` / `EVIDENCE_INVALID`；成功为 `OK`。
 
 **风险处置不是状态**：`accepted` / `mitigated` / `transferred` / `avoided` / `pending` 是独立字段；`ACCEPTED_WITH_RISK` 只能作为风险处置，写进 `candidate.status` 会被拒绝（`RISK_AS_STATUS`）。接受风险不改变漏洞是否真实存在。
+
+## 17. EmbaImport（`emba-import/1.0`）
+
+EMBA 日志的**离线**解析结果，由 `scripts/adapter_emba.py parse` 产出。适配器不启动 EMBA、Qiling 或 QEMU，也不执行固件字节；它只读取日志文件并把可复核的观察转成 Fact / Evidence。
+
+| 字段 | 类型 | 必需 | 说明 |
+|---|---|---|---|
+| `schema` | string | ✅ | `emba-import/1.0` |
+| `adapter` | object | ✅ | `{name, version}`，解析器自身版本 |
+| `run_id` | string | ✅ | 与黑板、证据一致；跨 run 不得导入 |
+| `firmware_sha256` | string | ✅ | 64 位十六进制；由 CLI 显式给出，日志本身不能独立证明固件身份 |
+| `tool` | object | ✅ | `{name, version}`，来自 F50 的 `EMBA_version` 首 token |
+| `expect_version` | string/null | — | 本次 `--expect-version`；不符时 `EMBA_VERSION_MISMATCH` |
+| `status` | enum | ✅ | `parsed` / `partial` / `failed` |
+| `inputs` | array | ✅ | 每个被读取日志的 `{path, role, sha256, size}`；`path` 相对日志根 |
+| `observations` | array | ✅ | `{fact_id, type, observation}`，与 `facts` 一一对应 |
+| `facts` | array | ✅ | 完整 `fact/1.0`，全部绑定同一 `run_id` / `firmware_sha256` |
+| `evidence` | array | ✅ | 完整 `evidence/1.1`，每条 Fact 至少引用一条 |
+| `errors` | array | ✅ | `{code, message, path}`；`parsed` 时为空 |
+| `limitations` | array | ✅ | 适用范围与未核对项；无固件文件时声明哈希为 operator-supplied |
+| `counts` | object | ✅ | `{evidence, facts, errors, by_type, static-discovery, runtime-process, port-response}`，必须与实际数组一致 |
+
+### 17.1 三类观察不可互升
+
+| 观察 | 日志来源 | `Fact.type` | `value.observation` | 证据 `type` | 语义 |
+|---|---|---|---|---|---|
+| 静态发现 | L15 / S09 | `service` | `static-discovery` | `static` | 固件里存在该服务/组件，**没有**运行证据 |
+| 仿真进程输出 | S115 | `runtime-process` | `runtime-process` | `emulation` | 用户态仿真中该二进制实际产生输出 |
+| 端口响应 | L10 | `port-response` | `port-response` | `dynamic` | 系统仿真中该 IP/端口实际响应 |
+
+其余静态事实（`firmware` / `elf` / `architecture` / `dependency` / `stage`）的 `value.observation` 固定为 `static-discovery`。任何把 `service` 的 observation 改成 `runtime-process`、或把静态证据挂到 `port-response` 的文档都会被 `contracts.py --kind emba-import` 拒绝（`OBSERVATION_MISMATCH` / `EVIDENCE_TYPE_MISMATCH`）。Fact 不可变，不存在互升 API；候选状态只能经 §16 的 `validate_transition` 改变。
+
+### 17.2 失败与降级
+
+| 情形 | `status` | 退出码 | 记录 |
+|---|---|---|---|
+| 全部必需/可选日志解析成功 | `parsed` | 0 | `errors=[]` |
+| 缺可选日志（P99/S09/L15/L10/S115） | `partial` | 0 | 每项一条 `MISSING_ARTIFACT` |
+| 存在非空 `emba_error.log` | `partial` | 0 | `EMBA_ERROR_LOG` |
+| 坏行 / 列数不符 | `partial` 或 `failed` | 0 / 1 | `PARSE_ERROR`，带文件与行号，不静默跳过 |
+| 缺 F50 | `failed` | 1 | `F50_MISSING` |
+| 版本不符 / 缺版本 | `failed` | 1 | `EMBA_VERSION_MISMATCH` / `EMBA_VERSION_MISSING` |
+| `--firmware` 实算哈希不符 | `failed` | 1 | `FIRMWARE_MISMATCH` |
+
+`--strict` 下 `partial` 退出 **3**；`--status-only` 与 `--strict` 互斥。`status=failed` 的结果**不得导入黑板**（`EMBA_FAILED`）；导入前还会核对 `run_id` 与 `firmware_sha256`（`RUN_MISMATCH` / `FIRMWARE_MISMATCH`）。
+
+### 17.3 确定性
+
+不写生成时间；`observed_at` 取输入文件 mtime（UTC），ID 由 `run_id` 与内容哈希派生，数组按固定键排序，JSON `sort_keys=True`。同一份日志重复解析输出**字节一致**，重复 `board_store.py import --emba` 全部计为 `duplicates`，不改变 `revision`。仓库内 `assets/emba-sample/` 是按 EMBA HEAD `65b7870fb` 日志布局构造的合成夹具，真实产物应替换夹具并用 `--firmware` 核对固件哈希。
+
+### 17.4 真实格式校准
+
+适配器按 EMBA 的实际写入点校准，而不是只按表头猜字段：
+
+| 真实行为 | 源码位置 | 适配器处理 |
+|---|---|---|
+| F50 每行固定用 8 个 `NA` 补齐尾部列，`system_emulation_state` 的值本身可含 `;`（如 `booted;IP_DET`） | `helpers/helpers_emba_print.sh:333` 的 `write_csv_log()` | 过滤空/NA 单元格后再拼接，数字字段不再被 `;NA…` 污染，状态值保留内部 `;` |
+| L10 的 IP 与网络模式带展示前缀：`IP address: 192.168.0.1`、`Network mode: default (…)` | `modules/L10_system_emulation.sh:3180` | `ip` / `network_mode` 存机器值，`ip_raw` / `network_mode_detail` 保留原始展示文本 |
+| S09 表头第 4 列写作 `version_rule`，实际写入 `lAPP_NAME`；第 8 列表头是 `static/emulation`，实际是类型列 | `modules/S09_firmware_base_version_check.sh:477` | 事实字段命名为 `app_name`，类型列映射到 `mode`，不把产品名误读成版本规则 |
+| S115 成功行由 ANSI 颜色码包裹，末尾带英文句号 | `modules/S115_usermode_emulator.sh:891` | 先剥 ANSI 再匹配，去掉路径末尾句号 |
