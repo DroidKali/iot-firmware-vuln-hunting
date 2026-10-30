@@ -4,9 +4,9 @@
 
 为什么需要它
 ------------
-本 skill 的判定链路里有 17 种 schema：FirmwareManifest / AuditTask / Candidate /
+本 skill 的判定链路里有 18 种 schema：FirmwareManifest / AuditTask / Candidate /
 Finding / Evidence / GateResult / AuditStages / ScanWaiver / SandboxRun /
-BenchManifest / EmbaImport，以及黑板层的 Fact / Intent / Hint /
+BenchManifest / EmbaImport / EmulationPlan，以及黑板层的 Fact / Intent / Hint /
 EmulationResult / BoardState / BoardEvent。它们此前散落在各自的脚本输出里，字段名、必填项、枚举值、
 schema 版本各写各的，Markdown 文案一变就可能影响判定。
 本模块把这些契约收敛到一处：
@@ -48,6 +48,7 @@ SUPPORTED: Dict[str, List[str]] = {
     "bench-manifest": ["bench-manifest/1.0"],
     "sandbox-run": ["sandbox-run/1.1", "sandbox-run/1.0"],
     "emba-import": ["emba-import/1.0"],
+    "emulation-plan": ["emulation-plan/1.0"],
     # ── 黑板（M1）：事实、意图、提示、仿真结果、快照与事件 ──────────────────
     "fact": ["fact/1.0"],
     "intent": ["intent/1.0"],
@@ -1021,6 +1022,135 @@ def validate_emulation_result(obj: Any) -> List[Dict[str, str]]:
     return out
 
 
+def validate_emulation_plan(obj: Any) -> List[Dict[str, str]]:
+    """EmulationPlan：启动前的可复核计划，不代表已经启动成功。
+
+    契约只保证「计划自洽」：ready 必须有内核、镜像和 QEMU argv；blocked 必须
+    至少有一个带下一步的阻断项。QEMU 在宿主机不可见不等于计划不可执行——真正
+    的二进制在沙箱镜像里，所以 available=false 仍然可以是 ready。
+    """
+    out: List[Dict[str, str]] = []
+    if not _schema(out, obj, "plan", "emulation-plan"):
+        return out
+    for key in ("plan_id", "tool", "version", "status", "rootfs",
+                "qemu", "network", "budget"):
+        if key not in obj or obj.get(key) is None:
+            _err(out, "plan." + key, "MISSING", "必填字段缺失")
+    _enum(out, obj, "plan", "status", ("ready", "blocked"))
+    for key in ("run_id", "intent_id"):
+        if obj.get(key) is not None and not isinstance(obj[key], str):
+            _err(out, "plan." + key, "BAD_TYPE", key + " 必须是字符串或 null")
+    if obj.get("firmware_sha256") is not None:
+        _hex(out, obj, "plan", "firmware_sha256")
+    if "firmware_root" in obj and obj["firmware_root"] is not None \
+            and not isinstance(obj["firmware_root"], str):
+        _err(out, "plan.firmware_root", "BAD_TYPE", "firmware_root 必须是字符串")
+
+    blockers = _list_of_dicts(out, obj, "plan", "blockers", required=False)
+    for i, row in enumerate(blockers):
+        sub = "plan.blockers[%d]" % i
+        _req(out, row, sub, "code", str)
+        _req(out, row, sub, "message", str)
+        _req(out, row, sub, "next_action", str)
+    warnings = obj.get("warnings")
+    if warnings is not None and not isinstance(warnings, list):
+        _err(out, "plan.warnings", "BAD_TYPE", "warnings 必须是数组")
+    elif isinstance(warnings, list):
+        for i, item in enumerate(warnings):
+            if not isinstance(item, str):
+                _err(out, "plan.warnings[%d]" % i, "BAD_TYPE", "警告必须是字符串")
+    limitations = obj.get("limitations")
+    if limitations is not None and not isinstance(limitations, list):
+        _err(out, "plan.limitations", "BAD_TYPE", "limitations 必须是数组")
+    elif isinstance(limitations, list):
+        for i, item in enumerate(limitations):
+            if not isinstance(item, str):
+                _err(out, "plan.limitations[%d]" % i, "BAD_TYPE",
+                     "限制必须是字符串")
+
+    rootfs = obj.get("rootfs")
+    if isinstance(rootfs, dict):
+        _req(out, rootfs, "plan.rootfs", "path", str)
+        _enum(out, rootfs, "plan.rootfs", "kind", ("directory", "image"))
+        if rootfs.get("sha256") is not None:
+            _hex(out, rootfs, "plan.rootfs", "sha256")
+        _opt_int(out, rootfs, "plan.rootfs", "bytes")
+        if rootfs.get("files") is not None:
+            _opt_int(out, rootfs, "plan.rootfs", "files")
+        if rootfs.get("selected_init") is not None \
+                and not isinstance(rootfs["selected_init"], str):
+            _err(out, "plan.rootfs.selected_init", "BAD_TYPE",
+                 "selected_init 必须是字符串或 null")
+        if not isinstance(rootfs.get("init_candidates"), list):
+            _err(out, "plan.rootfs.init_candidates", "MISSING",
+                 "init_candidates 必须是数组（可为空）")
+
+    kernel = obj.get("kernel")
+    if kernel is not None:
+        if not isinstance(kernel, dict):
+            _err(out, "plan.kernel", "BAD_TYPE", "kernel 必须是对象或 null")
+        else:
+            for key in ("path", "mount_path", "sha256", "format"):
+                _req(out, kernel, "plan.kernel", key, str)
+            _opt_int(out, kernel, "plan.kernel", "size")
+    image = obj.get("image")
+    if image is not None:
+        if not isinstance(image, dict):
+            _err(out, "plan.image", "BAD_TYPE", "image 必须是对象或 null")
+        else:
+            _req(out, image, "plan.image", "path", str)
+            _req(out, image, "plan.image", "mount_path", str)
+            if "exists" in image and not isinstance(image["exists"], bool):
+                _err(out, "plan.image.exists", "BAD_TYPE", "exists 必须是布尔值")
+            if image.get("sha256") is not None:
+                _hex(out, image, "plan.image", "sha256")
+
+    qemu = obj.get("qemu")
+    if isinstance(qemu, dict):
+        _req(out, qemu, "plan.qemu", "binary", str)
+        if not isinstance(qemu.get("argv"), list):
+            _err(out, "plan.qemu.argv", "MISSING", "qemu.argv 必须是数组")
+        else:
+            for i, item in enumerate(qemu["argv"]):
+                if not isinstance(item, str):
+                    _err(out, "plan.qemu.argv[%d]" % i, "BAD_TYPE",
+                         "argv 元素必须是字符串")
+            if not qemu["argv"]:
+                _err(out, "plan.qemu.argv", "EMPTY", "qemu.argv 不得为空")
+        if "available" in qemu and not isinstance(qemu["available"], bool):
+            _err(out, "plan.qemu.available", "BAD_TYPE", "available 必须是布尔值")
+        if qemu.get("cpu") is not None and not isinstance(qemu["cpu"], str):
+            _err(out, "plan.qemu.cpu", "BAD_TYPE", "cpu 必须是字符串或 null")
+
+    net = obj.get("network")
+    if isinstance(net, dict):
+        _enum(out, net, "plan.network", "mode", ("none", "user"))
+        if "hostfwd" in net and not isinstance(net["hostfwd"], list):
+            _err(out, "plan.network.hostfwd", "BAD_TYPE", "hostfwd 必须是数组")
+    budget = obj.get("budget")
+    if isinstance(budget, dict):
+        _opt_int(out, budget, "plan.budget", "timeout_s", minimum=1)
+        _opt_int(out, budget, "plan.budget", "attempts", minimum=1)
+        if "memory" in budget and not isinstance(budget["memory"], str):
+            _err(out, "plan.budget.memory", "BAD_TYPE", "memory 必须是字符串")
+        if "cpus" in budget and not isinstance(budget["cpus"], (str, int)):
+            _err(out, "plan.budget.cpus", "BAD_TYPE", "cpus 必须是字符串或整数")
+
+    if obj.get("status") == "ready":
+        if not isinstance(blockers, list) or blockers:
+            _err(out, "plan.blockers", "STATUS_INCONSISTENT",
+                 "status=ready 时 blockers 必须为空")
+        if kernel is None:
+            _err(out, "plan.kernel", "MISSING", "ready 计划必须有内核")
+        if image is None:
+            _err(out, "plan.image", "MISSING", "ready 计划必须有 rootfs 镜像")
+    elif obj.get("status") == "blocked":
+        if not blockers:
+            _err(out, "plan.blockers", "STATUS_INCONSISTENT",
+                 "status=blocked 时 blockers 不得为空；不能只写一句警告")
+    return out
+
+
 def _validate_backtrack(out, row, path: str) -> None:
     _req(out, row, path, "from_phase", str)
     _req(out, row, path, "to_phase", str)
@@ -1213,6 +1343,7 @@ VALIDATORS = {
     "bench-manifest": validate_bench_manifest,
     "sandbox-run": validate_sandbox_run,
     "emba-import": validate_emba_import,
+    "emulation-plan": validate_emulation_plan,
     "fact": validate_fact,
     "intent": validate_intent,
     "hint": validate_hint,

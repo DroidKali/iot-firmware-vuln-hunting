@@ -21,3 +21,6 @@
 *.xz    binary
 *.bin   binary
 *.img   binary
+
+# 证据原始字节：串口日志含 CRLF，归一化会导致记录中的 sha256/大小失配
+assets/qemu/real-run-malta/serial.log -text -eol

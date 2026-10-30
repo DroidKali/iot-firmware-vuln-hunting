@@ -1,6 +1,6 @@
 # 路线图（Roadmap）
 
-> 状态基线：2026-10-29（M1–M3 已落地；M4 方法论已落地，执行器未实现）。当前仓库已交付 Phase 0–5 确定性流水线、覆盖率/Strict 门禁、
+> 状态基线：2026-10-30（M1–M3 已落地；M4 执行器与契约已落地，真实 rootfs 启动待 Linux 复验；Qiling 分支未实现）。当前仓库已交付 Phase 0–5 确定性流水线、覆盖率/Strict 门禁、
 > 结构化契约、fail-closed 沙箱入口与合成基准；本文件描述在此之上的 **V2 渐进式架构**。
 >
 > 这是实施计划，不代表下列能力已经全部实现或通过测试。每个里程碑落地前都必须
@@ -12,15 +12,15 @@
 |---|---|---|
 | 确定性流水线 | Phase 0–5 已落地；门禁可阻断 | 保持不变，作为控制平面与最终裁决者 |
 | 黑板 / 动态探索 | M1 已落地：事实/候选/意图/提示持久化，事件日志 + 快照 + 去重 + 状态机；Planner / Scheduler 编排未实现 | Fact / Candidate / Intent / Hint 持久化，可回放、可去重、可预算 |
-| 数据契约 | 17 种 schema，含 Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent、`evidence/1.1` 与 `emba-import/1.0`；状态转换由 `board_transitions.py` 校验 | 随适配器扩展 `EmulationResult` 后端字段，保持向后兼容 |
+| 数据契约 | 18 种 schema，含 Fact / Intent / Hint / EmulationPlan / EmulationResult / BoardState / BoardEvent、`evidence/1.1` 与 `emba-import/1.0`；状态转换由 `board_transitions.py` 校验 | 随适配器扩展 `EmulationResult` 后端字段，保持向后兼容 |
 | 沙箱 | `sandbox_run.py` 已 fail-closed，但尚未证明所有执行路径都经过它 | 所有解包、执行、仿真、外部工具调用统一入口；隔离失败不回落宿主机 |
-| EMBA / Qiling / QEMU | M3 的 EMBA 适配仅用于导入既有日志；M4 主路径是按 `references/emulation-methodology.md` 用 QEMU 做轻量整机仿真，不依赖 EMBA；QEMU/Qiling 执行器未实现 | 适配器只消费既有产物；整机仿真按架构/内核/init/网络判据执行，输出统一 `EmulationResult` |
+| EMBA / Qiling / QEMU | M3 的 EMBA 适配仅用于导入既有日志；M4 的 `emu_plan.py` / `emu_run.py` 已落地并只经沙箱执行 QEMU，但真实 rootfs 启动尚未复验；Qiling 分支未实现 | 适配器只消费既有产物；整机仿真按架构/内核/init/网络判据执行，输出统一 `EmulationResult` |
 | 检测质量评估 | 合成基准 + 回归门禁 | 增加合法来源、可追溯、人工复核的真实固件基准 |
 | EALB | 校准工具已就绪，样本不足时标 `heuristic` | 用真实工时样本校准，并在报告中限定适用范围 |
 
 **近期优先级**：M1（契约与黑板）、M2（资源与沙箱统一）、M3（EMBA 适配器）已落地；
-M4 的方法论已落地，下一步是 `emu_plan.py` / `emu_run.py`（整机仿真执行器，Qiling 为分支）→
-M5（真实固件基准）。M0 的盘点动作持续进行，不单独占一个版本。
+M4 的执行器与契约已落地；下一步是在 Linux + Docker 上完成真实 rootfs 启动复验，
+再实现 Qiling 分支 → M5（真实固件基准）。M0 的盘点动作持续进行，不单独占一个版本。
 
 ## 1. 设计原则
 
@@ -204,7 +204,7 @@ G1–G7 必须是代码校验器，而不是 Prompt、README 或报告模板。�
 记录命令、版本、退出码与结果。重点确认 Strict、Coverage、沙箱和结构化证据的真实调用路径。
 
 **现状**：2026-10 已完成一轮门禁、契约、沙箱入口与合成基准整改；M3 落地后
-selftest 覆盖 23 组 / 254 条断言，`exec_paths.py` 已给出 16 个脚本 / 9 条子进程调用的
+selftest 覆盖 24 组 / 273 条断言，`exec_paths.py` 已给出 18 个脚本 / 10 条子进程调用的
 分类清单。沙箱已在无运行时、Python 桩运行时与 **Ubuntu 24.04.5 + Docker 29.9.0** 下验证
 fail-closed、资源准入、超时清理与容器内权限；`sink_scan.py` 的 ast-grep / semgrep
 仍属宿主机静态解析。
@@ -224,7 +224,7 @@ fail-closed、资源准入、超时清理与容器内权限；`sink_scan.py` 的
 - `validate_transition` 与结构化失败原因；
 - Phase 0–5 的产物可以导入黑板，门禁仍只读原有结构化产物。
 
-**现状（2026-10-27，已落地）**：`contracts.py` 当时扩到 16 种 schema（含六个黑板对象与 `evidence/1.1`；M3 后为 17 种）；
+**现状（2026-10-27，已落地）**：`contracts.py` 当时扩到 16 种 schema（含六个黑板对象与 `evidence/1.1`；M3 后为 17 种，M4 后为 18 种）；
 `board_events.py` 提供 append-only 日志、`seq` 校验与回放；`board_store.py` 提供快照、去重、
 导入与状态转换；`board_transitions.py` 提供候选状态机与类型化证据校验。selftest 第 21 组
 覆盖重复事件幂等、非法转换拒绝、跨 run 证据拒绝、快照删除后恢复、坏事件行报错和
@@ -299,21 +299,32 @@ app name；适配器分别做了 NA 过滤、前缀剥离与字段正名，并�
 分类。优先用 `qemu-system-*` + 最小 ext2 镜像 + user-mode 网络，不安装 EMBA、不跑它的
 模块流水线。
 
-**现状（2026-10-29）**：已新增 `references/emulation-methodology.md`，覆盖 P0–P5、架构与
-QEMU 矩阵、镜像构建、启动阶梯、网络模型、证据字段与失败分类；`emu_plan.py` /
-`emu_run.py` 尚未实现，仓库内也尚未跑过真实 QEMU 启动。
+**现状（2026-10-30，执行器与真实 rootfs 启动记录已落地）**：`references/emulation-methodology.md`
+覆盖 P0–P5、架构与 QEMU 矩阵、镜像构建、启动阶梯、网络模型、证据字段与失败分类。
+`emu_plan.py` 已实现只读探测（架构/init/内核/镜像参数/QEMU argv/blockers，不执行）；
+`emu_run.py` 已实现计划与哈希复核、固定经 `sandbox_run.py --mode sandbox` 执行 QEMU、
+串口分类与 `EmulationResult` 输出；`assets/qemu/Dockerfile` 提供含 QEMU 与 e2fsprogs 的
+执行镜像。selftest 第 24 组用假 sandbox 验证计划契约、哈希阻断、串口分类、`kernel-format` 回归与结果字段。
+
+**真实启动记录（2026-10-30）**：Hak5 WiFi Pineapple Nano 的 OpenWrt 19.07.2 rootfs（1,965 个普通文件）在 Ubuntu 24.04.5 + Docker 29.9.2 + QEMU 7.2.22 的 Malta 机器上启动到 BusyBox `/bin/sh`，观察信号为 `shell-prompt`；计划、结果、沙箱报告、串口与文件哈希保存在 `assets/qemu/real-run-malta/`。该次使用 OpenWrt Malta 通用内核，**不是厂商 ath79 内核**；厂商 raw 内核独立尝试得到 `FAILED / kernel-format`（QEMU: not ELF），只能说明格式/machine 不匹配，不能据此判断 rootfs 不可用。
+
+**未完成**：厂商内核/原机语义、网络与服务探测、Qiling 分支；`backend_version` 在结果中为 `unverified`（独立测得 QEMU 7.2.22）。
 
 **交付物**
 
 - `references/emulation-methodology.md`（已落地）；
 - `emu_plan.py`：只读探测 rootfs，输出启动计划（架构、init 候选、内核需求、镜像参数、
-  QEMU argv、blockers），不执行；
+  QEMU argv、blockers），不执行（已落地，`emulation-plan/1.0`）；
 - `emu_run.py`：经 `sandbox_run.py` 执行 QEMU，采集串口、退出码与清理结果，输出
-  `EmulationResult`；
-- 一个真实 rootfs 的可复现启动记录（命令、内核 sha256、串口日志、退出码）。
+  `EmulationResult`（已落地，`emulation-result/1.0`）；
+- `assets/qemu/Dockerfile`：含 `qemu-system-*` 与 `e2fsprogs` 的执行镜像（已落地）；
+- 一个真实 rootfs 的可复现启动记录（命令、内核 sha256、串口日志、退出码）——**已落地**，见 `assets/qemu/real-run-malta/README.md`。
 
-**验收**：在未安装 EMBA 的 Linux 环境，至少一个真实 rootfs 在预算内启动到 shell 或
-init；失败时有结构化状态与下一步；不把「启动成功」或「端口开放」升级为漏洞结论。
+**验收状态：通过（仅限记录范围）。** 已在未安装 EMBA 的 Linux 环境（Ubuntu 24.04.5 +
+Docker 29.9.2）让一个真实 rootfs 在 30 秒预算内启动到 `/bin/sh`；厂商内核失败也以结构化
+`FAILED / kernel-format` 记录并给出原因；没有把「启动成功」或「端口开放」升级为漏洞结论。
+该通过项只覆盖「真实 rootfs 用户态启动」：厂商内核、网络、服务与 Qiling 分支仍未验证，
+不能据此声明完整固件仿真完成。
 
 **定向分支（Qiling）**：整机起不来但目标二进制明确、依赖可控时，走 `adapter_qiling.py`；
 实现事件过滤、上下文捕获、Evidence 归一化，区分 syscall / API / 库函数 Hook；用负例
@@ -344,8 +355,8 @@ scripts/
   board_events.py       # 新增：append-only 事件日志与回放
   board_transitions.py  # 新增：validate_transition 与状态机
   adapter_emba.py       # 已新增：EMBA 产物离线解析（emba-import/1.0，可选）
-  emu_plan.py           # 待新增：只读探测 + 启动计划（不执行）
-  emu_run.py            # 待新增：经 sandbox_run 执行 QEMU 并归一化
+  emu_plan.py           # 已新增：只读探测 + 启动计划（不执行）
+  emu_run.py            # 已新增：经 sandbox_run 执行 QEMU 并归一化
   adapter_qiling.py     # 待新增：Qiling 执行与事件归一化
   sandbox_run.py        # 现有：作为统一执行入口
   coverage_gate.py      # 现有：消费黑板导出的结构化产物

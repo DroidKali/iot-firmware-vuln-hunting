@@ -32,7 +32,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 FAILS: list = []
 TOTAL = 0          # 实际执行的断言数：由脚本自己报，避免文档里的数字靠数日志漂移
-NGROUPS = 23       # 组数：与各处 [N/23] 表头一致，末尾会自校验，防止「13 组」再次漂移
+NGROUPS = 24       # 组数：与各处 [N/24] 表头一致，末尾会自校验，防止「13 组」再次漂移
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -301,7 +301,7 @@ def main() -> int:
         with open(p, "w", encoding="utf-8", newline="\n") as f:
             f.write(txt)
 
-    print("\n[1/23] fw_triage.py — 度量 / 加固画像 / 分层")
+    print("\n[1/24] fw_triage.py — 度量 / 加固画像 / 分层")
     r = run([os.path.join(HERE, "fw_triage.py"), img, "--rootfs", root, "--tier",
              "--budget", "800", "--out", metrics, "--plan", plan, "--pretty"])
     check("fw_triage 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
@@ -329,7 +329,7 @@ def main() -> int:
     check("T3 含 www/index.html", "www/index.html" in set(t["t3_list"]))
     check("EALB > 0", t["ealoc_total"] > 0, str(t["ealoc_total"]))
 
-    print("\n[2/23] sink_scan.py — Layer 1 危险模式扫描")
+    print("\n[2/24] sink_scan.py — Layer 1 危险模式扫描")
     r = run([os.path.join(HERE, "sink_scan.py"), root, "--json", sinks])
     check("sink_scan 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
     if r.returncode != 0:
@@ -343,19 +343,19 @@ def main() -> int:
     check("etc/passwd 不再误报 P1-S-020", ("P1-S-020", "etc/passwd") not in key)
     check("文档目录被跳过", not any(f["file"].startswith("usr/share/doc") for f in sd["findings"]))
 
-    print("\n[3/23] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
+    print("\n[3/24] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vpart, "--tiering", tiering])
     check("不完整输入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
 
-    print("\n[4/23] coverage_gate.py — 覆盖率门禁（完整应通过）")
+    print("\n[4/24] coverage_gate.py — 覆盖率门禁（完整应通过）")
     out = os.path.join(base, "40-coverage.md")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vfull, "--tiering", tiering, "--out", out])
     check("完整输入 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("门禁报告已生成", os.path.isfile(out))
 
-    print("\n[5/23] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
+    print("\n[5/24] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
     bad_rep = os.path.join(base, "report-bad.md")
     with open(bad_rep, "w", encoding="utf-8") as fh:
         fh.write(
@@ -443,7 +443,7 @@ def main() -> int:
     check("⑥ 保留指针行（移动语义）→ 退出码 0", r.returncode == 0,
           r.stdout.strip()[-200:])
 
-    print("\n[6/23] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
+    print("\n[6/24] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
     review_bad = os.path.join(base, "25-review-list.md")
     with open(review_bad, "w", encoding="utf-8") as fh:
         fh.write("- [x] `www/cgi-bin/ping.cgi`\n"     # 有结论 → OK
@@ -475,7 +475,7 @@ def main() -> int:
     check("审阅清单一致 → 退出码 0", r.returncode == 0,
           r.stdout.strip()[-160:])
 
-    print("\n[7/23] coverage_gate.py — 报告 9 必填字段校验")
+    print("\n[7/24] coverage_gate.py — 报告 9 必填字段校验")
     f_bad = os.path.join(base, "report-fields-bad.md")
     with open(f_bad, "w", encoding="utf-8") as fh:
         fh.write(
@@ -511,7 +511,7 @@ def main() -> int:
     check("9 字段齐全 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("报告模板字段不误报", _template_fields_clean())
 
-    print("\n[8/23] coverage_gate.py — G4 入口级覆盖（文件级 100% ≠ 入口级 100%）")
+    print("\n[8/24] coverage_gate.py — G4 入口级覆盖（文件级 100% ≠ 入口级 100%）")
     tj_g4 = os.path.join(base, "02-tiering-g4.json")
     with open(tj_g4, "w", encoding="utf-8") as fh:
         json.dump({"rootfs_analysis": {"tiering": {"shards": [{"items": [
@@ -553,7 +553,7 @@ def main() -> int:
              "--entrypoints", ep_ok, "--out", os.path.join(base, "40-g4c.md")])
     check("入口枚举 + 全部处置 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
 
-    print("\n[9/23] coverage_gate.py — G5 绕过矩阵（「有防护」≠「防护有效」）")
+    print("\n[9/24] coverage_gate.py — G5 绕过矩阵（「有防护」≠「防护有效」）")
     vp_bad = os.path.join(base, "30-claim-bad.md")
     with open(vp_bad, "w", encoding="utf-8") as fh:
         fh.write("# 结论\n\n## F-001 · x\n\n- 影响: 已鉴权，不可利用\n")
@@ -583,7 +583,7 @@ def main() -> int:
     check("G5 端到端接入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
     check("检出绕过矩阵缺失", "绕过矩阵完备（G5）" in open(out_g5, encoding="utf-8").read())
 
-    print("\n[10/23] coverage_gate.py — G6 跨请求污点溯源（持久化来源须声明写入面）")
+    print("\n[10/24] coverage_gate.py — G6 跨请求污点溯源（持久化来源须声明写入面）")
     _F = ("- **类型**：命令注入\n- **位置**：`usr/sbin/httpd:0x1`\n- **优先级**：P1\n"
           "- **置信度**：CONFIRMED\n- **CVSS 3.1**：`AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H` = 9.8\n"
           "{src}- **Sink**：system()\n- **完整调用链**：1. a @0x1\n- **证据**：`[E1]` disasm\n")
@@ -618,7 +618,7 @@ def main() -> int:
              os.path.join(base, "40-g6b.md")])
     check("声明写入面端到端 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
 
-    print("\n[11/23] coverage_gate.py — G1/G2/G3 自动修复 + 类型→Base 命中")
+    print("\n[11/24] coverage_gate.py — G1/G2/G3 自动修复 + 类型→Base 命中")
     out_rec = os.path.join(base, "40-recover.md")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vpart, "--tiering", tiering,
@@ -652,7 +652,7 @@ def main() -> int:
     check("可映射类型 → 不报",
           not _cg.check_type_base(rep_mapped, base_md)["unmapped"])
 
-    print("\n[12/23] sink_scan.py — 结构级二次过滤（正则初筛 → 结构确认 / 否定 / 回退）")
+    print("\n[12/24] sink_scan.py — 结构级二次过滤（正则初筛 → 结构确认 / 否定 / 回退）")
     if HERE not in sys.path:
         sys.path.insert(0, HERE)
     import sink_scan as _ss  # noqa
@@ -731,7 +731,7 @@ def main() -> int:
         _ss.structural_match = _orig_sm
 
     # ── 13. 扫描完整性 + 门禁严格性（改进计划 §3 / §4 / §6 的回归）──────────
-    print("\n[13/23] 扫描完整性与门禁严格性")
+    print("\n[13/24] 扫描完整性与门禁严格性")
 
     sz = os.path.join(base, "scanint")
     os.makedirs(sz, exist_ok=True)
@@ -893,7 +893,7 @@ def main() -> int:
     check("组数常量与表头数量一致", n_hdr == NGROUPS, f"表头 {n_hdr} / 常量 {NGROUPS}")
 
     # ── 15. 高阶污点图：写面/读面必须分属不同 action ──────────────────────────
-    print("\n[15/23] taint_graph.py — 跨请求污点图（BDG/ADG）与 G7 门禁")
+    print("\n[15/24] taint_graph.py — 跨请求污点图（BDG/ADG）与 G7 门禁")
     tg = os.path.join(base, "tg")
     os.makedirs(tg, exist_ok=True)
     TG = os.path.join(HERE, "taint_graph.py")
@@ -1074,7 +1074,7 @@ def main() -> int:
           and r.returncode != 0, f"{row.get('status')}/{row.get('required')}")
 
     # ── 16. 候选输入契约：解析失败必须可见，strict 只吃版本化输入 ─────────────
-    print("\n[16/23] 候选输入契约：解析失败可见 / strict 只接受版本化输入")
+    print("\n[16/24] 候选输入契约：解析失败可见 / strict 只接受版本化输入")
     cd16 = os.path.join(base, "cand")
     os.makedirs(cd16, exist_ok=True)
 
@@ -1174,7 +1174,7 @@ def main() -> int:
           f"rc={rr.returncode}")
 
     # ── 17. 扫描完整性 / 阶段状态 / 结构引擎：降级可见，且 strict 能阻断 ─────
-    print("\n[17/23] 扫描完整性与阶段状态：降级可见、可阻断")
+    print("\n[17/24] 扫描完整性与阶段状态：降级可见、可阻断")
     sd17 = os.path.join(base, "scangate")
     os.makedirs(sd17, exist_ok=True)
     layer1_partial = os.path.join(sz, "out2.json")
@@ -1285,7 +1285,7 @@ def main() -> int:
           f"{row.get('status')}/{row.get('required')} rc={rr.returncode}")
 
     # ── 18. 结构化契约 / 固件清单 / EALB 校准 ────────────────────────────────
-    print("\n[18/23] 契约校验（contracts.py）、FirmwareManifest、EALB 校准")
+    print("\n[18/24] 契约校验（contracts.py）、FirmwareManifest、EALB 校准")
     cd18 = os.path.join(base, "contracts")
     os.makedirs(cd18, exist_ok=True)
     CONTRACTS = os.path.join(HERE, "contracts.py")
@@ -1410,7 +1410,7 @@ def main() -> int:
           json.dumps((ee.get("targets") or {}).get("minutes") or {},
                      ensure_ascii=False))
 
-    print("\n[19/23] sandbox_run.py — 不可信固件的隔离边界（fail-closed）")
+    print("\n[19/24] sandbox_run.py — 不可信固件的隔离边界（fail-closed）")
     SANDBOX = os.path.join(HERE, "sandbox_run.py")
     sb_dir = os.path.join(base, "sandbox")
     os.makedirs(sb_dir, exist_ok=True)
@@ -1476,7 +1476,7 @@ def main() -> int:
           rr.returncode == 4, f"rc={rr.returncode}")
 
     # ── 20. 基准评估：指标可复算、严格模式不吞未复核标签、回归可阻断 ──────────
-    print("\n[20/23] bench_eval.py — 基准评估（precision/recall/回归阻断）")
+    print("\n[20/24] bench_eval.py — 基准评估（precision/recall/回归阻断）")
     BENCH = os.path.join(HERE, "bench_eval.py")
     bench_manifest = os.path.join(os.path.dirname(HERE), "assets", "bench", "manifest.json")
     bd = os.path.join(base, "bench")
@@ -1558,7 +1558,7 @@ def main() -> int:
               f"rc={rr.returncode} reasons={db.get('regression_reasons')}")
 
     # ── 21. 黑板：契约 / 事件日志 / 快照恢复 / 状态机 ────────────────────────
-    print("\n[21/23] board_* — 黑板契约、事件日志、快照恢复与状态转换")
+    print("\n[21/24] board_* — 黑板契约、事件日志、快照恢复与状态转换")
     BOARD = os.path.join(HERE, "board_store.py")
     BEV = os.path.join(HERE, "board_events.py")
     BTR = os.path.join(HERE, "board_transitions.py")
@@ -1884,7 +1884,7 @@ def main() -> int:
               for e in st21.get("emulation_results") or [])
           and run([BOARD, "verify", "--workspace", ws21]).returncode == 0)
 
-    print("\n[22/23] resource_manager.py — 资源准入、并发排队与执行路径清单")
+    print("\n[22/24] resource_manager.py — 资源准入、并发排队与执行路径清单")
     RM = os.path.join(HERE, "resource_manager.py")
     EXECP = os.path.join(HERE, "exec_paths.py")
     q22 = os.path.join(base, "resource22")
@@ -2104,7 +2104,7 @@ def main() -> int:
           rr.returncode == 1 and _r22(bad_out).get("ok") is False,
           f"rc={rr.returncode}")
 
-    print("\n[23/23] adapter_emba.py — 离线解析 EMBA 产物、三类观察与黑板导入")
+    print("\n[23/24] adapter_emba.py — 离线解析 EMBA 产物、三类观察与黑板导入")
     ADAPTER = os.path.join(HERE, "adapter_emba.py")
     q23 = os.path.join(base, "emba23")
     src23 = os.path.join(os.path.dirname(HERE), "assets", "emba-sample")
@@ -2389,6 +2389,241 @@ def main() -> int:
           rr_br.returncode == 1
           and "REQUIREMENTS_INCONSISTENT" in rr_br.stdout,
           f"rc={rr_br.returncode}")
+
+    print("\n[24/24] emu_plan.py / emu_run.py — M4 计划、沙箱执行与结果分类")
+    EMUPLAN = os.path.join(HERE, "emu_plan.py")
+    EMURUN = os.path.join(HERE, "emu_run.py")
+    q24 = os.path.join(base, "m4")
+    fw24 = os.path.join(q24, "fw")
+    rootfs24 = os.path.join(fw24, "rootfs")
+    os.makedirs(os.path.join(rootfs24, "bin"), exist_ok=True)
+    os.makedirs(os.path.join(rootfs24, "sbin"), exist_ok=True)
+    os.makedirs(os.path.join(rootfs24, "etc"), exist_ok=True)
+    os.makedirs(os.path.join(fw24, "boot"), exist_ok=True)
+    build_elf(os.path.join(rootfs24, "bin", "sh"), etype=2, nx=True,
+              relro=True, canary=False, machine=8)
+    os.chmod(os.path.join(rootfs24, "bin", "sh"), 0o755)
+    kernel24 = os.path.join(fw24, "boot", "vmlinux")
+    with open(kernel24, "wb") as fh:
+        fh.write(b"not a real kernel image\n")
+    image24 = os.path.join(fw24, "rootfs.img")
+    with open(image24, "wb") as fh:
+        fh.truncate(4 * 1024 * 1024)
+        fh.seek(1080)
+        fh.write(b"\x53\xef")
+    RUN24 = "RUN-M4-24"
+    INTENT24 = "INTENT-M4-24"
+    FW24 = "c" * 64
+
+    def _w24(name: str, obj) -> str:
+        path = os.path.join(q24, name)
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(obj, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+        return path
+
+    def _r24(path: str):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return {}
+
+    def _plan24(out: str, extra=None):
+        return run([EMUPLAN, "--rootfs", rootfs24, "--firmware-root", fw24,
+                    "--kernel", kernel24, "--image-out", image24,
+                    "--arch", "mipsel", "--init", "/bin/sh",
+                    "--json", out, "--quiet"] + list(extra or []))
+
+    plan0_path = os.path.join(q24, "plan-no-run.json")
+    rr_plan = _plan24(plan0_path)
+    plan0 = _r24(plan0_path)
+    check("emu_plan：合成 rootfs/内核/ext2 镜像生成 ready 计划",
+          rr_plan.returncode == 0 and plan0.get("status") == "ready"
+          and not plan0.get("blockers"),
+          f"rc={rr_plan.returncode} status={plan0.get('status')} "
+          f"blockers={plan0.get('blockers')}")
+    check("emu_plan：ready 计划通过 emulation-plan 契约",
+          run([CONTRACTS, "--kind", "emulation-plan",
+               "--file", plan0_path]).returncode == 0)
+    check("emu_plan：QEMU argv 固定 serial=/out/serial.log、-snapshot 与 -kernel",
+          (plan0.get("qemu") or {}).get("machine") == "malta"
+          and "file:/out/serial.log" in ((plan0.get("qemu") or {}).get("argv") or [])
+          and "-snapshot" in ((plan0.get("qemu") or {}).get("argv") or [])
+          and "-kernel" in ((plan0.get("qemu") or {}).get("argv") or []),
+          str((plan0.get("qemu") or {}).get("argv")))
+    check("emu_plan：已有 ext2 镜像时不再要求重建",
+          (plan0.get("image") or {}).get("exists") is True
+          and (plan0.get("image") or {}).get("fs") == "ext2"
+          and not (plan0.get("build") or {}).get("required"),
+          str(plan0.get("image")))
+    plan_md = os.path.join(q24, "plan.md")
+    rr_md = run([EMUPLAN, "--rootfs", rootfs24, "--firmware-root", fw24,
+                 "--kernel", kernel24, "--image-out", image24,
+                 "--arch", "mipsel", "--init", "/bin/sh",
+                 "--md", plan_md, "--quiet"])
+    check("emu_plan：--md 写出中文计划，说明计划成功不等于仿真成功",
+          rr_md.returncode == 0 and os.path.isfile(plan_md)
+          and "不证明启动一定成功" in open(plan_md, encoding="utf-8").read(),
+          f"rc={rr_md.returncode}")
+
+    rr_chk = run([EMURUN, "--plan", plan0_path, "--check"])
+    check("emu_run：--check 缺 run/intent/固件哈希 → rc3，不执行 QEMU",
+          rr_chk.returncode == 3
+          and "RUN_ID_MISSING" in rr_chk.stderr
+          and "INTENT_ID_MISSING" in rr_chk.stderr,
+          f"rc={rr_chk.returncode} err={rr_chk.stderr.strip()[:180]}")
+
+    plan1_path = os.path.join(q24, "plan.json")
+    _plan24(plan1_path, ["--run-id", RUN24, "--intent-id", INTENT24,
+                         "--firmware-sha256", FW24])
+    plan1 = _r24(plan1_path)
+    rr_ready = run([EMURUN, "--plan", plan1_path, "--check"])
+    check("emu_run：--check 对完整计划返回 rc0",
+          rr_ready.returncode == 0 and "[ready]" in rr_ready.stdout,
+          f"rc={rr_ready.returncode}")
+
+    stale = json.loads(json.dumps(plan1))
+    stale["image"]["sha256"] = "0" * 64
+    stale_path = _w24("plan-stale.json", stale)
+    rr_stale = run([EMURUN, "--plan", stale_path, "--check"])
+    check("emu_run：镜像哈希与计划不符 → rc3 IMAGE_HASH_MISMATCH",
+          rr_stale.returncode == 3 and "IMAGE_HASH_MISMATCH" in rr_stale.stderr,
+          f"rc={rr_stale.returncode} err={rr_stale.stderr.strip()[:180]}")
+
+    blocked_out = os.path.join(q24, "blocked-out")
+    blocked_json = os.path.join(q24, "blocked.json")
+    rr_blocked = run([EMURUN, "--plan", plan0_path, "--out", blocked_out,
+                      "--json", blocked_json, "--quiet"])
+    blocked = _r24(blocked_json)
+    check("emu_run：计划复核失败仍写 BLOCKED 结果，且没有启动沙箱",
+          rr_blocked.returncode == 3 and blocked.get("status") == "BLOCKED"
+          and (blocked.get("failure") or {}).get("category") == "plan-blocked"
+          and not os.path.exists(os.path.join(blocked_out, "sandbox-run.json")),
+          f"rc={rr_blocked.returncode} status={blocked.get('status')}")
+
+    fake = os.path.join(q24, "fake_sandbox.py")
+    FAKE24 = r'''import argparse, json, os, sys
+ap = argparse.ArgumentParser()
+ap.add_argument("--out", required=True)
+ap.add_argument("--json", required=True)
+ap.add_argument("--md", default="")
+ap.add_argument("--image", default="")
+ap.add_argument("--mode", default="sandbox")
+ap.add_argument("--cmd", default="")
+a, _ = ap.parse_known_args()
+here = os.path.dirname(os.path.abspath(__file__))
+mode = open(os.path.join(here, "mode.txt"), encoding="utf-8").read().strip()
+texts = {
+    "success": "Linux version 5.10.0 (builder@x)\nconsole [ttyS0] enabled\nFreeing unused kernel memory: 1024K\nPlease press Enter to activate this console\n",
+    "panic": "Linux version 5.10.0 (builder@x)\nKernel panic - not syncing: VFS: Unable to mount root fs on unknown-block(0,0)\n",
+    "partial": "Linux version 5.10.0 (builder@x)\nFreeing unused kernel memory: 1024K\n",
+    "empty": "",
+    "kernel-format": "",
+}
+stderrs = {
+    "kernel-format": "qemu-system-mips: could not load kernel '/firmware/vmlinux': The image is not ELF\n",
+}
+os.makedirs(a.out, exist_ok=True)
+with open(os.path.join(a.out, "serial.log"), "w", encoding="utf-8", newline="\n") as fh:
+    fh.write(texts.get(mode, ""))
+doc = {"schema": "sandbox-run/1.1", "tool": "sandbox_run.py", "version": "1.1",
+       "mode": "sandbox", "host_fallback": False, "image": a.image,
+       "command": a.cmd, "exit_code": 0, "timed_out": False, "ok": True,
+       "stderr_head": stderrs.get(mode, ""),
+       "admission": {"decision": "admitted"},
+       "started_at": "2026-01-01T00:00:00Z",
+       "finished_at": "2026-01-01T00:00:01Z"}
+with open(a.json, "w", encoding="utf-8", newline="\n") as fh:
+    json.dump(doc, fh, ensure_ascii=False)
+if a.md:
+    with open(a.md, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("# fake sandbox\n")
+sys.exit(0)
+'''
+    with open(fake, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(FAKE24)
+
+    def _mode24(name: str) -> None:
+        with open(os.path.join(q24, "mode.txt"), "w",
+                  encoding="utf-8", newline="\n") as fh:
+            fh.write(name + "\n")
+
+    def _emu24(name: str, mode: str):
+        _mode24(mode)
+        out = os.path.join(q24, "out-" + name)
+        res_path = os.path.join(q24, "result-" + name + ".json")
+        md_path = os.path.join(q24, "result-" + name + ".md")
+        rr = run([EMURUN, "--plan", plan1_path, "--out", out,
+                  "--timeout", "5", "--sandbox-script", fake,
+                  "--json", res_path, "--md", md_path, "--quiet"])
+        return rr, _r24(res_path), res_path, md_path
+
+    rr_ok, res_ok, ok_path, ok_md = _emu24("success", "success")
+    check("emu_run：串口出现 console-ready → SUCCESS（rc0），超时记录实际值",
+          rr_ok.returncode == 0 and res_ok.get("status") == "SUCCESS"
+          and (res_ok.get("resource_usage") or {}).get("timeout_s") == 5,
+          f"rc={rr_ok.returncode} status={res_ok.get('status')} "
+          f"usage={res_ok.get('resource_usage')}")
+    check("emu_run：成功结果通过 emulation-result 契约",
+          run([CONTRACTS, "--kind", "emulation-result",
+               "--file", ok_path]).returncode == 0)
+    env24 = res_ok.get("environment") or {}
+    check("emu_run：结果记录 sandbox 模式且 host_fallback=false",
+          env24.get("mode") == "sandbox"
+          and env24.get("host_fallback") is False
+          and env24.get("sandbox_mode") == "sandbox",
+          str(env24))
+    check("emu_run：仿真观察不升级为漏洞结论",
+          res_ok.get("evidence_refs") == []
+          and "finding" not in res_ok
+          and all(o.get("type") == "emulation"
+                  for o in res_ok.get("observations") or []),
+          str(res_ok.get("observations")))
+    check("emu_run：产物含串口与沙箱报告，Markdown 明确不是漏洞结论",
+          any("serial.log" in str(a.get("path"))
+              for a in res_ok.get("artifacts") or [])
+          and os.path.isfile(ok_md)
+          and "不是漏洞结论" in open(ok_md, encoding="utf-8").read(),
+          f"artifacts={len(res_ok.get('artifacts') or [])}")
+
+    rr_panic, res_panic, panic_path, _ = _emu24("panic", "panic")
+    check("emu_run：VFS 挂载失败优先归类为 rootfs-mount（rc1 FAILED）",
+          rr_panic.returncode == 1 and res_panic.get("status") == "FAILED"
+          and (res_panic.get("failure") or {}).get("category") == "rootfs-mount"
+          and run([CONTRACTS, "--kind", "emulation-result",
+                   "--file", panic_path]).returncode == 0,
+          f"rc={rr_panic.returncode} failure={res_panic.get('failure')}")
+
+    rr_part, res_part, part_path, _ = _emu24("partial", "partial")
+    check("emu_run：只有内核启动日志 → PARTIAL，并列出未覆盖内容",
+          rr_part.returncode == 1 and res_part.get("status") == "PARTIAL"
+          and res_part.get("limitations")
+          and run([CONTRACTS, "--kind", "emulation-result",
+                   "--file", part_path]).returncode == 0,
+          f"rc={rr_part.returncode} status={res_part.get('status')}")
+
+    rr_empty, res_empty, empty_path, _ = _emu24("empty", "empty")
+    check("emu_run：串口为空 → FAILED boot-no-output（rc1）",
+          rr_empty.returncode == 1 and res_empty.get("status") == "FAILED"
+          and (res_empty.get("failure") or {}).get("category") == "boot-no-output"
+          and run([CONTRACTS, "--kind", "emulation-result",
+                   "--file", empty_path]).returncode == 0,
+          f"rc={rr_empty.returncode} failure={res_empty.get('failure')}")
+
+    rr_kf, res_kf, kf_path, _ = _emu24("kernel-format", "kernel-format")
+    check("emu_run：QEMU 拒绝非 ELF 内核 → kernel-format（rc1 FAILED）",
+          rr_kf.returncode == 1 and res_kf.get("status") == "FAILED"
+          and (res_kf.get("failure") or {}).get("category") == "kernel-format"
+          and (res_kf.get("failure") or {}).get("retryable") is False
+          and run([CONTRACTS, "--kind", "emulation-result",
+                   "--file", kf_path]).returncode == 0,
+          f"rc={rr_kf.returncode} failure={res_kf.get('failure')}")
+
+    check("emu_run：每次执行都重新运行沙箱，不复用上一次结果",
+          (res_ok.get("emulation_id") != res_panic.get("emulation_id"))
+          and (res_panic.get("emulation_id") != res_part.get("emulation_id")),
+          f"{res_ok.get('emulation_id')} / {res_panic.get('emulation_id')}")
 
     print()
     if FAILS:

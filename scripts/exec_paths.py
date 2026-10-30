@@ -49,6 +49,11 @@ KNOWN = {
         "note": "在宿主机调用 ast-grep / semgrep 读取固件字节；只解析不执行，"
                 "但仍属未容器化的残留风险",
     },
+    "emu_run.py": {
+        "classification": "sandbox-client",
+        "input_trust": "untrusted-firmware",
+        "note": "只通过 sandbox_run.py 启动 QEMU；自身不组装容器参数、不回退宿主机",
+    },
     "bench_eval.py": {
         "classification": "trusted-metadata",
         "input_trust": "trusted-local",

@@ -19,7 +19,8 @@ sandbox_run.py — 不可信固件的一次性隔离执行边界（fail-closed�
 隔离参数（sandbox 模式，全部记录在 JSON 的 policy 与 command 里）：
   --network none / --read-only / --cap-drop=ALL / --security-opt=no-new-privileges
   --user 65534:65534 / --memory 512m / --cpus 1 / --pids-limit 128
-  --tmpfs /tmp:rw,noexec,nosuid,size=16m
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m / --tmpfs /var/tmp:...（QEMU 快照盘）
+  -e TMPDIR=/tmp（固定值，不继承宿主环境）
   固件目录 :ro 挂到 /firmware，输出目录 rw 挂到 /out；命令统一经容器内
   /bin/sh -c 执行（便于占位符与管道，镜像需自带 /bin/sh）；超时由 Python 侧
   subprocess 实现（超时 kill 客户端，并尽力 docker rm -f 掉可能残留的容器）。
@@ -91,7 +92,9 @@ DEFAULT_TIMEOUT = 120                         # 秒
 DEFAULT_MEMORY = "512m"
 DEFAULT_CPUS = "1"
 DEFAULT_PIDS = 128
-DEFAULT_TMPFS = "/tmp:rw,noexec,nosuid,size=16m"
+DEFAULT_TMPFS = "/tmp:rw,noexec,nosuid,size=64m"
+DEFAULT_TMPFS_VAR = "/var/tmp:rw,noexec,nosuid,size=64m"   # QEMU -snapshot 默认写这里
+DEFAULT_TMPDIR = "/tmp"                        # 固定值，不继承宿主环境
 CONTAINER_UID = "65534:65534"                 # nobody:nogroup，无家目录、无凭据
 FIRMWARE_TARGET = "/firmware"                 # 容器内只读挂载点
 OUT_TARGET = "/out"                           # 容器内可写挂载点
@@ -393,6 +396,8 @@ def build_container_argv(runtime_argv: List[str], image: str, firmware: str, out
         "--cpus", args.cpus,
         "--pids-limit", str(args.pids),
         "--tmpfs", DEFAULT_TMPFS,               # /tmp 明确 noexec,nosuid
+        "--tmpfs", DEFAULT_TMPFS_VAR,           # QEMU -snapshot 的临时盘
+        "-e", "TMPDIR=" + DEFAULT_TMPDIR,       # 只给固定值，不继承宿主环境
         "-v", "%s:%s:ro" % (firmware, FIRMWARE_TARGET),
         "-v", "%s:%s:rw" % (out, OUT_TARGET),
         "--workdir", OUT_TARGET,                # 相对路径写入落到可写挂载点
@@ -511,6 +516,7 @@ def sandbox_policy(args: argparse.Namespace) -> Dict[str, Any]:
         "cpus": args.cpus,
         "pids_limit": args.pids,
         "tmpfs": DEFAULT_TMPFS,
+        "tmpfs_var": DEFAULT_TMPFS_VAR,
         "timeout_s": args.timeout,
         "host_execution": "forbidden",
     }
@@ -529,6 +535,7 @@ def host_policy(args: argparse.Namespace) -> Dict[str, Any]:
         "cpus": None,
         "pids_limit": None,
         "tmpfs": None,
+        "tmpfs_var": None,
         "timeout_s": args.timeout,
         "host_execution": "explicit-opt-in",
         "note": "host 模式不施加任何隔离参数，以上各项一律未生效",

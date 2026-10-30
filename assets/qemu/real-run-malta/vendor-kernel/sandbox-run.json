@@ -1,0 +1,153 @@
+{
+  "schema": "sandbox-run/1.1",
+  "tool": "sandbox_run.py",
+  "version": "1.1",
+  "mode": "sandbox",
+  "host_fallback": false,
+  "check_only": false,
+  "image": "iot-fw/qemu:latest",
+  "runtime": {
+    "name": "docker",
+    "version": "29.9.2",
+    "available": true,
+    "path": "/usr/bin/docker",
+    "probe": "ok",
+    "requested": "auto",
+    "argv": [
+      "/usr/bin/docker"
+    ],
+    "tried": [
+      {
+        "name": "docker",
+        "path": "/usr/bin/docker",
+        "version": "29.9.2",
+        "available": true,
+        "probe": "ok",
+        "argv": [
+          "/usr/bin/docker"
+        ]
+      }
+    ]
+  },
+  "command": [
+    "/usr/bin/docker",
+    "run",
+    "--rm",
+    "--name",
+    "iotfw-sandbox-6dffb4b8db68",
+    "--network",
+    "none",
+    "--read-only",
+    "--cap-drop=ALL",
+    "--security-opt=no-new-privileges",
+    "--user",
+    "65534:65534",
+    "--memory",
+    "512m",
+    "--cpus",
+    "1",
+    "--pids-limit",
+    "128",
+    "--tmpfs",
+    "/tmp:rw,noexec,nosuid,size=64m",
+    "--tmpfs",
+    "/var/tmp:rw,noexec,nosuid,size=64m",
+    "-e",
+    "TMPDIR=/tmp",
+    "-v",
+    "/root/iot-m4/fw:/firmware:ro",
+    "-v",
+    "/root/iot-m4/run-vendor:/out:rw",
+    "--workdir",
+    "/out",
+    "iot-fw/qemu:latest",
+    "/bin/sh",
+    "-c",
+    "qemu-system-mips -M malta -cpu 24Kc -m 512m -smp 1 -kernel /firmware/vmlinux-ath79.bin -drive if=ide,file=/firmware/rootfs-malta.img,format=raw -append 'root=/dev/sda rw console=ttyS0,115200 init=/bin/sh ignore_loglevel panic=5' -display none -monitor none -serial file:/out/serial.log -no-reboot -snapshot"
+  ],
+  "mounts": {
+    "firmware": {
+      "path": "/root/iot-m4/fw",
+      "sha256": "cb085f86fa415fc5aefc393a0019de7142e4e9350c76b77ce00646c71324726e",
+      "read_only": true,
+      "target": "/firmware"
+    },
+    "out": {
+      "path": "/root/iot-m4/run-vendor",
+      "read_only": false,
+      "target": "/out"
+    }
+  },
+  "policy": {
+    "network": "none",
+    "network_requested": "none",
+    "read_only_rootfs": true,
+    "cap_drop": "ALL",
+    "no_new_privileges": true,
+    "user": "65534:65534",
+    "memory": "512m",
+    "cpus": "1",
+    "pids_limit": 128,
+    "tmpfs": "/tmp:rw,noexec,nosuid,size=64m",
+    "tmpfs_var": "/var/tmp:rw,noexec,nosuid,size=64m",
+    "timeout_s": 20,
+    "host_execution": "forbidden"
+  },
+  "admission": {
+    "decision": "admitted",
+    "code": null,
+    "message": null,
+    "policy": {
+      "schema": "sandbox-policy/1.0",
+      "max_concurrency": 1,
+      "queue_timeout_s": 300,
+      "max_total_seconds": 1800,
+      "max_timeout_s": 300,
+      "max_memory_mb": 1024,
+      "max_cpus": 2.0,
+      "max_pids": 256,
+      "allowed_images": null,
+      "allow_host": true
+    },
+    "policy_sha256": "3b7ec7f137c87d14d3dd467c7780a481473b9f7eaafa81289765e81238541960",
+    "policy_source": "defaults",
+    "request": {
+      "mode": "sandbox",
+      "timeout": 20,
+      "memory": "512m",
+      "cpus": "1",
+      "pids": 128,
+      "image": "iot-fw/qemu:latest"
+    },
+    "slots": {
+      "limit": 1,
+      "slot": 0,
+      "wait_s": 0.0,
+      "queued": false,
+      "state_dir": "/tmp/iot-firmware-sandbox-0"
+    },
+    "budget": {
+      "limit_s": 1800.0,
+      "used_s": 0.031,
+      "remaining_s": 1799.969
+    }
+  },
+  "started_at": "2026-10-30T11:18:31Z",
+  "finished_at": "2026-10-30T11:18:33Z",
+  "duration_s": 2.423,
+  "exit_code": 1,
+  "timed_out": false,
+  "stdout_bytes": 0,
+  "stderr_bytes": 92,
+  "stdout_head": "",
+  "stderr_head": "qemu-system-mips: could not load kernel '/firmware/vmlinux-ath79.bin': The image is not ELF\n",
+  "ok": false,
+  "notes": [
+    "输出目录 /root/iot-m4/run-vendor 原模式 0755，已补 other rwx + sticky 为 1757（容器以 uid 65534:65534 写入，bind mount 不做 UID 映射）",
+    "固件目录含符号链接 409 个，已跳过（不跟随、不计入清单哈希）",
+    "固件目录含非普通文件 1 个，已跳过（不计入清单哈希）",
+    "固件清单哈希覆盖 1971 个文件（按相对路径排序）",
+    "容器不注入任何宿主机环境变量（无凭据）；输出目录已按 uid 65534:65534 调整 other rwx + sticky，写入失败仍会如实记录 exit_code",
+    "命令已执行但返回非零（容器退出码 1）；进程退出码按约定映射为 1"
+  ]
+}

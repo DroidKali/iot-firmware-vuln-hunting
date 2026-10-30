@@ -4,8 +4,8 @@
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">  
   <img alt="python" src="https://img.shields.io/badge/python-3.8%2B%20stdlib%20only-3776AB.svg?logo=python\&logoColor=white">  
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg">  
-  <img alt="files" src="https://img.shields.io/badge/package-69%20files%20%C2%B7%2025251%20lines-informational.svg">
-  <img alt="selftest" src="https://img.shields.io/badge/selftest-254%20assertions%20passing-brightgreen.svg">
+  <img alt="files" src="https://img.shields.io/badge/package-84%20files%20%C2%B7%2028872%20lines-informational.svg">
+  <img alt="selftest" src="https://img.shields.io/badge/selftest-273%20assertions%20passing-brightgreen.svg">
   <img alt="agent" src="https://img.shields.io/badge/type-Agent%20Skill-7B42BC.svg">  
 </p>
 
@@ -172,13 +172,13 @@ npx skills add https://github.com/DroidKali/iot-firmware-vuln-hunting --agent '*
 
 常用管理命令：`npx skills list`（列出已装 Skill）、`npx skills update`（更新到最新）、`npx skills remove iot-firmware-vuln-hunting`（卸载）。
 
-**作为通用知识库使用** — 不安装也行：`git clone` 到任意位置，按 `SKILL.md` 的流程手工执行；十六个脚本可独立运行。
+**作为通用知识库使用** — 不安装也行：`git clone` 到任意位置，按 `SKILL.md` 的流程手工执行；十八个脚本可独立运行。
 
 ### 前置依赖
 
 | 类别     | 说明                                                                                                                                                    |
 | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Python | 3.8+，**十六个脚本只用标准库**，无第三方依赖，三平台均可运行。推荐用 [`uv`](https://github.com/astral-sh/uv) 管理（`uv run` 自动建临时环境）                                                    |
+| Python | 3.8+，**十八个脚本只用标准库**，无第三方依赖，三平台均可运行。推荐用 [`uv`](https://github.com/astral-sh/uv) 管理（`uv run` 自动建临时环境）                                                    |
 | 固件工具链  | 按判据**按需安装**，不必装齐：`unblob` / `binwalk` v3 / `moria` / `mithril` / `qemu-system-*` / `Qiling` / `AFL++` / `radare2`。Linux（Docker / WSL / Kali / AttifyOS）体验最好；Windows 宿主建议走 Docker |
 | 授权     | **只在获得书面授权（自有设备 / 客户授权 / SRC 范围）的目标上执行**，开工前把范围写进 `fw-audit/<target>/00-scope.md`                                                                     |
 
@@ -194,19 +194,21 @@ npx skills add https://github.com/DroidKali/iot-firmware-vuln-hunting --agent '*
 uv run scripts/selftest.py
 ```
 
-脚本会用纯 Python 手工构造合法 ELF64 与合成 rootfs，端到端跑通其余十五个脚本，覆盖 **23 组 / 254 条断言**，其中包含「门禁必须拦下坏报告」的负向用例。断言总数由脚本自己在结尾打印，不需要去数日志。看到全绿即安装成功。
+脚本会用纯 Python 手工构造合法 ELF64 与合成 rootfs，端到端跑通其余十七个脚本，覆盖 **24 组 / 273 条断言**，其中包含「门禁必须拦下坏报告」的负向用例。断言总数由脚本自己在结尾打印，不需要去数日志。看到全绿即安装成功。
 
-`[14/23]` 把**文档当被测对象**：抓出 `README.md` / `SKILL.md` / `references/` / `assets/` 里每条 `scripts/*.py` 示例命令，逐个核对命令里出现的 `--flag` 是否真存在于脚本 `--help`（有子命令的会逐个进去问），并检查布尔开关后面没跟取值。这条守卫来自一次真实事故——文档把 `store_true` 的 `--tier` 写成 `--tier <rootfs>`，照抄必然报错，而所有单元测试都是绿的。
+`[14/24]` 把**文档当被测对象**：抓出 `README.md` / `SKILL.md` / `references/` / `assets/` 里每条 `scripts/*.py` 示例命令，逐个核对命令里出现的 `--flag` 是否真存在于脚本 `--help`（有子命令的会逐个进去问），并检查布尔开关后面没跟取值。这条守卫来自一次真实事故——文档把 `store_true` 的 `--tier` 写成 `--tier <rootfs>`，照抄必然报错，而所有单元测试都是绿的。
 
-`[15/23]` 用 DIR878 的动机样例（`SetNetwork` 写 `lan0_management_link`、`SetRouterLanSettings` 读进 `system`）跑通 BDG/ADG，并验证三条否决路径：同一 action 内读写必须判**一阶**、缺 evidence 必须失败、拼不出来的键必须记 `unknown` 而不是占位。
+`[15/24]` 用 DIR878 的动机样例（`SetNetwork` 写 `lan0_management_link`、`SetRouterLanSettings` 读进 `system`）跑通 BDG/ADG，并验证三条否决路径：同一 action 内读写必须判**一阶**、缺 evidence 必须失败、拼不出来的键必须记 `unknown` 而不是占位。
 
-`[16/23]`–`[20/23]` 覆盖本轮整改新增的契约与边界：候选清单里**非法 JSON 行必须逐行上报**、strict 只接受带 schema 的 envelope；扫描完整性/阶段状态降级必须可见且可阻断；`contracts.py` 校验 FirmwareManifest / AuditTask 并核对镜像哈希；`sandbox_run.py` 在无隔离运行时 **fail-closed**（退出 3），绝不静默回退宿主机；`bench_eval.py` 用合成基准复算 precision/recall，并验证相对基线的召回暴跌会以退出码 3 阻断。
+`[16/24]`–`[20/24]` 覆盖本轮整改新增的契约与边界：候选清单里**非法 JSON 行必须逐行上报**、strict 只接受带 schema 的 envelope；扫描完整性/阶段状态降级必须可见且可阻断；`contracts.py` 校验 FirmwareManifest / AuditTask 并核对镜像哈希；`sandbox_run.py` 在无隔离运行时 **fail-closed**（退出 3），绝不静默回退宿主机；`bench_eval.py` 用合成基准复算 precision/recall，并验证相对基线的召回暴跌会以退出码 3 阻断。
 
-`[21/23]` 覆盖 M1 黑板：Fact / Intent / EmulationResult / BoardState / BoardEvent 契约，事件日志去重与 `seq` 连续性，快照删除后从日志恢复，非法状态转换（`hypothesis → validated`）被拒绝，`validated → confirmed` 的类型化证据校验，以及 `BACKTRACK` 的当前阶段一致性。
+`[21/24]` 覆盖 M1 黑板：Fact / Intent / EmulationResult / BoardState / BoardEvent 契约，事件日志去重与 `seq` 连续性，快照删除后从日志恢复，非法状态转换（`hypothesis → validated`）被拒绝，`validated → confirmed` 的类型化证据校验，以及 `BACKTRACK` 的当前阶段一致性。
 
-`[22/23]` 覆盖 M2 资源准入：策略字段与未知字段拒绝、超时/内存/CPU/PID/镜像越界必须在启动前拒绝（退出 4）、并发槽位排队与排队超时（退出 5，`command=[]`）、预算耗尽不启动、fake runtime 下的成功/超时/`rm -f` 清理/临时输出目录删除、输出目录对容器 uid 65534 的可写位，以及 `exec_paths.py` 对执行路径清单与未分类调用的阻断。
+`[22/24]` 覆盖 M2 资源准入：策略字段与未知字段拒绝、超时/内存/CPU/PID/镜像越界必须在启动前拒绝（退出 4）、并发槽位排队与排队超时（退出 5，`command=[]`）、预算耗尽不启动、fake runtime 下的成功/超时/`rm -f` 清理/临时输出目录删除、输出目录对容器 uid 65534 的可写位，以及 `exec_paths.py` 对执行路径清单与未分类调用的阻断。
 
-`[23/23]` 覆盖 M3 EMBA 离线适配：解析 F50/P99/S09/L15/L10/S115 六类产物，重复解析输出字节一致；缺 F50、版本不符、固件哈希不符返回结构化失败；缺可选日志为 `partial`（`--strict` 下退出 3），`--require` 指定的产物缺失则直接 `failed`；P99 的 PE32 落成 `file` 而不是 `elf`；L10 无开放端口时不生成 `port-response`；F50 的用户态仿真字段按计数解释；三类观察落成不同 `Fact.type`（`service` / `runtime-process` / `port-response`），证据类型分别为 `static` / `emulation` / `dynamic`；`board_store.py import --emba` 可幂等导入且拒绝跨 run 或 `failed` 结果。
+`[23/24]` 覆盖 M3 EMBA 离线适配：解析 F50/P99/S09/L15/L10/S115 六类产物，重复解析输出字节一致；缺 F50、版本不符、固件哈希不符返回结构化失败；缺可选日志为 `partial`（`--strict` 下退出 3），`--require` 指定的产物缺失则直接 `failed`；P99 的 PE32 落成 `file` 而不是 `elf`；L10 无开放端口时不生成 `port-response`；F50 的用户态仿真字段按计数解释；三类观察落成不同 `Fact.type`（`service` / `runtime-process` / `port-response`），证据类型分别为 `static` / `emulation` / `dynamic`；`board_store.py import --emba` 可幂等导入且拒绝跨 run 或 `failed` 结果。
+
+`[24/24]` 覆盖 M4 整机仿真执行链：从合成 rootfs、内核与假 ext2 镜像生成 `ready` 计划并校验 `emulation-plan/1.0` 契约；`--check` 缺 run/intent/固件哈希时以退出 3 阻断、镜像哈希被替换时返回 `IMAGE_HASH_MISMATCH`；计划阻断时写 `BLOCKED` 结果且完全不启动沙箱；假 sandbox 下的 console-ready、VFS 挂载失败、仅内核日志、空串口分别归为 `SUCCESS` / `FAILED rootfs-mount` / `PARTIAL` / `FAILED boot-no-output`，并断言结果只能产生 `emulation` 观察、不会生成 finding；新增 `kernel-format` 回归，防止把厂商 raw 内核被 QEMU 拒绝误判成 rootfs 不可用。**该组用假 sandbox，只验证契约与分类，不证明真实 QEMU 启动成功**；真实启动见 `assets/qemu/real-run-malta/`。
 
 ### 2. 一次完整审计
 
@@ -303,7 +305,7 @@ M2 把「谁可以开始执行」从各脚本的自觉变成**统一入口 + 可
 - **预算包含排队**：从进程启动开始算墙钟，排队、运行时探测、执行、清理都计入；剩余不足 1 秒即拒绝启动。准入拒绝退出码为 **5**，JSON 里 `command=[]`、`exit_code=null`。
 - **fail-closed 不变**：隔离运行时不可用仍是退出 **3**，没有宿主机回退分支；`--check` 只探测，不占槽、不建状态目录。
 - **输出目录按容器 uid 授权**：容器固定以 uid 65534 运行，而 bind mount 不做 UID 映射。sandbox 模式在创建 `--out` 后补 other rwx + sticky（通常从 0755 变为 1757），否则容器写 `/out` 会 `Permission denied`；host 模式不改用户原目录权限。
-- **执行路径可盘点**：`exec_paths.py` 用 AST 扫描 `scripts/*.py` 的子进程调用，未知文件的调用直接判 `unclassified` 并退出 1。当前 16 个脚本共 9 条调用；`sink_scan.py` 的 ast-grep / semgrep 标为 `host-static-analyzer`（只解析不可信字节、不执行），是已知残留风险。
+- **执行路径可盘点**：`exec_paths.py` 用 AST 扫描 `scripts/*.py` 的子进程调用，未知文件的调用直接判 `unclassified` 并退出 1。当前 18 个脚本共 10 条调用；`sink_scan.py` 的 ast-grep / semgrep 标为 `host-static-analyzer`（只解析不可信字节、不执行），是已知残留风险。
 
 ```bash
 # 校验运维策略；defaults 可打印内置默认值
@@ -384,7 +386,32 @@ EMBA 跑一次要数小时到十几小时，主要时间花在完整分析流水
 - **网络先 user-mode**：guest 默认 `10.0.2.15`，宿主 `10.0.2.2`，`hostfwd=tcp:127.0.0.1:8080-:80` 不需要 root；只有 guest 绑定固定 IP、VLAN、广播或多网卡时才用 TAP，且必须放在独立 netns，不能桥到办公网。
 - **EMBA 专属参数不要照抄**：`firmadyne.syscall=1`、`EMBA_NET`、`nandsim.parts` 只在对应内核/场景下有意义；用原厂或发行版内核时默认不加。
 
-当前只落地了方法论；`emu_plan.py`（只读探测 + 生成启动计划）和 `emu_run.py`（经 `sandbox_run.py` 执行并归一化证据）尚未实现。没有内核或 rootfs 不完整时，计划必须输出 `BLOCKED`，不能伪造启动成功。
+当前已落地两个执行器，并有一条**真实 rootfs 启动记录**（`assets/qemu/real-run-malta/`）：Hak5 WiFi Pineapple Nano 的 OpenWrt 19.07.2 rootfs 在 Malta/QEMU 7.2.22 下启动到 BusyBox `/bin/sh`，观察信号为 `shell-prompt`。该记录使用通用 Malta 内核，不是厂商 ath79 内核，只证明 rootfs 用户态可启动，不是完整固件启动或漏洞结论。`emu_plan.py` 只读探测 rootfs/内核/init/镜像，输出 `emulation-plan/1.0`（`status=ready|blocked`、blockers、QEMU argv、资源预算），自身不执行任何命令；`emu_run.py` 只接受通过契约与哈希复核的 `ready` 计划，固定经 `sandbox_run.py --mode sandbox` 启动 QEMU，采串口、退出码与清理结果，输出 `emulation-result/1.0`。计划阻断或沙箱拒绝时**不启动 QEMU、不回落宿主机**。
+
+```bash
+# 1) 只读探测：不执行 QEMU；缺内核/架构不明时 status=blocked
+uv run scripts/emu_plan.py --rootfs fw-audit/$TARGET/01-extract \
+    --firmware-root fw-audit/$TARGET \
+    --kernel fw-audit/$TARGET/01-extract/boot/vmlinux \
+    --image-out fw-audit/$TARGET/45-emu/rootfs.img \
+    --run-id RUN-001 --intent-id INTENT-001 --firmware-sha256 <64-hex> \
+    --json fw-audit/$TARGET/45-emu/plan.json \
+    --md fw-audit/$TARGET/45-emu/plan.md
+
+# 2) 若 plan.build.required=true，按 plan.build.commands 先在 Linux 上用
+#    truncate / mke2fs -d / e2fsck 生成 ext2 镜像；工具不自动构建镜像。
+
+# 3) 构建含 QEMU 的镜像，再执行；内部固定 sandbox，无宿主机回退
+docker build -t iot-fw/qemu:latest assets/qemu
+uv run scripts/emu_run.py --plan fw-audit/$TARGET/45-emu/plan.json \
+    --out fw-audit/$TARGET/45-emu/run --image iot-fw/qemu:latest \
+    --json fw-audit/$TARGET/45-emu/run/result.json \
+    --md fw-audit/$TARGET/45-emu/run/result.md
+```
+
+- **退出码可区分**：`0` SUCCESS、`1` FAILED/PARTIAL、`2` 用法、`3` 计划阻断或 BLOCKED、`4` 策略拒绝、`5` 资源准入拒绝、`124` 超时。`FAILED` / `BLOCKED` / `TIMED_OUT` 必带 `failure{category,reason,retryable}`，`PARTIAL` 必带非空 `limitations`。
+- **观察不升级**：`emu_run.py` 只写 `observations[].type=emulation` 和空的 `evidence_refs`，不生成 finding；端口开放或 shell 可达都不是漏洞结论。候选升级仍走 `board_transitions.py` 的类型化证据校验。
+- **当前验证边界**：真实 rootfs 记录在 Linux + Docker 上完成（Ubuntu 24.04.5、Docker 29.9.2、QEMU 7.2.22），但没有验证厂商内核、网络、服务或漏洞触发；厂商 raw 内核尝试得到 `FAILED / kernel-format`，只能说明内核格式/machine 不匹配。完整证据（计划、结果、沙箱报告、串口、文件哈希）见 `assets/qemu/real-run-malta/README.md`；不得把 shell 可达或端口开放升级为漏洞结论。
 
 ---
 
@@ -398,7 +425,7 @@ EMBA 跑一次要数小时到十几小时，主要时间花在完整分析流水
 - **M1 契约与黑板**：Fact / Intent / EmulationResult / BoardState 契约、事件日志、快照、去重与 `validate_transition`。
 - **M2 资源与沙箱**：所有执行统一经过 Sandbox Runner，预算、并发准入、超时与失败关闭。
 - **M3 EmbaAdapter**（已落地）：解析既有 EMBA 产物，区分「静态发现 / 进程运行 / 端口响应」，三类观察不可互升。
-- **M4 轻量整机仿真**：按 EMBA 的方法论（不安装 EMBA）用 QEMU 起整机；Qiling 定向仿真作为整机失败后的分支。
+- **M4 轻量整机仿真**（执行器与真实 rootfs 启动记录已落地；厂商内核与 Qiling 分支待复验）：按 EMBA 的方法论（不安装 EMBA）用 QEMU 起整机；Qiling 定向仿真作为整机失败后的分支。
 - **M5 真实固件基准**：合法来源、人工复核、Precision / Recall / 成本与 EALB 校准。
 
 完整对象模型、门禁分层、各里程碑交付物/验收标准、风险清单与实施前检查表见 [ROADMAP.md](ROADMAP.md)。
@@ -407,7 +434,7 @@ EMBA 跑一次要数小时到十几小时，主要时间花在完整分析流水
 
 ## 脚本
 
-十六个脚本都**只用 Python 标准库**，无第三方依赖。
+十八个脚本都**只用 Python 标准库**，无第三方依赖。
 
 | 脚本                         | 行数   | 用途                                                              |
 | -------------------------- | ---- | --------------------------------------------------------------- |
@@ -416,17 +443,19 @@ EMBA 跑一次要数小时到十几小时，主要时间花在完整分析流水
 | `scripts/taint_graph.py`   | 800  | Phase 3 / 5：跨请求污点图（BDG/ADG 最小实现）——`recover` 恢复动态拼接的键（literal / local-const / fill-composed），`build` 构图并校验「写请求 ≠ 触发读的请求、键一致、两端有证据、跨进程读带 via_control」，产出 `taint-graph.json` |
 | `scripts/coverage_gate.py` | 2759 | Phase 5：覆盖率门禁 + CVE 纪律检查（`--report`，V0–V4）+ 审阅清单三方对齐（`--review-list`）+ G4 入口级覆盖 + G5 绕过矩阵 + **G6 跨请求污点溯源** + **G7 跨请求污点图** + 类型→Base + 自动修复计划 + **扫描完整性/结构引擎/阶段状态/清单/审计任务契约** + **`--profile strict` 档位** + **`gate-config.json` 执行台账** |
 | `scripts/entrypoints_init.py` | 139 | Phase 3 / 5：从 `02-tiering.json` 生成 `entrypoints.json` 骨架（`--merge` 保留已手填数据） |
-| `scripts/contracts.py`     | 1310 | Phase 0–5：跨阶段数据契约校验（17 种 schema：FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / EmbaImport / Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent），`--list` 列版本、`--json` 出机器可读结果 |
+| `scripts/contracts.py`     | 1441 | Phase 0–5：跨阶段数据契约校验（18 种 schema：FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / EmbaImport / EmulationPlan / Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent），`--list` 列版本、`--json` 出机器可读结果 |
 | `scripts/board_transitions.py` | 476 | Phase 3–5 / M1：Candidate 状态机与类型化验证——`graph` 输出合法转换，`check` 校验证据绑定/类型/判据/触发上下文，拒绝 `ACCEPTED_WITH_RISK` 充当候选状态 |
 | `scripts/board_events.py` | 479 | M1：append-only 黑板事件日志——`verify` 校验结构与 `seq` 连续性，`replay` 从日志重建 `audit-board.json`；非法 JSON 行报 `PARSE_ERROR`，不静默跳过 |
 | `scripts/board_store.py` | 709 | M1：黑板存储——`init` 建日志与快照，`import` 导入 Phase 0–5 产物，`transition` 走状态机，`backtrack` 记录回退，`verify` 对账 |
 | `scripts/ealb_calib.py`    | 319  | Phase 2：用实测工时样本校准 EALB——未达样本量时只报 `heuristic`，达标才允许标 `calibrated` |
-| `scripts/sandbox_run.py`   | 1406 | Phase 4：不可信固件的一次性隔离执行（无运行时 **fail-closed**，退出 3；宿主机执行必须显式 `--mode host --i-understand-host-risk`）；`sandbox-run/1.1` 记录资源准入（退出 5 = 排队超时/预算耗尽） |
+| `scripts/sandbox_run.py`   | 1413 | Phase 4：不可信固件的一次性隔离执行（无运行时 **fail-closed**，退出 3；宿主机执行必须显式 `--mode host --i-understand-host-risk`）；`sandbox-run/1.1` 记录资源准入（退出 5 = 排队超时/预算耗尽） |
 | `scripts/resource_manager.py` | 503 | M2：沙箱策略、跨进程槽位与预算——`validate` 校验 `sandbox-policy/1.0`，`defaults` 打印内置策略；超限排队而不是先启动 |
-| `scripts/exec_paths.py`    | 267  | M2：AST 盘点 `scripts/*.py` 的子进程调用，输出 `exec-paths/1.0`；出现未分类执行路径即退出 1 |
+| `scripts/exec_paths.py`    | 272  | M2：AST 盘点 `scripts/*.py` 的子进程调用，输出 `exec-paths/1.0`；出现未分类执行路径即退出 1 |
 | `scripts/bench_eval.py`    | 2473 | Phase 5 / 回归：合成基准集上的 precision / recall / F1 / FPR 评估，`--baseline` 检测召回暴跌与 FPR 上升（退出码 3） |
 | `scripts/adapter_emba.py`  | 979  | M3：EMBA 产物离线解析——F50/P99/S09/L15/L10/S115 → `emba-import/1.0`；三类观察分型、PE32/ELF 区分、`--require` 显式产物、结构化失败、重复解析字节稳定；`board_store.py import --emba` 消费 |
-| `scripts/selftest.py`      | 2406 | 安装自检：合成固件与 rootfs，端到端验证其余十五个脚本的判据 + **文档与 CLI 一致性** + 基准回归 + 黑板事件/快照/状态机 + 资源准入 + EMBA 适配（23 组 / 254 条断言，结尾自报总数）                 |
+| `scripts/emu_plan.py`    | 1006 | M4：只读探测 rootfs/内核/init/镜像，生成 `emulation-plan/1.0`（架构、QEMU argv、blockers、预算）；不执行 QEMU，也不自动构建镜像 |
+| `scripts/emu_run.py`     | 762  | M4：校验计划、镜像与内核哈希，固定经 `sandbox_run.py --mode sandbox` 执行 QEMU，采串口/退出码并输出 `emulation-result/1.0`；无宿主机回退 |
+| `scripts/selftest.py`      | 2641 | 安装自检：合成固件与 rootfs，端到端验证其余十七个脚本的判据 + **文档与 CLI 一致性** + 基准回归 + 黑板事件/快照/状态机 + 资源准入 + EMBA 适配 + 整机仿真计划/结果分类（24 组 / 273 条断言，结尾自报总数）                 |
 
 ### 覆盖率门禁判据
 
@@ -498,7 +527,7 @@ EMBA 跑一次要数小时到十几小时，主要时间花在完整分析流水
 
 四类跳过原因分开记：`skip-dir`（设计如此）/ `excluded`（调用方排除）/ `too-large`（能力边界）/ `stat-failed`（异常）。v1.3 起再给出归一后的 `verdict`（`complete` / `scoped` / `partial` / `failed`）：`partial` 或 `failed` 进 Phase 5 门禁即阻断，`scoped` 需由 `--scan-waiver` 逐条列明豁免理由。**`complete: false` 时不得在报告里声称「已完整扫描」**——直接把 `scan_integrity` 贴进报告附录即可。
 
-> 旧实现只 `f.read(8 << 20)`，20 MB 的 CGI 二进制后半段一个字符串都扫不到，输出里还看不出来。回归测试 `[13/23]` 用 9.5 MiB 偏移与跨块边界两个样本把这条钉死；`[17/23]` 再验证「partial/failed 必须阻断、豁免必须逐条留痕」。
+> 旧实现只 `f.read(8 << 20)`，20 MB 的 CGI 二进制后半段一个字符串都扫不到，输出里还看不出来。回归测试 `[13/24]` 用 9.5 MiB 偏移与跨块边界两个样本把这条钉死；`[17/24]` 再验证「partial/failed 必须阻断、豁免必须逐条留痕」。
 
 ---
 
@@ -511,14 +540,14 @@ EMBA 跑一次要数小时到十几小时，主要时间花在完整分析流水
 | `references/atomic-capabilities.md` | 716 | **决策判据 + 原子能力**：Phase 1 提取选路（§3.1）、Phase 4 仿真选路（§3.2）、**Phase 3 Layer 1 引擎选路（§3.3）**、54 项原子能力清单与实现命令（§1–§9）、**结构级脚本扫描（§5.2）**、整链工具的合法定位（§10.2）、能力缺席时的替代路径（§11） |
 | `references/methodology.md`       | 511 | 需要 Tier 规则细节、EALB 计算、**三轨模型（Track A/B/C）**、跨请求污点（§3.2）、门禁判据的完整定义                  |
 | `references/high-order-taint.md`  | 378 | **高阶污点专章**：AEH 三形态与阈值、IPF 三模型、BDG 两段污点、**OD-ICP 常量恢复**、控制消息双约束（集中性 10 + find_interval）、ADG 三类控制依赖、**欠约束符号执行参数与坑**、`taint-graph.json` 与 G7、无 IDA/angr 时的降级路径 |
-| `references/emulation-methodology.md` | 437 | **整机仿真主路径（不依赖 EMBA）**：P0 可行性、rootfs 归一化、ext2 镜像、QEMU/架构矩阵、启动阶梯、user-mode/TAP、证据与失败分类、预算 |
+| `references/emulation-methodology.md` | 513 | **整机仿真主路径（不依赖 EMBA）**：P0 可行性、rootfs 归一化、ext2 镜像、QEMU/架构矩阵、启动阶梯、user-mode/TAP、证据与失败分类、预算 |
 | `references/emulation-fuzzing.md` | 390 | Phase 4 需要模拟与模糊的具体做法、踩坑与替代方案；完整方法论见上一行 |
 | `references/reporting.md`         | 353 | Phase 5 需要报告字段、评分表、脱敏规范、DKTSS、⑥↔④ 迁移规则、G6 写入面                              |
 | `references/vuln-conditions.md`   | 393 | **Layer 3 / Phase 4**：候选要不要升 `CONFIRMED`？按类型逐条排除成立条件 |
 | `references/sink-patterns.md`     | 257 | 需要扩充或理解静态扫描规则（含 `structural` 结构级规则 schema），或手写 grep / YARA                        |
 | `references/vuln-taxonomy.md`     | 218 | 需要按攻击面 / 漏洞类型逐项核查（后门账号、命令注入、OTA、MQTT、U-Boot…）        |
 | `references/resource-index.md`    | 233 | 需要外部资料：awesome-connected-things-sec 精编索引（按阶段映射）      |
-| `references/data-contracts.md`   | 492 | **跨阶段数据契约**：17 种 schema——FirmwareManifest / AuditTask / Candidate / Finding / Evidence（含 `evidence/1.1` 归一化） / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / EmbaImport / Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent 的字段、版本规则、strict 兼容边界、黑板事件与状态机、迁移清单 |
+| `references/data-contracts.md`   | 534 | **跨阶段数据契约**：18 种 schema——FirmwareManifest / AuditTask / Candidate / Finding / Evidence（含 `evidence/1.1` 归一化） / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / EmbaImport / EmulationPlan / Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent 的字段、版本规则、strict 兼容边界、黑板事件与状态机、迁移清单 |
 
 ---
 
@@ -542,7 +571,7 @@ iot-firmware-vuln-hunting/
 │   ├── emulation-fuzzing.md      # 模拟与模糊测试实操
 │   ├── reporting.md              # 报告规范 + IoT 评分 + DKTSS
 │   ├── resource-index.md         # 外部资料索引：awesome-connected-things-sec 精编（按阶段映射）
-│   └── data-contracts.md         # 17 种 schema 的数据契约 + 黑板事件/状态机 + 沙箱策略/准入 + EMBA 导入 + strict 兼容边界
+│   └── data-contracts.md         # 18 种 schema 的数据契约 + 黑板事件/状态机 + 沙箱策略/准入 + EMBA 导入 + strict 兼容边界
 ├── assets/
 │   ├── sink-rules.json           # 38 条规则 / 15 类（数据驱动扫描，含 cross-request 跨请求污点与 structural 结构级二次过滤）
 │   ├── ipc-functions.json        # IPC 原语词表：写/读端、键参数位置、控制/持久化标记、集中性阈值、sink 分类、AEH 模式
@@ -551,8 +580,9 @@ iot-firmware-vuln-hunting/
 │   ├── ealb-measures-sample.jsonl # EALB 实测工时样本（校准输入）
 │   ├── bench/                    # 合成基准集：manifest.json + samples/B-001…B-011
 │   ├── emba-sample/              # 合成 EMBA 日志夹具：F50/P99/S09/L15/L10/S115 + README
+│   ├── qemu/                     # QEMU 执行镜像 Dockerfile + real-run-malta/ 真实 rootfs 启动记录
 │   └── report-template.md        # 固定 7 区块报告模板
-└── scripts/                      # 16 个纯标准库 Python 脚本
+└── scripts/                      # 18 个纯标准库 Python 脚本
     ├── fw_triage.py
     ├── sink_scan.py
     ├── taint_graph.py
@@ -566,6 +596,8 @@ iot-firmware-vuln-hunting/
     ├── board_events.py
     ├── board_store.py
     ├── adapter_emba.py
+    ├── emu_plan.py
+    ├── emu_run.py
     ├── resource_manager.py
     ├── exec_paths.py
     └── selftest.py

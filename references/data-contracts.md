@@ -1,8 +1,8 @@
-# 数据契约（FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / SandboxRun / BenchManifest / EmbaImport / 黑板对象 / 执行路径）
+# 数据契约（FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / SandboxRun / BenchManifest / EmbaImport / EmulationPlan / 黑板对象 / 执行路径）
 
 本文件定义跨阶段传递的结构化数据，以及**校验入口、版本规则、兼容模式边界**。目标是消除「同一事实在 plan、报告、gate-config 里三种写法」的漂移：任何下游脚本要消费上游产物时，先看 schema 版本，再按本文件取字段。
 
-配套校验器：`scripts/contracts.py`（纯标准库）。`--list` 当前列出 17 种 schema；候选的整文件 envelope 由 `candidates` 文档校验器单独处理。
+配套校验器：`scripts/contracts.py`（纯标准库）。`--list` 当前列出 18 种 schema；候选的整文件 envelope 由 `candidates` 文档校验器单独处理。
 
 ```bash
 # 列出支持的所有 schema
@@ -188,7 +188,7 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 
 ### 8.1 SandboxPolicy（`sandbox-policy/1.0`）
 
-由 `scripts/resource_manager.py` 校验，**不在 `contracts.py` 的 17 种 schema 内**。策略是运维配置，不是每次运行的产物；其规范化 JSON 的 sha256 写入 `admission.policy_sha256`，用于证明「这次执行用的是哪份策略」。
+由 `scripts/resource_manager.py` 校验，**不在 `contracts.py` 的 18 种 schema 内**。策略是运维配置，不是每次运行的产物；其规范化 JSON 的 sha256 写入 `admission.policy_sha256`，用于证明「这次执行用的是哪份策略」。
 
 | 字段 | 默认 | 约束 | 说明 |
 |---|---|---|---|
@@ -222,7 +222,7 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 
 `scripts/exec_paths.py` 用 AST 扫描 `scripts/*.py` 的子进程调用，防止新增执行路径绕过统一入口。字段：`schema` / `tool` / `version` / `generated_at` / `root` / `files_scanned` / `total_paths` / `counts` / `ok` / `paths` / `unclassified`。每条 path 记录 `file` / `line` / `api` / `scope` / `call` / `classification` / `input_trust` / `note`。
 
-分类：`sandbox-boundary`（固件执行边界，必须经 `sandbox_run.py`）、`host-static-analyzer`（只解析不可信字节、不执行）、`trusted-metadata`（可信本地元数据）、`test-harness`、`inventory`。出现未知文件即 `unclassified` 并退出 1。当前 16 个脚本共 9 条调用；`sink_scan.py:131` / `sink_scan.py:148` 的 ast-grep / semgrep 仍是 `host-static-analyzer`，是已知残留风险（只解析、不执行）。
+分类：`sandbox-boundary`（固件执行边界，必须经 `sandbox_run.py`）、`host-static-analyzer`（只解析不可信字节、不执行）、`trusted-metadata`（可信本地元数据）、`test-harness`、`inventory`。出现未知文件即 `unclassified` 并退出 1。当前 18 个脚本共 10 条调用；`sink_scan.py:131` / `sink_scan.py:148` 的 ast-grep / semgrep 仍是 `host-static-analyzer`，是已知残留风险（只解析、不执行）。
 
 ## 9. BenchManifest / BenchResult（`bench-manifest/1.0` / `bench-result/1.0`）
 
@@ -490,3 +490,45 @@ EMBA 日志的**离线**解析结果，由 `scripts/adapter_emba.py parse` 产�
 | P99 同时记录 ELF 与 PE32，`class` / `file_output` 都含类型文本 | `modules/P99_prepare_analyzer.sh` | ELF → `elf`；PE32 → `file` + `format=PE32`，不把 Windows 可执行文件冒充 Linux ELF |
 | S09 表头第 4 列写作 `version_rule`，实际写入 `lAPP_NAME`；第 8 列表头是 `static/emulation`，实际是类型列 | `modules/S09_firmware_base_version_check.sh:477` | 事实字段命名为 `app_name`，类型列映射到 `mode`，不把产品名误读成版本规则 |
 | S115 成功行由 ANSI 颜色码包裹，末尾带英文句号 | `modules/S115_usermode_emulator.sh:891` | 先剥 ANSI 再匹配，去掉路径末尾句号 |
+
+## 18. EmulationPlan（`emulation-plan/1.0`）与执行边界
+
+`emu_plan.py` 只读探测 rootfs / 内核 / init 并输出启动计划；它**不启动 QEMU、不执行固件字节、不自动构建镜像**。`emu_run.py` 消费该计划，只有 `status=ready`、契约通过且内核/镜像哈希复核通过时才经 `sandbox_run.py` 执行。
+
+| 字段 | 类型 | 必需 | 说明 |
+|---|---|---|---|
+| `schema` / `plan_id` | string | ✅ | `emulation-plan/1.0`；`plan_id=PLAN-*`，由 rootfs 指纹、内核哈希、镜像路径、架构、init 与 argv 派生，重复探测应稳定 |
+| `tool` / `version` | string | ✅ | 生成器与版本 |
+| `status` | enum | ✅ | `ready` / `blocked`；`ready` 必须无 blockers 且有 kernel 与 image，`blocked` 必须 blockers 非空 |
+| `run_id` / `intent_id` / `firmware_sha256` | string | — | 计划可先不绑定；执行时必须有，缺失即 `RUN_ID_MISSING` / `INTENT_ID_MISSING` / `FIRMWARE_SHA_MISSING` |
+| `firmware_root` | string | ✅ | 容器内 `:ro` 挂载的根；内核与镜像必须位于其下，否则 `KERNEL_OUTSIDE_MOUNT` / `IMAGE_OUTSIDE_MOUNT` |
+| `rootfs` | object | ✅ | `{path, kind: directory / image, sha256, files, bytes, arch, bits, endian, abi, interpreter, libc, selected_init, init_source, init_candidates, inittab, evidence}` |
+| `kernel` | object/null | — | `{path, mount_path, sha256, format, size}`；无内核时 `null` 并产生 `KERNEL_MISSING` |
+| `image` | object/null | — | `{path, mount_path, exists, sha256, size, fs}`；`fs` 必须识别为 ext2；尚未构建时存在性与哈希为 null |
+| `build` | object/null | — | `{required, size_mb, commands}`；`commands` 是待执行的 `truncate` / `mke2fs -d` / `e2fsck` 命令，计划本身不执行 |
+| `qemu` | object | ✅ | `{binary, path, available, version, machine, cpu, kernel_format, console, root_device, disk_bus, argv, cmdline, sandbox_cmd, mounts}`；`argv` 使用容器内路径（`/firmware/...`、`/out/serial.log`） |
+| `network` | object | ✅ | `{mode: none / user, hostfwd, guest_ip, host_forward_reachable, notes}`；默认 `none` |
+| `budget` | object | ✅ | `{timeout_s, memory, cpus, attempts}` |
+| `blockers` / `warnings` / `limitations` | array | ✅ | blocker 为 `{code, message, next_action}`；warnings/limitations 为字符串数组 |
+
+**blocker 码**：`ROOTFS_EMPTY`、`ARCH_UNKNOWN`、`ARCH_UNSUPPORTED`、`KERNEL_MISSING`、`KERNEL_OUTSIDE_MOUNT`、`KERNEL_ARCH_MISMATCH`、`IMAGE_OUTSIDE_MOUNT`、`QEMU_MISSING`（仅 `--require-qemu` 时阻断；默认只告警）。每个 blocker 必须给出 `next_action`，不能只写「失败」。
+
+### 18.1 执行边界
+
+- **先复核再启动**：`emu_run.py` 校验计划 schema 与契约、`run_id` / `intent_id` / 固件哈希、镜像是否为 ext2 且 sha256 匹配、内核 sha256 匹配、`firmware_root` 存在；任一失败写 `BLOCKED` 结果并以 **退出 3** 结束，绝不启动沙箱。
+- **固定沙箱**：执行命令固定包含 `--mode sandbox`，没有宿主机回退；容器内 QEMU 的固件挂载只读、串口写 `/out/serial.log`，网络默认 `none`。资源策略、槽位与预算由 `sandbox_run.py` / `resource_manager.py` 决定，`emu_run.py` 不能放宽。
+- **`--check` 不执行**：只做计划复核；不需要 `--out`，不写 EmulationResult，不启动 QEMU。
+- **退出码**：`0` SUCCESS、`1` FAILED/PARTIAL、`2` 用法、`3` 计划阻断或 BLOCKED、`4` 策略拒绝、`5` 资源准入拒绝、`124` 超时。
+- **观察不升级**：`observations[].type` 只能是 `emulation`；`evidence_refs` 初始为空，不生成 finding。`SUCCESS` 只表示「启动到 console 标记」，既不是漏洞，也不能直接让候选进入 `validated` / `confirmed`。
+- **失败分类**：`rootfs-mount` / `no-init` / `init-crash` / `library-missing` / `illegal-instruction` / `kernel-panic` / `kernel-format` / `boot-no-output` / `backend-unavailable` / `timeout` / `plan-blocked` / `policy-rejected` / `admission-rejected`。`FAILED` / `BLOCKED` / `TIMED_OUT` 必须带 `failure{category, reason, retryable}`，`PARTIAL` 必须带非空 `limitations`。
+
+### 18.2 已记录的一次真实运行
+
+仓库内保留了一份真实运行证据，用于说明本契约不是只在假 sandbox 上跑过：
+
+- 输入：Hak5 WiFi Pineapple Nano 的 OpenWrt 19.07.2 rootfs（1,965 个普通文件），ext2 镜像 168 MiB，sha256 `694b7fb8...`；
+- 成功路径：`PLAN-e23e2aa53de7` → `EMU-7b2e141b296c`，`status=SUCCESS`，30 秒窗口，串口第 177 行 `/ #`，观察 `shell-prompt`；使用 OpenWrt Malta 通用内核（非厂商 ath79 内核）；
+- 失败路径：厂商 raw 内核 → `EMU-01c2df7e12c6`，`status=FAILED`，`failure.category=kernel-format`，`retryable=false`；QEMU 报 `The image is not ELF`；
+- 产物与哈希：`assets/qemu/real-run-malta/`，含计划、结果、沙箱报告、串口与 `README.md`。
+
+该记录只支持「真实 rootfs 用户态启动到 shell」；不证明完整固件、厂商原机行为、网络/服务或漏洞成立。

@@ -421,16 +421,92 @@ ip netns exec fw-emu qemu-system-mipsel -M malta ... \
 
 ---
 
-## 12. 与现有 skill 的接入
+## 12. 落地工具：emu_plan → 镜像 → emu_run
+
+M4 的执行链是「只读探测 → 人工构建镜像 → 沙箱执行」，三步分开。任何一步都不把猜测当结果：计划只说明准备怎么启动，镜像构建只证明文件系统可挂载，执行只证明串口到了哪一层。
+
+### 12.1 生成启动计划（不执行）
+
+```bash
+python scripts/emu_plan.py \
+  --rootfs ./rootfs --firmware-root ./fw \
+  --kernel ./fw/boot/vmlinux --image-out ./fw/rootfs.img \
+  --run-id RUN-001 --intent-id INTENT-001 --firmware-sha256 <64位sha256> \
+  --json plan.json --md plan.md
+```
+
+工具只读扫描 rootfs（ELF 架构、init 候选、inittab、libc、ld.so）与内核格式，输出 `emulation-plan/1.0`。`status=ready` 表示参数齐全，不表示能启动；`status=blocked` 时每个 blocker 都带 `next_action`。`build.commands` 给出 `truncate` / `mke2fs -d` / `e2fsck` 命令，但**计划器不执行它们**。
+
+### 12.2 构建 ext2 镜像
+
+按 `plan.build.commands` 手工执行，或用等价命令：
+
+```bash
+truncate -s 256M rootfs.img
+mke2fs -q -F -t ext2 -d rootfs rootfs.img
+e2fsck -fn rootfs.img
+```
+
+整盘一个 ext2，不建分区表；不要用 `-E root_owner` 改变 rootfs 内文件属主。镜像必须落在 `--firmware-root` 下（容器内 `/firmware` 只读挂载），否则计划会报 `IMAGE_OUTSIDE_MOUNT`。
+
+QEMU 执行镜像：
+
+```bash
+docker build -t iot-fw/qemu:latest assets/qemu
+```
+
+镜像内含 `qemu-system-mips`（MIPS 需要单独安装，`qemu-system-misc` 不含它）/ `qemu-system-misc` / `qemu-system-arm` / `qemu-system-x86` 与 `e2fsprogs`；容器以非 root、只读根文件系统运行，固件只读挂载，串口写 `/out`。构建时执行不带管道的 `qemu-system-mips --version`，缺包会直接令构建失败。
+
+### 12.3 在沙箱里执行
+
+```bash
+python scripts/emu_run.py --plan plan.json --out ./out \
+  --image iot-fw/qemu:latest --json result.json --md result.md
+```
+
+`emu_run.py` 会先复核计划契约、`run_id` / `intent_id` / 固件哈希、镜像是否 ext2 且 sha256 匹配、内核 sha256 匹配；通过后固定以 `--mode sandbox` 调用 `sandbox_run.py`，没有宿主机回退。只想复核、不执行时加 `--check`（不需要 `--out`）。
+
+退出码：`0` SUCCESS、`1` FAILED/PARTIAL、`2` 用法、`3` 计划阻断或 BLOCKED、`4` 策略拒绝、`5` 资源准入拒绝、`124` 超时。计划阻断时仍写一份 `BLOCKED` 结果说明「为什么没跑」，但不启动沙箱。
+
+### 12.4 读结果
+
+结果结构见 `references/data-contracts.md` §15 与 §18.1。要点：
+
+- `observations[].type` 只能是 `emulation`；端口探测不是本工具产出。
+- `SUCCESS` 只表示串口出现 console-ready / login / shell / init 启动标记，不等于漏洞，也不等于可以进入动态验证。
+- `FAILED` / `BLOCKED` / `TIMED_OUT` 必须带 `failure{category, reason, retryable}`；`PARTIAL` 必须带非空 `limitations`。
+- 失败分类优先看 `rootfs-mount`、`no-init`、`init-crash`、`library-missing`、`illegal-instruction`、`kernel-panic`，再考虑 `kernel-format`（内核不是 QEMU 可加载格式）、`boot-no-output`（QEMU 退出但串口为空）与 `timeout`。正常的 `console [ttyS0] enabled` 不是失败信号；真正的 console 不匹配会表现为无输出或卡住。
+
+### 12.5 一次真实启动记录
+
+2026-10-30 在 Ubuntu 24.04.5 + Docker 29.9.2 + QEMU 7.2.22 上，对 Hak5 WiFi Pineapple Nano 的 OpenWrt 19.07.2 rootfs（1,965 个普通文件，ext2 镜像 168 MiB）执行了一次真实启动：
+
+- 计划 `PLAN-e23e2aa53de7`（`emulation-plan/1.0`），结果 `EMU-7b2e141b296c`，`status=SUCCESS`；
+- 30 秒观察窗口，实际 `duration_s=31.605`，沙箱以 `exit_code=124` 终止；串口第 177 行出现 `/ #`，观察信号 `shell-prompt`；
+- 使用 OpenWrt 19.07.2 Malta 通用内核（sha256 `de20f4...`），**不是固件内的 ath79 内核**；
+- 厂商 raw 内核另一轮尝试（`EMU-01c2df7e12c6`）为 `FAILED / kernel-format`，QEMU 报 `The image is not ELF`；这只说明格式/machine 不匹配，不能据此判断 rootfs 不可用。
+
+完整计划、结果、沙箱报告、串口与文件哈希见 `assets/qemu/real-run-malta/README.md`。该记录只证明「该 rootfs 在该 QEMU 配置下用户态启动到 shell」，不证明完整固件启动、厂商原机行为、网络/服务可用或任何漏洞成立。
+
+### 12.6 当前验证边界
+
+- selftest 第 24 组仍用假 sandbox，只验证计划契约、哈希阻断与串口分类，不等于真实 QEMU 启动；
+- 真实记录使用的通用内核替代了厂商内核，不能据此推断厂商固件可启动；
+- 网络为 `none`，没有服务探测或漏洞触发；`backend_version` 在结果中为 `unverified`（独立测得 QEMU 7.2.22）；
+- Qiling 定向分支仍未实现；需要它的场景必须继续标 `BLOCKED` 或转人工，不得用整机 shell 结果代替。
+
+---
+
+## 13. 与现有 skill 的接入
 
 - **Phase 4 的 D1**：先按本文起整机；起不来再按 `references/emulation-fuzzing.md` §3 转 Qiling / qemu-user 单二进制。
 - **快速起步**：`references/emulation-fuzzing.md` §2 有最短命令和故障表；本文是完整方法与判据。
 - **EMBA 产物**：只有已经跑过 EMBA、手里有日志时，才用 `scripts/adapter_emba.py` 离线导入；**不要为了导入去跑 EMBA**。
-- **M4 实现顺序**：先做 `emu_plan.py`（只读探测 + 生成启动计划/命令，不执行），再做 `emu_run.py`（经 `sandbox_run.py` 执行、采集证据），最后接 `board_store.py` 与 `contracts.py`。没有真实内核时，planner 必须输出 `BLOCKED`，不能伪造成功。
+- **M4 工具（已落地并有一次真实启动记录）**：`emu_plan.py` 只读探测并生成 `emulation-plan/1.0`（不执行），`emu_run.py` 经 `sandbox_run.py` 执行 QEMU 并输出 `emulation-result/1.0`，二者已接入 `contracts.py`；真实记录见 `assets/qemu/real-run-malta/`。计划 `ready` 只表示参数齐全，串口 `SUCCESS` 只表示观察到 shell/init，二者都不能当成漏洞结论。
 
 ---
 
-## 13. 来源与边界
+## 14. 来源与边界
 
 - 流程判据来自 EMBA 的 `modules/L10_system_emulation.sh`（镜像构建、init 选择、启动矩阵、网络配置、观测）与 `helpers/helpers_emba_system_emulation.sh`；只提炼顺序与判据，未复制其源码。
 - 具体 QEMU 参数以目标 QEMU 版本的 `-M help` / `-device help` 为准；不同版本 machine 名称可能变化。

@@ -1,0 +1,78 @@
+{
+  "schema": "emulation-result/1.0",
+  "emulation_id": "EMU-01c2df7e12c6",
+  "run_id": "RUN-PINEAPPLE-VENDOR",
+  "intent_id": "INTENT-M4-REAL-001",
+  "firmware_sha256": "c69629ef90c715600e09f22ef12732c593f886db3b0ed145f549de551c48f79d",
+  "target_sha256": "3c58c2ad7e2b6e1b394e27b50aecf1992093254b649e863cb2134f8fd35cc45e",
+  "backend": "qemu-system",
+  "backend_version": "unverified",
+  "status": "FAILED",
+  "environment": {
+    "mode": "sandbox",
+    "host_fallback": false,
+    "sandbox_image": "iot-fw/qemu:latest",
+    "sandbox_mode": "sandbox",
+    "sandbox_timed_out": false,
+    "qemu_binary": "qemu-system-mips",
+    "machine": "malta",
+    "cpu": "24Kc",
+    "kernel": "/root/iot-m4/fw/vmlinux-ath79.bin",
+    "kernel_sha256": "5ba87019ed94ae41b1db9b3f59f94355c904fdfb07fabde42d125e396eb957b5",
+    "image": "/root/iot-m4/fw/rootfs-malta.img",
+    "image_sha256": "694b7fb80121ecb25ee6754844c3c212f9a454f757b82555b45e63ad790c9173",
+    "network": {
+      "mode": "none",
+      "hostfwd": [],
+      "guest_ip": "10.0.2.15",
+      "host_forward_reachable": false,
+      "notes": [
+        "user-mode 的 hostfwd 只在容器内监听；当前 sandbox_run 不发布端口，不能从宿主直接访问 guest 服务"
+      ]
+    },
+    "plan_id": "PLAN-74505b8f737d",
+    "serial_log": "/root/iot-m4/run-vendor/serial.log"
+  },
+  "observations": [],
+  "evidence_refs": [],
+  "artifacts": [
+    {
+      "path": "/root/iot-m4/run-vendor/serial.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0
+    },
+    {
+      "path": "/root/iot-m4/run-vendor/sandbox-run.json",
+      "sha256": "9c253018e42b32757f58fab999c1df36e3a2a8a3dd2817fb8013d93eb694ddb6",
+      "size": 4301
+    },
+    {
+      "path": "/root/iot-m4/run-vendor/sandbox-run.md",
+      "sha256": "57d8d976a5a227cbc042d7da15c1f00cb24ceffb3a8608cbad7835ca135c3485",
+      "size": 2845
+    },
+    {
+      "path": "/root/iot-m4/plan-vendor.json",
+      "sha256": "8fac88dffabfb85d88bb1302785aa47387324fd9a12d38b8ed768aea6d8bf609",
+      "size": 3999
+    }
+  ],
+  "resource_usage": {
+    "duration_s": 2.483,
+    "timeout_s": 20,
+    "exit_code": 1,
+    "timed_out": false,
+    "serial_bytes": 0,
+    "serial_truncated": false
+  },
+  "started_at": "2026-10-30T11:18:31Z",
+  "finished_at": "2026-10-30T11:18:33Z",
+  "limitations": [
+    "需要匹配 machine/架构的内核；不能据此判断 rootfs 不可用"
+  ],
+  "failure": {
+    "category": "kernel-format",
+    "reason": "QEMU 拒绝加载内核镜像（格式不是 ELF 或与 machine 不匹配）：qemu-system-mips: could not load kernel '/firmware/vmlinux-ath79.bin': The image is not ELF\n；sandbox rc=1 stderr=[sandbox] 模式：sandbox；运行时：docker 29.9.2；网络：none\n[sandbox] 固件：/root/iot-m4/fw → /firmware（只读），清单哈希：cb085f86fa415fc5aefc393a0019de7142e4e9350c76b77ce00646c71324726e\n[sandbox] 输出：/root/iot-m4/run-vendor →",
+    "retryable": false
+  }
+}

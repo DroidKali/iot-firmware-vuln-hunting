@@ -1,0 +1,137 @@
+{
+  "schema": "emulation-plan/1.0",
+  "tool": "emu_plan.py",
+  "version": "1.0",
+  "plan_id": "PLAN-e23e2aa53de7",
+  "run_id": "RUN-PINEAPPLE-001",
+  "intent_id": "INTENT-M4-REAL-001",
+  "firmware_sha256": "c69629ef90c715600e09f22ef12732c593f886db3b0ed145f549de551c48f79d",
+  "status": "ready",
+  "blockers": [],
+  "warnings": [
+    "QEMU 版本未知；EmulationResult 的 backend_version 会记为 unverified"
+  ],
+  "firmware_root": "/root/iot-m4/fw",
+  "rootfs": {
+    "path": "/root/iot-m4/fw/rootfs",
+    "kind": "directory",
+    "sha256": "3c58c2ad7e2b6e1b394e27b50aecf1992093254b649e863cb2134f8fd35cc45e",
+    "files": 1965,
+    "bytes": 42148473,
+    "arch": "mips",
+    "bits": 32,
+    "endian": "big",
+    "abi": null,
+    "interpreter": "/lib/ld-musl-mips-sf.so.1",
+    "libc": [
+      "/lib/ld-musl-mips-sf.so.1",
+      "/lib/libc.so",
+      "/usr/lib/libuClibc++-0.2.5.so",
+      "/usr/lib/libuClibc++.so.0"
+    ],
+    "selected_init": "/bin/sh",
+    "init_source": "operator",
+    "init_candidates": [
+      {
+        "path": "/bin/sh",
+        "kind": "symlink",
+        "executable": true,
+        "selected": true,
+        "link_target": "busybox"
+      }
+    ],
+    "inittab": true,
+    "evidence": [
+      {
+        "path": "/bin/busybox",
+        "size": 303157,
+        "sha256": "0fdc7d06b5068d3e80f05b6069eeff9ae70deeb37d254a67b5f297a86ff35716"
+      },
+      {
+        "path": "/sbin/init",
+        "size": 12469,
+        "sha256": "8cddc6c64befbdf039fb82058f60712b5ac32f62c64cfd76442a24fae0e5fa8b"
+      },
+      {
+        "path": "/bin/procps-ng-ps",
+        "size": 61653,
+        "sha256": "f9fdab05abdbf769f379d5648b5ebb5974897d233d2009f812cea41988672ad0"
+      }
+    ]
+  },
+  "kernel": {
+    "path": "/root/iot-m4/fw/openwrt-19.07.2-malta-be-vmlinux.elf",
+    "mount_path": "/firmware/openwrt-19.07.2-malta-be-vmlinux.elf",
+    "sha256": "de20f4cbb6df11d17058a3fb836b788bae6b4137e9d19df50b3ddd3652e3b7bc",
+    "size": 6088460,
+    "format": "vmlinux"
+  },
+  "image": {
+    "path": "/root/iot-m4/fw/rootfs-malta.img",
+    "mount_path": "/firmware/rootfs-malta.img",
+    "exists": true,
+    "sha256": "694b7fb80121ecb25ee6754844c3c212f9a454f757b82555b45e63ad790c9173",
+    "size": 176160768,
+    "fs": "ext2"
+  },
+  "build": null,
+  "qemu": {
+    "binary": "qemu-system-mips",
+    "path": "/usr/bin/qemu-system-mips",
+    "available": true,
+    "version": null,
+    "machine": "malta",
+    "cpu": "24Kc",
+    "kernel_format": "vmlinux",
+    "console": "ttyS0",
+    "root_device": "/dev/sda",
+    "disk_bus": "ide",
+    "argv": [
+      "qemu-system-mips",
+      "-M",
+      "malta",
+      "-cpu",
+      "24Kc",
+      "-m",
+      "512m",
+      "-smp",
+      "1",
+      "-kernel",
+      "/firmware/openwrt-19.07.2-malta-be-vmlinux.elf",
+      "-drive",
+      "if=ide,file=/firmware/rootfs-malta.img,format=raw",
+      "-append",
+      "root=/dev/sda rw console=ttyS0,115200 init=/bin/sh ignore_loglevel panic=5",
+      "-display",
+      "none",
+      "-monitor",
+      "none",
+      "-serial",
+      "file:/out/serial.log",
+      "-no-reboot",
+      "-snapshot"
+    ],
+    "cmdline": "root=/dev/sda rw console=ttyS0,115200 init=/bin/sh ignore_loglevel panic=5",
+    "sandbox_cmd": "qemu-system-mips -M malta -cpu 24Kc -m 512m -smp 1 -kernel /firmware/openwrt-19.07.2-malta-be-vmlinux.elf -drive if=ide,file=/firmware/rootfs-malta.img,format=raw -append 'root=/dev/sda rw console=ttyS0,115200 init=/bin/sh ignore_loglevel panic=5' -display none -monitor none -serial file:/out/serial.log -no-reboot -snapshot",
+    "mounts": {
+      "firmware": "/firmware",
+      "out": "/out"
+    }
+  },
+  "network": {
+    "mode": "none",
+    "hostfwd": [],
+    "guest_ip": "10.0.2.15",
+    "host_forward_reachable": false,
+    "notes": [
+      "user-mode 的 hostfwd 只在容器内监听；当前 sandbox_run 不发布端口，不能从宿主直接访问 guest 服务"
+    ]
+  },
+  "budget": {
+    "timeout_s": 120,
+    "memory": "512m",
+    "cpus": "1",
+    "attempts": 1
+  },
+  "limitations": []
+}

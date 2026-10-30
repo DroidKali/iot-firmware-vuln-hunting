@@ -1,0 +1,88 @@
+{
+  "schema": "emulation-result/1.0",
+  "emulation_id": "EMU-7b2e141b296c",
+  "run_id": "RUN-PINEAPPLE-001",
+  "intent_id": "INTENT-M4-REAL-001",
+  "firmware_sha256": "c69629ef90c715600e09f22ef12732c593f886db3b0ed145f549de551c48f79d",
+  "target_sha256": "3c58c2ad7e2b6e1b394e27b50aecf1992093254b649e863cb2134f8fd35cc45e",
+  "backend": "qemu-system",
+  "backend_version": "unverified",
+  "status": "SUCCESS",
+  "environment": {
+    "mode": "sandbox",
+    "host_fallback": false,
+    "sandbox_image": "iot-fw/qemu:latest",
+    "sandbox_mode": "sandbox",
+    "sandbox_timed_out": true,
+    "qemu_binary": "qemu-system-mips",
+    "machine": "malta",
+    "cpu": "24Kc",
+    "kernel": "/root/iot-m4/fw/openwrt-19.07.2-malta-be-vmlinux.elf",
+    "kernel_sha256": "de20f4cbb6df11d17058a3fb836b788bae6b4137e9d19df50b3ddd3652e3b7bc",
+    "image": "/root/iot-m4/fw/rootfs-malta.img",
+    "image_sha256": "694b7fb80121ecb25ee6754844c3c212f9a454f757b82555b45e63ad790c9173",
+    "network": {
+      "mode": "none",
+      "hostfwd": [],
+      "guest_ip": "10.0.2.15",
+      "host_forward_reachable": false,
+      "notes": [
+        "user-mode 的 hostfwd 只在容器内监听；当前 sandbox_run 不发布端口，不能从宿主直接访问 guest 服务"
+      ]
+    },
+    "plan_id": "PLAN-e23e2aa53de7",
+    "serial_log": "/root/iot-m4/run-malta/serial.log"
+  },
+  "observations": [
+    {
+      "type": "emulation",
+      "kind": "console-success",
+      "signal": "shell-prompt",
+      "line": 177,
+      "text": "/ # "
+    },
+    {
+      "type": "emulation",
+      "kind": "kernel-boot",
+      "line": 1,
+      "text": "Linux version"
+    }
+  ],
+  "evidence_refs": [],
+  "artifacts": [
+    {
+      "path": "/root/iot-m4/run-malta/serial.log",
+      "sha256": "023df23e953edea300463f95798fbeeefd7a6e9c95d3de452eea9acb74958cc1",
+      "size": 11675
+    },
+    {
+      "path": "/root/iot-m4/run-malta/sandbox-run.json",
+      "sha256": "679fcc60232ee3e3beaba50b996abe57c3bbdf43c37c935b3611abab99941ffc",
+      "size": 4272
+    },
+    {
+      "path": "/root/iot-m4/run-malta/sandbox-run.md",
+      "sha256": "b803d9f6be487350dd47f293bc1b81f2c30496fa69ac17e957f9bfc0e7f15dd0",
+      "size": 2795
+    },
+    {
+      "path": "/root/iot-m4/plan-malta.json",
+      "sha256": "7f309d958aae02d8ca3b24f7ca741668e80cab84a363465aac2b158c496d3419",
+      "size": 4012
+    }
+  ],
+  "resource_usage": {
+    "duration_s": 31.605,
+    "timeout_s": 30,
+    "exit_code": 124,
+    "timed_out": true,
+    "serial_bytes": 11499,
+    "serial_truncated": false
+  },
+  "started_at": "2026-10-30T11:17:59Z",
+  "finished_at": "2026-10-30T11:18:31Z",
+  "limitations": [
+    "达到观察窗口后由沙箱终止；已观察到 shell-prompt，不表示进程/服务稳定",
+    "达到观察窗口后由沙箱终止；shell/login 已出现，但未验证服务稳定性"
+  ]
+}
