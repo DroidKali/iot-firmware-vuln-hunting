@@ -444,6 +444,7 @@ EMBA 日志的**离线**解析结果，由 `scripts/adapter_emba.py parse` 产�
 | `evidence` | array | ✅ | 完整 `evidence/1.1`，每条 Fact 至少引用一条 |
 | `errors` | array | ✅ | `{code, message, path}`；`parsed` 时为空 |
 | `limitations` | array | ✅ | 适用范围与未核对项；无固件文件时声明哈希为 operator-supplied |
+| `requirements` | object | — | `{required, satisfied, missing}`；角色限于 `p99` / `s09` / `l15` / `l10` / `s115`；`missing` 非空时 `status` 必须为 `failed` |
 | `counts` | object | ✅ | `{evidence, facts, errors, by_type, static-discovery, runtime-process, port-response}`，必须与实际数组一致 |
 
 ### 17.1 三类观察不可互升
@@ -454,7 +455,7 @@ EMBA 日志的**离线**解析结果，由 `scripts/adapter_emba.py parse` 产�
 | 仿真进程输出 | S115 | `runtime-process` | `runtime-process` | `emulation` | 用户态仿真中该二进制实际产生输出 |
 | 端口响应 | L10 | `port-response` | `port-response` | `dynamic` | 系统仿真中该 IP/端口实际响应 |
 
-其余静态事实（`firmware` / `elf` / `architecture` / `dependency` / `stage`）的 `value.observation` 固定为 `static-discovery`。任何把 `service` 的 observation 改成 `runtime-process`、或把静态证据挂到 `port-response` 的文档都会被 `contracts.py --kind emba-import` 拒绝（`OBSERVATION_MISMATCH` / `EVIDENCE_TYPE_MISMATCH`）。Fact 不可变，不存在互升 API；候选状态只能经 §16 的 `validate_transition` 改变。
+其余静态事实（`firmware` / `elf` / `file` / `architecture` / `dependency` / `stage`）的 `value.observation` 固定为 `static-discovery`。P99 的 ELF 落成 `elf`，PE32 落成 `file` 且 `value.format=PE32`；两者不能混写。任何把 `service` 的 observation 改成 `runtime-process`、或把静态证据挂到 `port-response` 的文档都会被 `contracts.py --kind emba-import` 拒绝（`OBSERVATION_MISMATCH` / `EVIDENCE_TYPE_MISMATCH`）。Fact 不可变，不存在互升 API；候选状态只能经 §16 的 `validate_transition` 改变。
 
 ### 17.2 失败与降级
 
@@ -462,13 +463,15 @@ EMBA 日志的**离线**解析结果，由 `scripts/adapter_emba.py parse` 产�
 |---|---|---|---|
 | 全部必需/可选日志解析成功 | `parsed` | 0 | `errors=[]` |
 | 缺可选日志（P99/S09/L15/L10/S115） | `partial` | 0 | 每项一条 `MISSING_ARTIFACT` |
-| 存在非空 `emba_error.log` | `partial` | 0 | `EMBA_ERROR_LOG` |
+| `--require` 指定的日志缺失 | `failed` | 1 | `MISSING_REQUIRED_ARTIFACT`，`requirements.missing` 列出角色 |
+| `--require` 含未知角色 | 不产出 | 2 | `BAD_REQUIRE` |
+| 存在非空 `emba_error.log` | `partial` | 0 | `EMBA_ERROR_LOG`；对应 `stage` Fact 仍为 `static-discovery` 且 `failure=true` |
 | 坏行 / 列数不符 | `partial` 或 `failed` | 0 / 1 | `PARSE_ERROR`，带文件与行号，不静默跳过 |
 | 缺 F50 | `failed` | 1 | `F50_MISSING` |
 | 版本不符 / 缺版本 | `failed` | 1 | `EMBA_VERSION_MISMATCH` / `EMBA_VERSION_MISSING` |
 | `--firmware` 实算哈希不符 | `failed` | 1 | `FIRMWARE_MISMATCH` |
 
-`--strict` 下 `partial` 退出 **3**；`--status-only` 与 `--strict` 互斥。`status=failed` 的结果**不得导入黑板**（`EMBA_FAILED`）；导入前还会核对 `run_id` 与 `firmware_sha256`（`RUN_MISMATCH` / `FIRMWARE_MISMATCH`）。
+`requirements.satisfied` 表示对应产物**已提供**，不表示其内容解析无误；内容错误仍记 `PARSE_ERROR` 并降级为 `partial`（`--strict` 退出 3）。`--strict` 下 `partial` 退出 **3**；`--status-only` 与 `--strict` 互斥。`status=failed` 的结果**不得导入黑板**（`EMBA_FAILED`）；导入前还会核对 `run_id` 与 `firmware_sha256`（`RUN_MISMATCH` / `FIRMWARE_MISMATCH`）。
 
 ### 17.3 确定性
 
@@ -481,6 +484,9 @@ EMBA 日志的**离线**解析结果，由 `scripts/adapter_emba.py parse` 产�
 | 真实行为 | 源码位置 | 适配器处理 |
 |---|---|---|
 | F50 每行固定用 8 个 `NA` 补齐尾部列，`system_emulation_state` 的值本身可含 `;`（如 `booted;IP_DET`） | `helpers/helpers_emba_print.sh:333` 的 `write_csv_log()` | 过滤空/NA 单元格后再拼接，数字字段不再被 `;NA…` 污染，状态值保留内部 `;` |
+| F50 的 `user_emulation_state` 列实际写的是 `lUSER_EMUL_CNT`（成功用户态仿真的数量），不是状态字符串 | `modules/F50_base_aggregator.sh:252-256` | 输出 `user_emulation_count`（整数）并保留 `user_emulation_state_raw`；`system_booted` 按 token 判定，`IP_DET` 等标志保留原样 |
 | L10 的 IP 与网络模式带展示前缀：`IP address: 192.168.0.1`、`Network mode: default (…)` | `modules/L10_system_emulation.sh:3180` | `ip` / `network_mode` 存机器值，`ip_raw` / `network_mode_detail` 保留原始展示文本 |
+| L10 的 `available network services` 只列 nmap 判定为 open 的端口；空值表示没有观测到开放端口 | `modules/L10_system_emulation.sh:3180` | 不生成 `trigger=false` 的 `port-response`，只记 limitation；有端口时才落 Fact |
+| P99 同时记录 ELF 与 PE32，`class` / `file_output` 都含类型文本 | `modules/P99_prepare_analyzer.sh` | ELF → `elf`；PE32 → `file` + `format=PE32`，不把 Windows 可执行文件冒充 Linux ELF |
 | S09 表头第 4 列写作 `version_rule`，实际写入 `lAPP_NAME`；第 8 列表头是 `static/emulation`，实际是类型列 | `modules/S09_firmware_base_version_check.sh:477` | 事实字段命名为 `app_name`，类型列映射到 `mode`，不把产品名误读成版本规则 |
 | S115 成功行由 ANSI 颜色码包裹，末尾带英文句号 | `modules/S115_usermode_emulator.sh:891` | 先剥 ANSI 再匹配，去掉路径末尾句号 |

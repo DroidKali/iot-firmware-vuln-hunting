@@ -2157,9 +2157,9 @@ def main() -> int:
           and d23.get("firmware_sha256") == FW23,
           str(d23.get("tool")))
     check("adapter_emba：事实/证据计数与内容一致",
-          len(facts23) == 12 and len(evid23) == 12
-          and (d23.get("counts") or {}).get("facts") == 12
-          and (d23.get("counts") or {}).get("evidence") == 12,
+          len(facts23) == 13 and len(evid23) == 13
+          and (d23.get("counts") or {}).get("facts") == 13
+          and (d23.get("counts") or {}).get("evidence") == 13,
           f"facts={len(facts23)} evidence={len(evid23)}")
     check("adapter_emba：静态服务 / 运行进程 / 端口响应三类事实齐全且类型互异",
           all(by_type23.get(t) for t in
@@ -2188,6 +2188,26 @@ def main() -> int:
                      for r in (by_type23.get("port-response") or [{}])[0].get("evidence_refs") or [])
     check("adapter_emba：端口响应解析出 80/tcp 与 443/tcp，且带触发事件",
           pr_ports == {80, 443} and pr_trigger, str(pr_val))
+
+    logs_noport = _copy23("logs-noport")
+    l10_noport = os.path.join(logs_noport, "csv_logs", "l10_system_emulation.csv")
+    with open(l10_noport, encoding="utf-8", newline="") as fh:
+        noport_rows = fh.read().splitlines()
+    noport_cols = noport_rows[1].split(";")
+    noport_cols[6] = "0"
+    noport_cols[7] = ""
+    noport_rows[1] = ";".join(noport_cols)
+    with open(l10_noport, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("\n".join(noport_rows) + "\n")
+    rr_np, d_np, _ = _emba("noport", logs_noport)
+    np_types = {f.get("type") for f in d_np.get("facts") or []}
+    check("adapter_emba：L10 无开放端口时不生成 port-response，只留限制说明",
+          rr_np.returncode == 0 and d_np.get("status") == "parsed"
+          and "port-response" not in np_types
+          and any("没有开放的端口响应" in x
+                  for x in d_np.get("limitations") or []),
+          f"rc={rr_np.returncode} types={sorted(np_types)}")
+
     fw_val = (by_type23.get("firmware") or [{}])[0].get("value") or {}
     stage_val = (by_type23.get("stage") or [{}])[0].get("value") or {}
     check("adapter_emba：真实 F50 的 NA 列填充不污染数字字段与状态值",
@@ -2195,6 +2215,20 @@ def main() -> int:
           and (fw_val.get("cves") or {}).get("cve_counter") == 5
           and stage_val.get("system_emulation_state") == "booted;IP_DET",
           f"files={fw_val.get('files')} state={stage_val.get('system_emulation_state')}")
+    check("adapter_emba：F50 用户态仿真是计数而非状态字符串，标志位保留原样",
+          stage_val.get("user_emulation_count") == 2
+          and stage_val.get("user_emulation_state_raw") == "2"
+          and "IP_DET" in (stage_val.get("system_emulation_flags") or []),
+          str(stage_val))
+    file_facts = by_type23.get("file") or []
+    elf_facts = by_type23.get("elf") or []
+    check("adapter_emba：P99 的 PE32 落成 file Fact，不冒充 ELF",
+          len(file_facts) == 1
+          and (file_facts[0].get("value") or {}).get("format") == "PE32"
+          and (file_facts[0].get("value") or {}).get("path") == "usr/bin/setup.exe"
+          and all((f.get("value") or {}).get("format") == "ELF"
+                  for f in elf_facts),
+          str([(f.get("value") or {}).get("path") for f in file_facts + elf_facts]))
     check("adapter_emba：L10 的 IP address / Network mode 展示前缀已剥离",
           pr_val.get("ip") == "192.168.0.1"
           and pr_val.get("network_mode") == "default"
@@ -2260,6 +2294,36 @@ def main() -> int:
           rr_er.returncode == 0 and d_er.get("status") == "partial"
           and "EMBA_ERROR_LOG" in er_codes,
           f"rc={rr_er.returncode} codes={er_codes}")
+    er_stage = [f for f in d_er.get("facts") or []
+                if (f.get("value") or {}).get("source") == "emba_error"]
+    check("adapter_emba：错误日志事实仍是 static-discovery，并带失败标记",
+          len(er_stage) == 1
+          and (er_stage[0].get("value") or {}).get("observation") == "static-discovery"
+          and (er_stage[0].get("value") or {}).get("failure") is True
+          and (er_stage[0].get("value") or {}).get("error_lines") == 1
+          and (d_er.get("counts") or {}).get("static-discovery") == 11,
+          str(er_stage[0].get("value") if er_stage else None))
+
+    rr_req, d_req, _ = _emba("require-ok", extra=["--require", "p99"])
+    check("adapter_emba：--require 显式要求产物满足时记录 satisfied",
+          rr_req.returncode == 0
+          and (d_req.get("requirements") or {}).get("required") == ["p99"]
+          and (d_req.get("requirements") or {}).get("satisfied") == ["p99"]
+          and not (d_req.get("requirements") or {}).get("missing"),
+          str(d_req.get("requirements")))
+    logs_req = _copy23("logs-no-p99")
+    os.remove(os.path.join(logs_req, "csv_logs", "p99_prepare_analyzer.csv"))
+    rr_rm, d_rm, _ = _emba("require-missing", logs_req, ["--require", "p99"])
+    rm_codes = [e.get("code") for e in d_rm.get("errors") or []]
+    check("adapter_emba：--require 的产物缺失 → failed + MISSING_REQUIRED_ARTIFACT",
+          rr_rm.returncode == 1 and d_rm.get("status") == "failed"
+          and "MISSING_REQUIRED_ARTIFACT" in rm_codes
+          and (d_rm.get("requirements") or {}).get("missing") == ["p99"],
+          f"rc={rr_rm.returncode} codes={rm_codes}")
+    rr_rb, _, _ = _emba("require-bad", extra=["--require", "nope"])
+    check("adapter_emba：--require 未知角色 → rc2 BAD_REQUIRE，不静默忽略",
+          rr_rb.returncode == 2 and "BAD_REQUIRE" in rr_rb.stderr,
+          f"rc={rr_rb.returncode} err={rr_rb.stderr.strip()[:120]}")
 
     ws23 = os.path.join(q23, "board")
     run([BOARD, "init", "--workspace", ws23, "--run-id", RUN23,
@@ -2274,19 +2338,19 @@ def main() -> int:
     item2 = (rep2.get("items") or {}).get("emba") or {}
     check("黑板：EMBA 产物按 evidence→fact 导入，计数与适配器一致",
           imp1.returncode == 0
-          and ((item1.get("evidence") or {}).get("added") == 12)
-          and ((item1.get("facts") or {}).get("added") == 12),
+          and ((item1.get("evidence") or {}).get("added") == 13)
+          and ((item1.get("facts") or {}).get("added") == 13),
           f"rc={imp1.returncode} item={item1}")
     check("黑板：重复导入 EMBA 产物全部去重，不重复落盘",
           imp2.returncode == 0
-          and ((item2.get("evidence") or {}).get("duplicates") == 12)
-          and ((item2.get("facts") or {}).get("duplicates") == 12),
+          and ((item2.get("evidence") or {}).get("duplicates") == 13)
+          and ((item2.get("facts") or {}).get("duplicates") == 13),
           f"rc={imp2.returncode} item={item2}")
     st23 = _r23(os.path.join(ws23, "audit-board.json"))
     fact_types23 = {f.get("type") for f in st23.get("facts") or []}
     check("黑板：三类观察以不同 Fact.type 共存，verify 通过",
           {"service", "runtime-process", "port-response"} <= fact_types23
-          and (st23.get("counters") or {}).get("facts") == 12
+          and (st23.get("counters") or {}).get("facts") == 13
           and run([BOARD, "verify", "--workspace", ws23]).returncode == 0,
           str(sorted(fact_types23)))
 
@@ -2315,6 +2379,16 @@ def main() -> int:
     check("contracts.py：把静态服务改写成运行进程 → OBSERVATION_MISMATCH",
           rr_bo.returncode == 1 and "OBSERVATION_MISMATCH" in rr_bo.stdout,
           f"rc={rr_bo.returncode}")
+
+    bad_req = json.loads(json.dumps(d23))
+    bad_req["requirements"] = {"required": ["p99"], "satisfied": [],
+                               "missing": ["p99"]}
+    bad_req_path = _w23("bad-requirements.json", bad_req)
+    rr_br = run([CONTRACTS, "--kind", "emba-import", "--file", bad_req_path])
+    check("contracts.py：requirements 声称缺失却仍 parsed → REQUIREMENTS_INCONSISTENT",
+          rr_br.returncode == 1
+          and "REQUIREMENTS_INCONSISTENT" in rr_br.stdout,
+          f"rc={rr_br.returncode}")
 
     print()
     if FAILS:

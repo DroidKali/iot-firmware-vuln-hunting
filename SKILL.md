@@ -656,13 +656,14 @@ uv run scripts/sandbox_run.py \
 | 仿真进程实际有输出 | S115 | `runtime-process` | `emulation` | 不能证明该端口对外响应 |
 | 系统仿真端口有响应 | L10 | `port-response` | `dynamic` | 不能反推具体漏洞或利用链 |
 
-三类事实**不可互相升级**；Fact 落盘后不可改写，候选状态仍只能由 `board_transitions.py` 的类型化证据校验改变。F50 必需，其余日志可选；缺可选日志记 `MISSING_ARTIFACT` 且 `status=partial`，坏行报 `PARSE_ERROR`；缺 F50、版本不符、固件哈希不符均为结构化失败（退出 1）。同一份日志重复解析字节一致。
+三类事实**不可互相升级**；Fact 落盘后不可改写，候选状态仍只能由 `board_transitions.py` 的类型化证据校验改变。F50 必需，其余日志可选；缺可选日志记 `MISSING_ARTIFACT` 且 `status=partial`，坏行报 `PARSE_ERROR`；`--require p99,s09,s115` 可把指定产物提升为本次审计必需，缺失即 `failed` + `MISSING_REQUIRED_ARTIFACT`（退出 1）。缺 F50、版本不符、固件哈希不符均为结构化失败。P99 的 PE32 落成 `file` 而不是 `elf`；L10 无开放端口时只记 limitation，不生成 `port-response`；F50 的 `user_emulation_state` 按成功仿真的**计数**解释。同一份日志重复解析字节一致。
 
 ```bash
 # 只解析，不启动 EMBA/Qiling/QEMU；--strict 下 partial 退出 3
 uv run scripts/adapter_emba.py parse --logs fw-audit/$TARGET/emba-logs \
     --run-id RUN-001 --firmware-sha256 <64-hex> \
     --firmware fw-audit/$TARGET/firmware.bin \
+    --require p99,s09,s115 \
     --out fw-audit/$TARGET/05-emba-import.json --strict
 
 # 导入黑板；先核对 run/固件绑定，failed 结果拒绝导入
@@ -990,13 +991,13 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 | `scripts/board_transitions.py` | M1 / Phase 3–5：候选状态机——`graph` 列合法转换，`check` 做类型化证据校验（run/固件绑定、证据类型、判据、触发上下文），`risk` 校验风险处置而非候选状态 |
 | `scripts/board_events.py` | M1：append-only 事件日志——`verify` 校验结构与 `seq` 连续性，`replay` 从日志重建快照；重复 `dedupe_key` 跳过，非法 JSON 行报错 |
 | `scripts/board_store.py` | M1：黑板存储与导入——`init` / `import` / `add` / `transition` / `intent` / `backtrack` / `replay` / `verify` / `show`；`import --emba` 导入 M3 适配结果；事件日志是真相源，快照可重建 |
-| `scripts/adapter_emba.py` | M3：EMBA 产物离线解析——F50/P99/S09/L15/L10/S115 → `emba-import/1.0`；三类观察分型（`service` / `runtime-process` / `port-response`）、结构化失败、重复解析字节稳定 |
+| `scripts/adapter_emba.py` | M3：EMBA 产物离线解析——F50/P99/S09/L15/L10/S115 → `emba-import/1.0`；三类观察分型（`service` / `runtime-process` / `port-response`）、PE32/ELF 区分、`--require` 显式产物、结构化失败、重复解析字节稳定 |
 | `scripts/ealb_calib.py` | Phase 2：用实测工时样本校准 EALB；样本不足时只报 `heuristic`，达到门槛才标 `calibrated` |
 | `scripts/sandbox_run.py` | Phase 4 / M2：不可信固件的一次性隔离执行（`--network none`、只读根、cap-drop、非 root、内存/CPU/PID 限额）；无隔离运行时 **fail-closed**（退出 3），宿主机执行必须显式授权；`sandbox-run/1.1` 记录资源准入（退出 5） |
 | `scripts/resource_manager.py` | M2：`sandbox-policy/1.0` 策略校验、跨进程文件锁槽位、墙钟预算；`validate` / `defaults`；超限排队而不是先启动 |
 | `scripts/exec_paths.py` | M2：AST 盘点 `scripts/*.py` 的子进程调用并分类（`sandbox-boundary` / `host-static-analyzer` / `trusted-metadata` / `test-harness`）；未分类即退出 1 |
 | `scripts/bench_eval.py` | Phase 5/回归：合成基准集上的 precision / recall / F1 / FPR 评估；`--baseline` 检测召回暴跌与 FPR 上升（退出码 3） |
-| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证其余十五个脚本的判据，并把**文档示例命令与 CLI 参数表对拍**；覆盖黑板事件/快照/状态机、资源准入与 EMBA 适配（23 组 / 246 条断言，结尾自报总数） |
+| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证其余十五个脚本的判据，并把**文档示例命令与 CLI 参数表对拍**；覆盖黑板事件/快照/状态机、资源准入与 EMBA 适配（23 组 / 254 条断言，结尾自报总数） |
 
 脚本都只用 Python 标准库，无第三方依赖，Windows / Linux / macOS 均可运行。用 `uv` 管理环境（`uv run` 自动建临时环境；无 `uv` 时直接 `python scripts/xxx.py` 亦可）。安装后建议先跑一次自检：
 

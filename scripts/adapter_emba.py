@@ -10,8 +10,11 @@
     - service        静态发现（L15/S09 行），value.observation = "static-discovery"
     - runtime-process 仿真进程实际产生输出（S115），value.observation = "runtime-process"
     - port-response  系统仿真中端口有响应（L10），value.observation = "port-response"
+* P99 的 ELF 落成 elf，PE32 落成 file；L10 没有开放端口时不生成 port-response；
+  F50 的 user_emulation_state 按成功用户态仿真计数解释，不当作状态字符串；
 * 缺字段、版本不符、坏行、固件哈希不符都返回结构化错误，不静默跳过；
-* 缺少可选日志时状态为 partial，并在 errors / limitations 里说明，绝不伪造观察。
+* 缺少可选日志时状态为 partial；--require 指定的产物缺失则 failed，并在
+  requirements.missing 中列出，绝不伪造观察。
 
 退出码：0 parsed 或 partial；1 failed；2 用法/IO；3 --strict 且 partial。
 纯标准库，Python 3.10+。
@@ -35,7 +38,7 @@ except Exception:  # pragma: no cover - 单独拷走时不做自检
     _contract_summary = None
     _validate_emba_import = None
 
-VERSION = "1.0"
+VERSION = "1.1"
 SCHEMA = "emba-import/1.0"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -69,6 +72,8 @@ P99_FIELDS = ("source_module", "path", "class", "data", "machine",
 # 语义命名为 app_name，避免把产品名误读成版本规则。
 S09_FIELDS = ("module", "binary", "rule_id", "app_name",
               "version_detected", "csv_rule", "license", "mode")
+# --require 允许显式要求的可选产物角色；F50 永远必需，不在其中。
+ARTIFACT_ROLES = ("p99", "s09", "l15", "l10", "s115")
 
 
 class AdapterError(Exception):
@@ -140,6 +145,31 @@ def _to_int(value: Any) -> Optional[int]:
         except ValueError:
             return None
     return None
+
+
+def state_tokens(value: Any) -> Set[str]:
+    """把 F50 的 system_emulation_state 拆成 token；下划线归一成空格。"""
+    text = _norm_value(value).lower()
+    if not text:
+        return set()
+    return {t.strip().replace("_", " ")
+            for t in re.split(r"[;,]+", text) if t.strip()}
+
+
+def raw_state_tokens(value: Any) -> List[str]:
+    """保留 F50 原始 token 的大小写与下划线，用于原样记录标志位。"""
+    text = _norm_value(value)
+    if not text:
+        return []
+    return [t.strip() for t in re.split(r"[;,]+", text) if t.strip()]
+
+
+def system_booted(value: Any) -> bool:
+    """只有明确的 booted 才算启动；not booted / not_booted 一律否。"""
+    tokens = state_tokens(value)
+    if any(t.startswith("not booted") for t in tokens):
+        return False
+    return "booted" in tokens
 
 
 def norm_arch(value: Any) -> str:
@@ -398,16 +428,24 @@ def emit_f50_facts(obs: Observations, data: Dict[str, str]) -> None:
                      arch_value, "static", rel, None,
                      fact_source={"type": "tool-report", "tool": "emba"})
 
-    user_state = data.get("user_emulation_state", "")
-    system_state = data.get("system_emulation_state", "")
-    if user_state or system_state:
+    # F50_base_aggregator.sh:252-256 写的是成功用户态仿真的**数量**，
+    # 不是状态字符串；字段名沿用 EMBA 的历史叫法，但语义必须按计数解释。
+    user_raw = data.get("user_emulation_state", "")
+    system_raw = data.get("system_emulation_state", "")
+    if user_raw or system_raw:
+        user_count = _to_int(user_raw)
         stage_value = {"observation": "static-discovery",
-                       "user_emulation_state": user_state,
-                       "system_emulation_state": system_state,
-                       "system_booted": "booted" in system_state.lower()
-                       and "not booted" not in system_state.lower(),
+                       "user_emulation_count": user_count,
+                       "user_emulation_state_raw": user_raw,
+                       "system_emulation_state": system_raw,
+                       "system_emulation_flags": sorted(
+                           t for t in raw_state_tokens(system_raw)
+                           if t.lower().replace("_", " ")
+                           not in ("booted", "not booted")),
+                       "system_booted": system_booted(system_raw),
                        "source": "f50"}
-        obs.add_fact("stage", {"user": user_state, "system": system_state},
+        obs.add_fact("stage", {"user_emulation_count": user_count,
+                               "system_emulation_state": system_raw},
                      stage_value, "static", rel, None,
                      fact_source={"type": "tool-report", "tool": "emba"})
 
@@ -427,6 +465,7 @@ def parse_p99(obs: Observations, path: str) -> None:
         start = 1
     arches: Set[str] = set()
     elf_count = 0
+    file_count = 0
     for lineno, row in enumerate(rows[start:], start + 1):
         if not row or all(not _norm_value(c) for c in row):
             continue
@@ -443,26 +482,37 @@ def parse_p99(obs: Observations, path: str) -> None:
         blob = " ".join((get("class"), get("data"), file_output)).upper()
         if "ELF" not in blob and "PE32" not in blob:
             continue
+        # P99 同时记录 ELF 与 PE32。只有 ELF 能落成 elf Fact；PE32 是
+        # Windows 可执行文件，落成 file Fact 并保留 format，避免把 PE
+        # 冒充成 Linux ELF 后误导依赖/加载器分析。
+        fmt = "ELF" if "ELF" in blob else "PE32"
+        fact_type = "elf" if fmt == "ELF" else "file"
         if not binary:
-            obs.error("PARSE_ERROR", "P99 ELF 行缺少路径", rel, lineno)
+            obs.error("PARSE_ERROR", f"P99 {fmt} 行缺少路径", rel, lineno)
             continue
         arch = norm_arch(get("arch_guessed")) or norm_arch(get("machine"))
         if arch:
             arches.add(arch)
         value = {"observation": "static-discovery", "path": binary,
-                 "class": get("class"), "endian": get("data"),
+                 "format": fmt, "class": get("class"), "endian": get("data"),
                  "machine": get("machine"), "arch": arch,
                  "flags": get("flags_cnt"), "file_type": file_output,
                  "file_md5": get("md5"), "source": "p99"}
-        obs.add_fact("elf", {"path": binary, "arch": arch}, value, "static",
-                     rel, lineno, fact_source={"type": "tool-report", "tool": "emba"})
-        elf_count += 1
-    if elf_count and arches:
+        obs.add_fact(fact_type, {"path": binary, "arch": arch, "format": fmt},
+                     value, "static", rel, lineno,
+                     fact_source={"type": "tool-report", "tool": "emba"})
+        if fact_type == "elf":
+            elf_count += 1
+        else:
+            file_count += 1
+    binary_count = elf_count + file_count
+    if binary_count and arches:
         value = {"observation": "static-discovery", "source": "p99",
-                 "guessed": sorted(arches), "elf_count": elf_count}
+                 "guessed": sorted(arches), "binary_count": binary_count,
+                 "elf_count": elf_count, "file_count": file_count}
         obs.add_fact("architecture", {"guessed": sorted(arches)}, value, "static",
                      rel, None, fact_source={"type": "tool-report", "tool": "emba"})
-    if not elf_count:
+    if not binary_count:
         obs.limit("P99 中没有识别到 ELF/PE32 行")
 
 
@@ -547,10 +597,13 @@ def parse_l10(obs: Observations, path: str) -> None:
             elif "network mode" in name:
                 header["mode"] = i
         start = 1
-    count = 0
+    rows_seen = 0
+    port_facts = 0
+    no_port_lines: List[int] = []
     for lineno, row in enumerate(rows[start:], start + 1):
         if not row or all(not _norm_value(c) for c in row):
             continue
+        rows_seen += 1
         if header is not None:
             get = lambda key: _norm_value(row[header[key]]) if key in header and header[key] < len(row) else ""
         else:
@@ -580,6 +633,12 @@ def parse_l10(obs: Observations, path: str) -> None:
         ip = _strip_label(raw_ip, "IP address:")
         mode_text = _strip_label(raw_mode, "Network mode:")
         mode_token = mode_text.split()[0] if mode_text.split() else ""
+        # L10 的 available network services 只列 nmap 判定为 open 的端口
+        # （modules/L10_system_emulation.sh:3180）。空列表表示系统仿真没有
+        # 观测到开放端口，不能写成 trigger=false 的 port-response 事实。
+        if not ports:
+            no_port_lines.append(lineno)
+            continue
         value = {"observation": "port-response", "ip": ip,
                  "services": [f"{p['port']}/{p['transport']}" for p in ports],
                  "ports": ports, "count": len(ports),
@@ -587,16 +646,23 @@ def parse_l10(obs: Observations, path: str) -> None:
                  "booted_state": get("booted"), "tcp_state": get("tcp"),
                  "network_mode": mode_token, "network_mode_detail": mode_text,
                  "ip_raw": raw_ip, "source": "l10"}
-        event = {"type": "port-response", "trigger": bool(ports),
+        event = {"type": "port-response", "trigger": True,
                  "args": {"ip": ip, "ports": value["services"],
                           "booted_state": get("booted")}}
         obs.add_fact("port-response", {"line": lineno, "ip": ip,
                                        "services": value["services"]},
                      value, "dynamic", rel, lineno, source_type="dynamic",
                      event=event, fact_source={"type": "dynamic", "tool": "emba"})
-        count += 1
-    if not count:
-        obs.limit("L10 中没有可解析的端口响应行")
+        port_facts += 1
+    if not rows_seen:
+        obs.limit("L10 中没有可解析的系统仿真行")
+    elif not port_facts:
+        where = f"（行 {', '.join(str(n) for n in no_port_lines)}）" if no_port_lines else ""
+        obs.limit(f"L10 中没有开放的端口响应，未生成 port-response 事实{where}")
+    else:
+        for lineno in no_port_lines:
+            obs.limit(f"L10 第 {lineno} 行未解析到开放端口，"
+                      "未生成 port-response 事实")
 
 
 def parse_s115(obs: Observations, path: str) -> None:
@@ -648,7 +714,9 @@ def parse_error_log(obs: Observations, path: str) -> None:
         return
     obs.error("EMBA_ERROR_LOG", f"EMBA 记录 {len(lines)} 行错误输出", rel)
     obs.limit("emba_error.log 非空；EMBA 自身报告了失败或告警，解析结果按 partial 处理")
-    value = {"observation": "tool-failure", "error_lines": len(lines),
+    value = {"observation": "static-discovery", "failure": True,
+             "error_lines": len(lines),
+             "error_excerpt": [ln.strip()[:500] for ln in lines[:5]],
              "source": "emba_error"}
     obs.add_fact("stage", {"error_lines": len(lines)}, value, "static",
                  rel, None, fact_source={"type": "tool-report", "tool": "emba"})
@@ -659,11 +727,14 @@ def parse_error_log(obs: Observations, path: str) -> None:
 def parse_logs(logs_dir: str, run_id: str, firmware_sha256: str,
                firmware_path: Optional[str] = None,
                expect_version: Optional[str] = None,
-               tool_version_hint: str = "") -> Dict[str, Any]:
+               tool_version_hint: str = "",
+               required: Sequence[str] = ()) -> Dict[str, Any]:
     root = os.path.abspath(logs_dir)
     if not os.path.isdir(root):
         raise AdapterError("LOGS_NOT_FOUND", f"日志目录不存在：{root}", root, 2)
 
+    required_roles = {str(r).strip().lower() for r in (required or ())
+                      if str(r).strip()}
     obs = Observations(run_id, firmware_sha256.lower(), tool_version_hint, root)
     if firmware_path:
         if not os.path.isfile(firmware_path):
@@ -682,7 +753,7 @@ def parse_logs(logs_dir: str, run_id: str, firmware_sha256: str,
     if not os.path.isfile(f50_path):
         obs.error("F50_MISSING", "缺少必需的 F50 汇总 CSV", "csv_logs/f50_base_aggregator.csv",
                   fatal=True)
-        return finish(obs, tool_version_hint, expect_version)
+        return finish(obs, tool_version_hint, expect_version, required_roles)
 
     f50 = parse_f50(obs, f50_path)
     version = norm_version(f50.get("emba_version", ""))
@@ -709,6 +780,11 @@ def parse_logs(logs_dir: str, run_id: str, firmware_sha256: str,
     for role, path, parser in optional:
         if os.path.isfile(path):
             parser(obs, path)
+        elif role in required_roles:
+            obs.error("MISSING_REQUIRED_ARTIFACT",
+                      f"缺少本次审计显式要求的 EMBA 产物：{role}",
+                      os.path.relpath(path, root).replace("\\", "/"),
+                      fatal=True)
         else:
             obs.error("MISSING_ARTIFACT", f"缺少可选 EMBA 产物：{role}",
                       os.path.relpath(path, root).replace("\\", "/"))
@@ -717,11 +793,13 @@ def parse_logs(logs_dir: str, run_id: str, firmware_sha256: str,
     if os.path.isfile(err_path):
         parse_error_log(obs, err_path)
 
-    return finish(obs, version or tool_version_hint, expect_version)
+    return finish(obs, version or tool_version_hint, expect_version,
+                  required_roles)
 
 
 def finish(obs: Observations, tool_version: str,
-           expect_version: Optional[str] = None) -> Dict[str, Any]:
+           expect_version: Optional[str] = None,
+           required: Sequence[str] = ()) -> Dict[str, Any]:
     facts = sorted(obs.facts, key=lambda f: f.get("fact_id", ""))
     evidence = sorted(obs.evidence, key=lambda e: e.get("evidence_id", ""))
     errors = sorted(obs.errors, key=lambda e: (e.get("path", ""),
@@ -729,6 +807,14 @@ def finish(obs: Observations, tool_version: str,
                                                e.get("code", ""),
                                                e.get("message", "")))
     inputs = sorted(obs.inputs, key=lambda x: (x.get("role", ""), x.get("path", "")))
+    present_roles = {str(row.get("role") or "") for row in inputs}
+    required_roles = sorted({str(r).strip().lower() for r in (required or ())
+                             if str(r).strip()})
+    requirements = {
+        "required": required_roles,
+        "satisfied": sorted(set(required_roles) & present_roles),
+        "missing": sorted(set(required_roles) - present_roles),
+    }
     limitations = sorted(set(obs.limitations))
     observations = [{"fact_id": f["fact_id"], "type": f.get("type"),
                      "observation": (f.get("value") or {}).get("observation", "")}
@@ -754,6 +840,7 @@ def finish(obs: Observations, tool_version: str,
         "tool": {"name": "emba", "version": tool_version or "unknown"},
         "expect_version": expect_version,
         "inputs": inputs,
+        "requirements": requirements,
         "counts": counts,
         "observations": observations,
         "evidence": evidence,
@@ -784,6 +871,11 @@ def render_summary(doc: Dict[str, Any]) -> str:
         f"runtime-process={counts.get('runtime-process', 0)} "
         f"port-response={counts.get('port-response', 0)}",
     ]
+    req = doc.get("requirements") or {}
+    if req.get("required"):
+        missing = ",".join(req.get("missing") or []) or "-"
+        lines.append(f"  required={','.join(req.get('required') or [])} "
+                     f"missing={missing}")
     for err in (doc.get("errors") or [])[:5]:
         loc = err.get("path") or ""
         if err.get("line") is not None:
@@ -797,6 +889,24 @@ def render_summary(doc: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def parse_required(values: Sequence[str]) -> List[str]:
+    """--require 支持重复参数与逗号分隔；未知角色直接拒绝。"""
+    roles: List[str] = []
+    for raw in values or ():
+        for part in str(raw).split(","):
+            role = part.strip().lower()
+            if not role:
+                continue
+            if role not in ARTIFACT_ROLES:
+                raise AdapterError(
+                    "BAD_REQUIRE",
+                    f"未知的必需产物角色 {role!r}；可选：{', '.join(ARTIFACT_ROLES)}",
+                    exit_code=2)
+            if role not in roles:
+                roles.append(role)
+    return roles
+
+
 def validate_args(args: argparse.Namespace) -> None:
     if not isinstance(args.run_id, str) or not args.run_id.strip():
         raise AdapterError("BAD_RUN_ID", "--run-id 必须是非空字符串", exit_code=2)
@@ -805,6 +915,7 @@ def validate_args(args: argparse.Namespace) -> None:
                            "--firmware-sha256 必须是 64 位十六进制", exit_code=2)
     if args.strict and args.status_only:
         raise AdapterError("BAD_ARGS", "--strict 与 --status-only 不能同时使用", exit_code=2)
+    args.require = parse_required(getattr(args, "require", []) or [])
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -823,6 +934,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--firmware-sha256", required=True)
     p.add_argument("--firmware")
     p.add_argument("--expect-version")
+    p.add_argument("--require", action="append", default=[], metavar="ROLE",
+                   help="显式要求本次审计必须提供的可选产物（可重复/逗号分隔）："
+                        + ", ".join(ARTIFACT_ROLES))
     p.add_argument("--out")
     p.add_argument("--json", action="store_true", dest="json_out")
     p.add_argument("--strict", action="store_true")
@@ -834,7 +948,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         validate_args(args)
         doc = parse_logs(args.logs, args.run_id, args.firmware_sha256,
-                         args.firmware, args.expect_version)
+                         args.firmware, args.expect_version,
+                         required=args.require)
         if _validate_emba_import is not None:
             errs = _validate_emba_import(doc)
             if errs:

@@ -204,7 +204,7 @@ G1–G7 必须是代码校验器，而不是 Prompt、README 或报告模板。�
 记录命令、版本、退出码与结果。重点确认 Strict、Coverage、沙箱和结构化证据的真实调用路径。
 
 **现状**：2026-10 已完成一轮门禁、契约、沙箱入口与合成基准整改；M3 落地后
-selftest 覆盖 23 组 / 246 条断言，`exec_paths.py` 已给出 16 个脚本 / 9 条子进程调用的
+selftest 覆盖 23 组 / 254 条断言，`exec_paths.py` 已给出 16 个脚本 / 9 条子进程调用的
 分类清单。沙箱已在无运行时、Python 桩运行时与 **Ubuntu 24.04.5 + Docker 29.9.0** 下验证
 fail-closed、资源准入、超时清理与容器内权限；`sink_scan.py` 的 ast-grep / semgrep
 仍属宿主机静态解析。
@@ -270,17 +270,20 @@ Intent 预算执行器。
 先解析已有 EMBA 产物，再按需增加受控调用；用真实产物 fixture 验证服务、ELF、架构、
 依赖和失败状态解析；确保静态发现、运行进程、端口响应各自有明确语义。
 
-**现状（2026-10-29，已落地）**：新增 `scripts/adapter_emba.py`，离线解析 F50 / P99 / S09 /
+**现状（2026-10-30，已落地）**：新增 `scripts/adapter_emba.py`，离线解析 F50 / P99 / S09 /
 L15 / L10 / S115，输出 `emba-import/1.0`；F50 必需，缺可选日志为 `partial`，坏行报
-`PARSE_ERROR`，缺 F50 / 版本不符 / 固件哈希不符为结构化失败。三类观察落成不同
-`Fact.type`（`service` / `runtime-process` / `port-response`），证据类型分别为
-`static` / `emulation` / `dynamic`，不存在互升路径。`contracts.py` 增加 `emba-import/1.0`
-校验器，`board_store.py import --emba` 在写入前核对 run / 固件 / status；重复解析输出
-字节一致，重复导入保持幂等。selftest 第 23 组覆盖上述路径。仓库内 `assets/emba-sample/`
-是按本机 EMBA HEAD `65b7870fb` 的真实写入点构造的**合成夹具**：F50 的
-`write_csv_log()` 会固定追加 NA 填充列，L10 的值带 `IP address:` / `Network mode:`
-展示前缀，S09 表头第 4 列 `version_rule` 实际写入的是 app name；适配器分别做了
-NA 过滤、前缀剥离与字段正名，并由 selftest 第 23 组钉住。
+`PARSE_ERROR`，缺 F50 / 版本不符 / 固件哈希不符为结构化失败。`--require p99,s09,s115`
+把指定产物提升为本次审计必需，缺失即 `failed` + `MISSING_REQUIRED_ARTIFACT`。
+三类观察落成不同 `Fact.type`（`service` / `runtime-process` / `port-response`），
+证据类型分别为 `static` / `emulation` / `dynamic`，不存在互升路径。P99 的 ELF 落成
+`elf`、PE32 落成 `file`；L10 无开放端口时不生成 `port-response`；F50 的
+`user_emulation_state` 按计数解释。`contracts.py` 增加 `emba-import/1.0` 校验器
+（含 requirements 自洽与 observations 一一对应），`board_store.py import --emba` 在写入前
+核对 run / 固件 / status；重复解析输出字节一致，重复导入保持幂等。selftest 第 23 组
+覆盖上述路径。仓库内 `assets/emba-sample/` 是按本机 EMBA HEAD `65b7870fb` 的真实
+写入点构造的**合成夹具**：F50 的 `write_csv_log()` 会固定追加 NA 填充列，L10 的值带
+`IP address:` / `Network mode:` 展示前缀，S09 表头第 4 列 `version_rule` 实际写入的是
+app name；适配器分别做了 NA 过滤、前缀剥离与字段正名，并由 selftest 第 23 组钉住。
 
 **未完成**：尚未用真实设备导出的 EMBA 日志复验；受控调用 EMBA（按需启动）未实现。
 

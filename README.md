@@ -4,8 +4,8 @@
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">  
   <img alt="python" src="https://img.shields.io/badge/python-3.8%2B%20stdlib%20only-3776AB.svg?logo=python\&logoColor=white">  
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg">  
-  <img alt="files" src="https://img.shields.io/badge/package-69%20files%20%C2%B7%2024996%20lines-informational.svg">
-  <img alt="selftest" src="https://img.shields.io/badge/selftest-246%20assertions%20passing-brightgreen.svg">
+  <img alt="files" src="https://img.shields.io/badge/package-69%20files%20%C2%B7%2025251%20lines-informational.svg">
+  <img alt="selftest" src="https://img.shields.io/badge/selftest-254%20assertions%20passing-brightgreen.svg">
   <img alt="agent" src="https://img.shields.io/badge/type-Agent%20Skill-7B42BC.svg">  
 </p>
 
@@ -194,7 +194,7 @@ npx skills add https://github.com/DroidKali/iot-firmware-vuln-hunting --agent '*
 uv run scripts/selftest.py
 ```
 
-脚本会用纯 Python 手工构造合法 ELF64 与合成 rootfs，端到端跑通其余十五个脚本，覆盖 **23 组 / 246 条断言**，其中包含「门禁必须拦下坏报告」的负向用例。断言总数由脚本自己在结尾打印，不需要去数日志。看到全绿即安装成功。
+脚本会用纯 Python 手工构造合法 ELF64 与合成 rootfs，端到端跑通其余十五个脚本，覆盖 **23 组 / 254 条断言**，其中包含「门禁必须拦下坏报告」的负向用例。断言总数由脚本自己在结尾打印，不需要去数日志。看到全绿即安装成功。
 
 `[14/23]` 把**文档当被测对象**：抓出 `README.md` / `SKILL.md` / `references/` / `assets/` 里每条 `scripts/*.py` 示例命令，逐个核对命令里出现的 `--flag` 是否真存在于脚本 `--help`（有子命令的会逐个进去问），并检查布尔开关后面没跟取值。这条守卫来自一次真实事故——文档把 `store_true` 的 `--tier` 写成 `--tier <rootfs>`，照抄必然报错，而所有单元测试都是绿的。
 
@@ -206,7 +206,7 @@ uv run scripts/selftest.py
 
 `[22/23]` 覆盖 M2 资源准入：策略字段与未知字段拒绝、超时/内存/CPU/PID/镜像越界必须在启动前拒绝（退出 4）、并发槽位排队与排队超时（退出 5，`command=[]`）、预算耗尽不启动、fake runtime 下的成功/超时/`rm -f` 清理/临时输出目录删除、输出目录对容器 uid 65534 的可写位，以及 `exec_paths.py` 对执行路径清单与未分类调用的阻断。
 
-`[23/23]` 覆盖 M3 EMBA 离线适配：解析 F50/P99/S09/L15/L10/S115 六类产物，重复解析输出字节一致；缺 F50、版本不符、固件哈希不符返回结构化失败；缺可选日志为 `partial`（`--strict` 下退出 3）；三类观察落成不同 `Fact.type`（`service` / `runtime-process` / `port-response`），证据类型分别为 `static` / `emulation` / `dynamic`；`board_store.py import --emba` 可幂等导入且拒绝跨 run 或 `failed` 结果。
+`[23/23]` 覆盖 M3 EMBA 离线适配：解析 F50/P99/S09/L15/L10/S115 六类产物，重复解析输出字节一致；缺 F50、版本不符、固件哈希不符返回结构化失败；缺可选日志为 `partial`（`--strict` 下退出 3），`--require` 指定的产物缺失则直接 `failed`；P99 的 PE32 落成 `file` 而不是 `elf`；L10 无开放端口时不生成 `port-response`；F50 的用户态仿真字段按计数解释；三类观察落成不同 `Fact.type`（`service` / `runtime-process` / `port-response`），证据类型分别为 `static` / `emulation` / `dynamic`；`board_store.py import --emba` 可幂等导入且拒绝跨 run 或 `failed` 结果。
 
 ### 2. 一次完整审计
 
@@ -341,7 +341,11 @@ M3 只做**离线解析**：不启动 EMBA、Qiling、QEMU，也不执行固件�
 三类事实不可互相升级：静态发现不能因为「看起来像服务」就写成进程运行，进程有输出也不等于端口可达。Fact 一旦落盘不可改写；候选状态只能经 `board_transitions.py` 的 `validate_transition` 改变。
 
 - **F50 必需**，P99/S09/L15/L10/S115 可选；缺可选日志记 `MISSING_ARTIFACT` 且 `status=partial`，坏行报 `PARSE_ERROR`，不静默跳过。
+- **显式产物要求**：`--require p99,s09,s115`（可重复或逗号分隔）把指定产物从「可选」提升为「本次审计必需」；缺失 → `failed` + `MISSING_REQUIRED_ARTIFACT`（退出 1），输出 `requirements.required/satisfied/missing`。未知角色直接 `BAD_REQUIRE`（退出 2）。
 - **结构化失败**：缺 F50 → `failed` + `F50_MISSING`；`--expect-version` 不符 → `EMBA_VERSION_MISMATCH`；`--firmware` 实算哈希不符 → `FIRMWARE_MISMATCH`。
+- **文件类型不冒认**：P99 的 ELF 落成 `elf`；PE32 落成 `file` 且 `value.format=PE32`，不会被写成 Linux ELF。
+- **没有响应就不落响应事实**：L10 的 `available network services` 为空时只加 limitation，不生成 `trigger=false` 的 `port-response`。
+- **F50 字段按真实语义解释**：`user_emulation_state` 实际是成功用户态仿真的**计数**，输出为 `user_emulation_count`（另保留 `user_emulation_state_raw`）；`system_booted` 从 `booted;...` token 判定，`IP_DET` 等标志位保留原样。
 - **重复解析稳定**：不写生成时间，ID 由 `run_id` 与内容派生，同一份日志两次输出字节一致。
 - **固件哈希必须显式给出**：EMBA 日志本身无法独立证明固件身份；给 `--firmware` 时实算比对，否则在 `limitations` 里声明为 operator-supplied。
 
@@ -352,6 +356,7 @@ uv run scripts/adapter_emba.py parse \
     --run-id RUN-001 \
     --firmware-sha256 <64-hex> \
     --firmware fw-audit/$TARGET/firmware.bin \
+    --require p99,s09,s115 \
     --out fw-audit/$TARGET/05-emba-import.json --strict
 
 # 导入黑板：先校验 run/固件绑定与 status，failed 结果拒绝导入
@@ -359,7 +364,7 @@ uv run scripts/board_store.py import --workspace fw-audit/$TARGET/board \
     --emba fw-audit/$TARGET/05-emba-import.json
 ```
 
-仓库内的 `assets/emba-sample/` 是按 EMBA HEAD `65b7870fb` 的真实写入点构造的**合成夹具**，只用于验证解析契约、NA 填充/展示前缀等格式细节与三类观察分型；真实产物应替换夹具，并用 `--firmware` 核对固件哈希。字段与失败码见 [references/data-contracts.md](references/data-contracts.md) §17。
+仓库内的 `assets/emba-sample/` 是按 EMBA HEAD `65b7870fb` 的真实写入点构造的**合成夹具**，只用于验证解析契约、NA 填充/展示前缀等格式细节、PE32 与 L10 空端口处理、`--require` 必需产物语义与三类观察分型；真实产物应替换夹具，并用 `--firmware` 核对固件哈希。字段与失败码见 [references/data-contracts.md](references/data-contracts.md) §17。
 
 ## 轻量整机仿真（M4）
 
@@ -411,7 +416,7 @@ EMBA 跑一次要数小时到十几小时，主要时间花在完整分析流水
 | `scripts/taint_graph.py`   | 800  | Phase 3 / 5：跨请求污点图（BDG/ADG 最小实现）——`recover` 恢复动态拼接的键（literal / local-const / fill-composed），`build` 构图并校验「写请求 ≠ 触发读的请求、键一致、两端有证据、跨进程读带 via_control」，产出 `taint-graph.json` |
 | `scripts/coverage_gate.py` | 2759 | Phase 5：覆盖率门禁 + CVE 纪律检查（`--report`，V0–V4）+ 审阅清单三方对齐（`--review-list`）+ G4 入口级覆盖 + G5 绕过矩阵 + **G6 跨请求污点溯源** + **G7 跨请求污点图** + 类型→Base + 自动修复计划 + **扫描完整性/结构引擎/阶段状态/清单/审计任务契约** + **`--profile strict` 档位** + **`gate-config.json` 执行台账** |
 | `scripts/entrypoints_init.py` | 139 | Phase 3 / 5：从 `02-tiering.json` 生成 `entrypoints.json` 骨架（`--merge` 保留已手填数据） |
-| `scripts/contracts.py`     | 1261 | Phase 0–5：跨阶段数据契约校验（17 种 schema：FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / EmbaImport / Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent），`--list` 列版本、`--json` 出机器可读结果 |
+| `scripts/contracts.py`     | 1310 | Phase 0–5：跨阶段数据契约校验（17 种 schema：FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / EmbaImport / Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent），`--list` 列版本、`--json` 出机器可读结果 |
 | `scripts/board_transitions.py` | 476 | Phase 3–5 / M1：Candidate 状态机与类型化验证——`graph` 输出合法转换，`check` 校验证据绑定/类型/判据/触发上下文，拒绝 `ACCEPTED_WITH_RISK` 充当候选状态 |
 | `scripts/board_events.py` | 479 | M1：append-only 黑板事件日志——`verify` 校验结构与 `seq` 连续性，`replay` 从日志重建 `audit-board.json`；非法 JSON 行报 `PARSE_ERROR`，不静默跳过 |
 | `scripts/board_store.py` | 709 | M1：黑板存储——`init` 建日志与快照，`import` 导入 Phase 0–5 产物，`transition` 走状态机，`backtrack` 记录回退，`verify` 对账 |
@@ -420,8 +425,8 @@ EMBA 跑一次要数小时到十几小时，主要时间花在完整分析流水
 | `scripts/resource_manager.py` | 503 | M2：沙箱策略、跨进程槽位与预算——`validate` 校验 `sandbox-policy/1.0`，`defaults` 打印内置策略；超限排队而不是先启动 |
 | `scripts/exec_paths.py`    | 267  | M2：AST 盘点 `scripts/*.py` 的子进程调用，输出 `exec-paths/1.0`；出现未分类执行路径即退出 1 |
 | `scripts/bench_eval.py`    | 2473 | Phase 5 / 回归：合成基准集上的 precision / recall / F1 / FPR 评估，`--baseline` 检测召回暴跌与 FPR 上升（退出码 3） |
-| `scripts/adapter_emba.py`  | 864  | M3：EMBA 产物离线解析——F50/P99/S09/L15/L10/S115 → `emba-import/1.0`；三类观察分型、结构化失败、重复解析字节稳定；`board_store.py import --emba` 消费 |
-| `scripts/selftest.py`      | 2332 | 安装自检：合成固件与 rootfs，端到端验证其余十五个脚本的判据 + **文档与 CLI 一致性** + 基准回归 + 黑板事件/快照/状态机 + 资源准入 + EMBA 适配（23 组 / 246 条断言，结尾自报总数）                 |
+| `scripts/adapter_emba.py`  | 979  | M3：EMBA 产物离线解析——F50/P99/S09/L15/L10/S115 → `emba-import/1.0`；三类观察分型、PE32/ELF 区分、`--require` 显式产物、结构化失败、重复解析字节稳定；`board_store.py import --emba` 消费 |
+| `scripts/selftest.py`      | 2406 | 安装自检：合成固件与 rootfs，端到端验证其余十五个脚本的判据 + **文档与 CLI 一致性** + 基准回归 + 黑板事件/快照/状态机 + 资源准入 + EMBA 适配（23 组 / 254 条断言，结尾自报总数）                 |
 
 ### 覆盖率门禁判据
 
@@ -513,7 +518,7 @@ EMBA 跑一次要数小时到十几小时，主要时间花在完整分析流水
 | `references/sink-patterns.md`     | 257 | 需要扩充或理解静态扫描规则（含 `structural` 结构级规则 schema），或手写 grep / YARA                        |
 | `references/vuln-taxonomy.md`     | 218 | 需要按攻击面 / 漏洞类型逐项核查（后门账号、命令注入、OTA、MQTT、U-Boot…）        |
 | `references/resource-index.md`    | 233 | 需要外部资料：awesome-connected-things-sec 精编索引（按阶段映射）      |
-| `references/data-contracts.md`   | 486 | **跨阶段数据契约**：17 种 schema——FirmwareManifest / AuditTask / Candidate / Finding / Evidence（含 `evidence/1.1` 归一化） / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / EmbaImport / Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent 的字段、版本规则、strict 兼容边界、黑板事件与状态机、迁移清单 |
+| `references/data-contracts.md`   | 492 | **跨阶段数据契约**：17 种 schema——FirmwareManifest / AuditTask / Candidate / Finding / Evidence（含 `evidence/1.1` 归一化） / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / EmbaImport / Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent 的字段、版本规则、strict 兼容边界、黑板事件与状态机、迁移清单 |
 
 ---
 

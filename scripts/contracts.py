@@ -74,6 +74,8 @@ FACT_TYPES = (
     # M3：EMBA 适配器显式区分三类观察，类型不同才不能被互相「升级」
     "dependency", "runtime-process", "port-response",
 )
+# EMBA 可选产物角色；--require 只能要求这些，F50 永远必需，不在其中。
+EMBA_ARTIFACT_ROLES = ("p99", "s09", "l15", "l10", "s115")
 SOURCE_TYPES = ("static", "dynamic", "emulation", "tool-report", "manual")
 EVIDENCE_TYPES = ("static", "dynamic", "emulation", "fuzzing", "manual")
 EMULATION_STATUSES = (
@@ -640,12 +642,50 @@ def validate_emba_import(obj: Any) -> List[Dict[str, str]]:
     fw = obj.get("firmware_sha256")
 
     inputs = _list_of_dicts(out, obj, "emba", "inputs")
+    input_keys: set = set()
     for i, row in enumerate(inputs):
         path = f"emba.inputs[{i}]"
         _req(out, row, path, "role", str)
         _req(out, row, path, "path", str)
         _hex(out, row, path, "sha256")
         _opt_int(out, row, path, "size")
+        key = (row.get("role"), row.get("path"))
+        if key in input_keys:
+            _err(out, path, "DUPLICATE_INPUT",
+                 f"同一输入被重复声明：{key[0]!r} {key[1]!r}")
+        input_keys.add(key)
+
+    requirements = obj.get("requirements")
+    if requirements is not None:
+        if not isinstance(requirements, dict):
+            _err(out, "emba.requirements", "BAD_TYPE", "requirements 必须是对象")
+        else:
+            req_lists: Dict[str, List[str]] = {}
+            for key in ("required", "satisfied", "missing"):
+                req_lists[key] = _str_list(out, requirements, "emba.requirements",
+                                           key, allow_empty=True)
+                for i, role in enumerate(req_lists[key]):
+                    if role not in EMBA_ARTIFACT_ROLES:
+                        _err(out, f"emba.requirements.{key}[{i}]", "BAD_ENUM",
+                             f"未知的产物角色：{role!r}")
+            req_set = set(req_lists["required"])
+            sat_set = set(req_lists["satisfied"])
+            miss_set = set(req_lists["missing"])
+            if not sat_set.issubset(req_set):
+                _err(out, "emba.requirements.satisfied", "REQUIREMENTS_INCONSISTENT",
+                     "satisfied 必须是 required 的子集")
+            if not miss_set.issubset(req_set):
+                _err(out, "emba.requirements.missing", "REQUIREMENTS_INCONSISTENT",
+                     "missing 必须是 required 的子集")
+            if sat_set & miss_set:
+                _err(out, "emba.requirements", "REQUIREMENTS_INCONSISTENT",
+                     "satisfied 与 missing 不得重叠")
+            if (sat_set | miss_set) != req_set:
+                _err(out, "emba.requirements", "REQUIREMENTS_INCONSISTENT",
+                     "required 必须等于 satisfied 与 missing 的并集")
+            if miss_set and obj.get("status") != "failed":
+                _err(out, "emba.requirements.missing", "REQUIREMENTS_INCONSISTENT",
+                     "存在 missing 时 status 必须为 failed")
 
     evidence = _list_of_dicts(out, obj, "emba", "evidence")
     ev_ids: set = set()
@@ -712,6 +752,7 @@ def validate_emba_import(obj: Any) -> List[Dict[str, str]]:
                      "port-response 必须引用 dynamic 证据")
 
     observations = _list_of_dicts(out, obj, "emba", "observations")
+    observed_facts: set = set()
     for i, row in enumerate(observations):
         path = f"emba.observations[{i}]"
         _req(out, row, path, "fact_id", str)
@@ -724,10 +765,18 @@ def validate_emba_import(obj: Any) -> List[Dict[str, str]]:
             _err(out, f"{path}.fact_id", "DANGLING_REF",
                  f"observations 引用了不存在的事实：{fid!r}")
         elif isinstance(fid, str) and fid in fact_by_id:
+            if fid in observed_facts:
+                _err(out, f"{path}.fact_id", "DUPLICATE_OBSERVATION",
+                     f"同一事实出现多条 observation：{fid!r}")
+            observed_facts.add(fid)
             ftype = fact_by_id[fid].get("type")
             if row.get("type") != ftype:
                 _err(out, f"{path}.type", "TYPE_MISMATCH",
                      f"观察类型 {row.get('type')!r} 与事实类型 {ftype!r} 不一致")
+    for fid in sorted(fact_ids):
+        if fid not in observed_facts:
+            _err(out, "emba.observations", "MISSING_OBSERVATION",
+                 f"事实缺少对应的 observation：{fid!r}")
 
     errors = _list_of_dicts(out, obj, "emba", "errors")
     for i, row in enumerate(errors):
@@ -804,7 +853,7 @@ def validate_emba_import(obj: Any) -> List[Dict[str, str]]:
     if status == "failed":
         fatal_codes = {"F50_MISSING", "F50_EMPTY", "F50_CORRUPT",
                        "EMBA_VERSION_MISSING", "EMBA_VERSION_MISMATCH",
-                       "FIRMWARE_MISMATCH"}
+                       "FIRMWARE_MISMATCH", "MISSING_REQUIRED_ARTIFACT"}
         if not any(row.get("code") in fatal_codes for row in errors):
             _err(out, "emba.status", "STATUS_INCONSISTENT",
                  "status=failed 但没有致命错误码")
