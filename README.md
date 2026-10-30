@@ -4,7 +4,7 @@
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">  
   <img alt="python" src="https://img.shields.io/badge/python-3.8%2B%20stdlib%20only-3776AB.svg?logo=python\&logoColor=white">  
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg">  
-  <img alt="files" src="https://img.shields.io/badge/package-84%20files%20%C2%B7%2028872%20lines-informational.svg">
+  <img alt="files" src="https://img.shields.io/badge/package-85%20files%20%C2%B7%2029103%20lines-informational.svg">
   <img alt="selftest" src="https://img.shields.io/badge/selftest-273%20assertions%20passing-brightgreen.svg">
   <img alt="agent" src="https://img.shields.io/badge/type-Agent%20Skill-7B42BC.svg">  
 </p>
@@ -50,7 +50,7 @@
 | CVE 当漏洞 | 组件版本命中就写「设备存在 XX 漏洞」                                   | 铁律 7 + 门禁 CVE 纪律检查（V0–V3）                           |
 | 深度不均    | 在静态图片上耗半天，放过 `upnpd` 的整数溢出                             | Tier 分层 + EALB 资源分配                                 |
 | 优先级不实   | CVSS 全给 9.8，需拆机的和 WAN 可达的排同一档                          | DKTSS 评分（减法模型，Friction 显式扣除利用阻力）                    |
-| 报告不可复现  | 每次格式不同、没有验证状态、缺字段                                      | 固定 7 区块模板 + CONFIRMED/HYPOTHESIS 两态 + 9 字段必填校验      |
+| 报告不可复现  | 每次格式不同、没有验证状态、缺字段                                      | 工作简报 + 固定 7 个技术区块模板 + CONFIRMED/HYPOTHESIS 两态 + 9 字段必填校验 |
 
 其中**前六个已被脚本机械化拦截**——不是写进提示词里「请模型不要忘」，而是由 `coverage_gate.py` 在 Phase 5 直接检查并 `exit 1` 拦下。后三个靠规则资产与评分模型约束。
 
@@ -110,7 +110,7 @@ flowchart TD
 - **Phase 2.5 · 覆盖矩阵** — 专治「声称 100% 实际漏审」。产出审阅清单，Phase 5 由门禁 diff 三方。
 - **Phase 3 · 三层审计** — Layer 1 机器扫广度（不用 LLM）；Layer 2 三轨（Track A 自下而上追 Sink，Track B 自上而下枚举入口，**Track C 跨请求污点**：NVRAM/文件/IPC 的写-读配对 + 动作依赖图，已在 DIR878 上跑通 Bridge 全流程复现：1188 键 / 35 条高阶）；Layer 3 语义链路验证（IDA / Ghidra / radare2）。
 - **Phase 4 · 动态验证** — 只做「能把 HYPOTHESIS 升成 CONFIRMED」的事。**判据在节点上**：先问要证明什么（整机可达 / sink 参数真值 / 内存破坏 / CVE 可达），再按 QEMU 启动反馈逐步修补或组合单二进制模拟与模糊测试。
-- **Phase 5 · 门禁、沉淀与报告** — 覆盖率门禁 + CVE 纪律检查 + 规则沉淀 + 固定 7 区块报告。
+- **Phase 5 · 门禁、沉淀与报告** — 覆盖率门禁 + CVE 纪律检查 + 规则沉淀 + 工作简报 + 固定 7 个技术区块报告。
 
 ### EALB：给固件估「工作量」，而不是估字节
 
@@ -260,6 +260,8 @@ uv run scripts/coverage_gate.py \
 ```
 
 **退出码 0 = 可出报告；非 0 = 有缺口**，缺口清单写入 `40-coverage.md` 的「待补审」节，回去补审再跑。
+
+报告开头必须先写一页「审计工作简报」：首句用固定状态词写范围与结果，然后写关键发现表、验证表、未做、待确认。关键发现最多 5 条，位置写到 `path:line` 或 `path:0xoffset`。规范见 [references/reporting-style.md](references/reporting-style.md)。
 
 `--profile strict` 会强制启用全部高级检查（G4/G5/G6/G7/Base），并要求 `--candidates`、`--review-list`、`--report`、`--entrypoints`、`--layer1`、`--manifest`、`--audit-task`、`--stages` 齐全；**任何必需检查未执行都判失败**，并在 `40-coverage.gate-config.json` 里记录本次到底跑了哪些检查、输入哈希与版本。扫描完整性、阶段状态、清单哈希、审计任务任一不一致都会写进 `blocked` 的机器可读原因码。
 
@@ -542,7 +544,8 @@ uv run scripts/emu_run.py --plan fw-audit/$TARGET/45-emu/plan.json \
 | `references/high-order-taint.md`  | 378 | **高阶污点专章**：AEH 三形态与阈值、IPF 三模型、BDG 两段污点、**OD-ICP 常量恢复**、控制消息双约束（集中性 10 + find_interval）、ADG 三类控制依赖、**欠约束符号执行参数与坑**、`taint-graph.json` 与 G7、无 IDA/angr 时的降级路径 |
 | `references/emulation-methodology.md` | 513 | **整机仿真主路径（不依赖 EMBA）**：P0 可行性、rootfs 归一化、ext2 镜像、QEMU/架构矩阵、启动阶梯、user-mode/TAP、证据与失败分类、预算 |
 | `references/emulation-fuzzing.md` | 390 | Phase 4 需要模拟与模糊的具体做法、踩坑与替代方案；完整方法论见上一行 |
-| `references/reporting.md`         | 353 | Phase 5 需要报告字段、评分表、脱敏规范、DKTSS、⑥↔④ 迁移规则、G6 写入面                              |
+| `references/reporting.md`         | 371 | Phase 5 需要报告字段、工作简报、评分表、脱敏规范、DKTSS、⑥↔④ 迁移规则、G6 写入面                              |
+| `references/reporting-style.md`   | 172 | **审计工作简报的受控中文规范**：10 个固定状态词、关键发现表、句子与证据规则、简报结构、示例、交付前自检 |
 | `references/vuln-conditions.md`   | 393 | **Layer 3 / Phase 4**：候选要不要升 `CONFIRMED`？按类型逐条排除成立条件 |
 | `references/sink-patterns.md`     | 257 | 需要扩充或理解静态扫描规则（含 `structural` 结构级规则 schema），或手写 grep / YARA                        |
 | `references/vuln-taxonomy.md`     | 218 | 需要按攻击面 / 漏洞类型逐项核查（后门账号、命令注入、OTA、MQTT、U-Boot…）        |
@@ -560,7 +563,7 @@ iot-firmware-vuln-hunting/
 ├── README.md
 ├── ROADMAP.md                    # V2 路线图：Blackboard / 契约 / 沙箱 / 适配器 / 真实基准
 ├── LICENSE
-├── references/                   # 11 篇按需加载的知识库
+├── references/                   # 12 篇按需加载的知识库
 │   ├── methodology.md            # 方法论层：Tier 规则 / EALB / 三层审计（Track A/B/C）/ 门禁判据完整定义
 │   ├── high-order-taint.md       # 高阶污点专章：AEH/IPF/BDG/ADG + OD-ICP + 符号执行参数 + G7 判据
 │   ├── atomic-capabilities.md    # 判据层 + 原子能力层：Phase 1/4 选路树 + 54 项原子能力 + 替代路径矩阵
@@ -570,6 +573,7 @@ iot-firmware-vuln-hunting/
 │   ├── emulation-methodology.md  # 整机仿真方法论：P0–P5 / 架构矩阵 / 镜像 / 启动阶梯 / 网络 / 证据与失败分类（不依赖 EMBA）
 │   ├── emulation-fuzzing.md      # 模拟与模糊测试实操
 │   ├── reporting.md              # 报告规范 + IoT 评分 + DKTSS
+│   ├── reporting-style.md        # 审计工作简报的受控中文规范（固定状态词 / 关键发现 / 证据 / 自检）
 │   ├── resource-index.md         # 外部资料索引：awesome-connected-things-sec 精编（按阶段映射）
 │   └── data-contracts.md         # 18 种 schema 的数据契约 + 黑板事件/状态机 + 沙箱策略/准入 + EMBA 导入 + strict 兼容边界
 ├── assets/
@@ -581,7 +585,7 @@ iot-firmware-vuln-hunting/
 │   ├── bench/                    # 合成基准集：manifest.json + samples/B-001…B-011
 │   ├── emba-sample/              # 合成 EMBA 日志夹具：F50/P99/S09/L15/L10/S115 + README
 │   ├── qemu/                     # QEMU 执行镜像 Dockerfile + real-run-malta/ 真实 rootfs 启动记录
-│   └── report-template.md        # 固定 7 区块报告模板
+│   └── report-template.md        # 工作简报 + 固定 7 个技术区块报告模板
 └── scripts/                      # 18 个纯标准库 Python 脚本
     ├── fw_triage.py
     ├── sink_scan.py

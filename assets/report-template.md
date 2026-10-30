@@ -1,6 +1,6 @@
 # <设备型号> 固件安全评估报告
 
-> 本模板为 Phase 5 的强制结构。**7 个区块不得缺项**；`<...>` 为占位符，`<!-- -->` 为填写指引，交付前删除指引。
+> 本模板为 Phase 5 的强制结构。**7 个技术区块不得缺项**；第 0 区块是「审计工作简报」，不计入 7 个技术区块。`<...>` 为占位符，`<!-- -->` 为填写指引，交付前删除指引。
 >
 > **每条漏洞（第 4 区块）必须包含 9 个必填字段**：类型 / 位置 / 优先级 / 置信度 / CVSS 3.1 / Source / Sink / 完整调用链 / 证据。`coverage_gate.py --report` 会逐条校验，缺任一字段即报告生成失败。
 
@@ -15,6 +15,39 @@
 | 文件大小 | <bytes / MB> |
 | 评估方 | <团队 / 人员> |
 | 授权依据 | <合同 / SRC 范围 / 自有设备> |
+
+---
+
+## 0. 审计工作简报
+
+<!-- 一页以内。按 references/reporting-style.md 写：首句状态词，然后关键发现、验证、未做、待确认。只写结果、证据、下一步，不叙述过程。 -->
+
+**状态**：<已完成 / 部分完成 / 进行中 / 阻塞 / 未开始 / 失败 / 跳过>：<审计范围与结果>。
+
+**关键发现**
+
+<!-- 最多 5 条；无发现写「无」；只写定位与状态，复现和影响见第 4、1 区块。 -->
+
+| ID | 位置 | 类型 | 优先级 | 置信度 | 验证状态 |
+|---|---|---|---|---|---|
+| <F-001> | `<path:line 或 path:0xoffset>` | <漏洞类型> | <P0–P3> | <CONFIRMED / HYPOTHESIS> | <已验证 / 未验证 / 未确认> |
+
+**验证**
+
+| 检查 | 方法 | 结果 | 范围与证据 |
+|---|---|---|---|
+| 覆盖率门禁 | `python scripts/coverage_gate.py --profile strict --plan <plan> --verified <verified> --report report.md --out 40-coverage.md` | <已验证 / 失败 / 跳过 / 未确认> | <T1/T2 覆盖率>；`40-coverage.md` |
+| Layer 1 扫描 | `python scripts/sink_scan.py <rootfs> --rules assets/sink-rules.json --json 10-layer1-sinks.json` | <已验证 / 未验证 / 失败> | verdict=<complete / scoped / partial / failed>；`10-layer1-sinks.json` |
+| 整机仿真 | <完整命令 / 未执行> | <已验证 / 未验证 / 失败 / 跳过> | <EMU-ID / 未取得内核>；`assets/qemu/...` |
+| 报告字段 | `python scripts/coverage_gate.py --plan <plan> --verified <verified> --report report.md --out 40-coverage.md` | <已验证 / 失败> | <9/9 字段>；`40-coverage.md` |
+
+**未做**
+
+- <未做的检查>：<原因>；下一步：<动作>。
+
+**待确认**
+
+1. <需要用户决定的事项>。选项：① <动作>，<后果>；② <动作>，<后果>。（推荐 ①）
 
 ---
 

@@ -20,7 +20,9 @@ agent_created: true
 | CVE 当漏洞 | 组件版本命中就写「设备存在 XX 漏洞」                                   | 铁律 7 + 门禁 CVE 纪律检查（V0-V3）                 |
 | 深度不均   | 在静态图片上耗半天，放过 `upnpd` 的整数溢出                             | Tier 分层 + EALB 资源分配                      |
 | 优先级不实  | CVSS 全给 9.8，需拆机的和 WAN 可达的排同一档                          | **DKTSS 评分**（减法模型，Friction 显式扣除利用阻力）      |
-| 报告不可复现 | 每次格式不同、没有验证状态、缺字段                                  | 固定 **7 区块**模板 + **CONFIRMED/HYPOTHESIS 两态** + **9 字段必填校验** |
+| 报告不可复现 | 每次格式不同、没有验证状态、缺字段                                  | **工作简报 + 固定 7 个技术区块**模板 + **CONFIRMED/HYPOTHESIS 两态** + **9 字段必填校验** |
+
+**汇报纪律**：向用户汇报审计结果、进度、阻塞或待决事项时，按 `references/reporting-style.md` 写。首句用固定状态词写范围与结果，随后写关键发现表（位置 / 类型 / 优先级 / 置信度 / 验证状态）、验证、未做、待确认。只写结果、证据、下一步，不叙述过程，不写无依据推测。`report.md` 第 0 区块使用同一规范。
 
 **核心思路**（迁移自大可实验室《AI 挖 Java 0day 不再靠运气》上篇的流水线设计 + 下篇的质量保障机制）：Skill 不教模型「什么是命令注入」，那是它已知的；Skill 给它装上**资深固件审计员的工作骨架**——定义流程、分配资源、设置护栏、标准化输出，并把中间状态持久化到文件系统，不信任模型的记忆。文章里的「6 阶段流水线 + EALOC 分层 + 三层审计架构 + 双轨模型」在固件场景下逐条对应为下面的 Phase 0-5、EALB、Layer 1-3 与 Track A/B/C（Track C 为固件专有的**跨请求污点**轨，见 Phase 3 Layer 2）；下篇的「覆盖矩阵、CONFIRMED/HYPOTHESIS、漏洞成立条件表、DKTSS、报告必填字段」对应为 Phase 2.5、`vuln-conditions.md`、`reporting.md` §3.1 与 `coverage_gate.py` 的机械化门禁。
 
@@ -30,7 +32,7 @@ agent_created: true
 
 | 层 | 固化什么 | 承载位置 |
 |---|---|---|
-| **方法论层** | 决策逻辑、优先级、证据标准、降级策略、交付规范 | 本文件（七条铁律、Phase 0–5、EALB、三轨审计、G1–G7 门禁）· `references/methodology.md` · `references/reporting.md`（DKTSS / 7 区块） |
+| **方法论层** | 决策逻辑、优先级、证据标准、降级策略、交付规范 | 本文件（七条铁律、Phase 0–5、EALB、三轨审计、G1–G7 门禁）· `references/methodology.md` · `references/reporting.md`（DKTSS / 工作简报 + 7 个技术区块） |
 | **决策判据层** | **识别到什么特征 → 走哪条路**，以及失败反馈信号 | `references/atomic-capabilities.md` **§3**（Phase 1 提取选路树、Phase 4 仿真选路树） |
 | **原子能力层** | **单个可调用的操作**：能力 / 实现方式 / 输入输出 | `references/atomic-capabilities.md` **§1–§9**（54 项原子能力：侦察、提取、内容扫描、文件系统侦察、二进制分析、动态验证、网络、硬件） |
 
@@ -944,10 +946,11 @@ uv run scripts/entrypoints_init.py --tiering fw-audit/<target>/02-tiering.json \
 
 每条规则注明来源 finding ID 与命中条件，避免「规则越加越多、噪声越来越大」。
 
-#### 5.3 报告（固定 7 区块，不得缺项）
+#### 5.3 报告（工作简报 + 固定 7 个技术区块，不得缺项）
 
-模板见 `assets/report-template.md`：
+模板见 `assets/report-template.md`。报告开头必须先写第 0 区块「审计工作简报」，一页以内，按 `references/reporting-style.md`：首句用固定状态词写范围与结果，然后写关键发现表、验证表、未做、待确认。只写结果、证据、下一步，不写过程。「已完成」不得当成「已验证」。
 
+0. **审计工作简报**：状态词 + 关键发现表 + 验证表 + 未做 + 待确认；关键发现不超过 5 条，位置写到 `path:line` 或 `path:0xoffset`；不计入 7 个技术区块
 1. **执行摘要**：目标、固件版本、攻击面概览、漏洞数量按优先级分布、最严重 3 条
 2. **目标与范围**：镜像 SHA256、提取方式、审计范围、覆盖率数字、未覆盖项及理由
 3. **攻击面地图**：监听服务与端口、Web/CGI 路径、协议栈、启动服务、硬件接口、云侧对接
@@ -993,7 +996,8 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 | `references/sink-patterns.md` | 需要扩充或理解静态扫描规则，或手写 grep / YARA |
 | `references/emulation-methodology.md` | **Phase 4 整机仿真主路径**：P0–P5、架构/QEMU 矩阵、镜像构建、启动阶梯、网络模型、证据与失败分类；不依赖 EMBA |
 | `references/emulation-fuzzing.md` | Phase 4 需要模拟与模糊的具体做法、踩坑与替代方案 |
-| `references/reporting.md` | Phase 5 需要报告字段、评分表、脱敏规范 |
+| `references/reporting.md` | Phase 5 需要报告字段、工作简报、评分表、脱敏规范 |
+| `references/reporting-style.md` | **审计工作简报的受控中文规范**：10 个固定状态词、关键发现表、句子与证据规则、简报结构、示例、交付前自检 |
 | `references/resource-index.md` | 需要外部资料：awesome-connected-things-sec 精编索引（按阶段映射） |
 | `references/data-contracts.md` | **跨阶段数据契约**：18 种 schema——FirmwareManifest / AuditTask / Candidate / Finding / Evidence（含 `evidence/1.1` 归一化） / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / EmbaImport / EmulationPlan / Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent 的字段、版本规则、strict 兼容边界、黑板事件与状态机、**沙箱策略/资源准入/执行路径清单**、EMBA 导入、迁移清单 |
 

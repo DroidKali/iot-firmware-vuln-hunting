@@ -6,7 +6,7 @@
 
 | 层 | 固化什么 | 承载文件 |
 |---|---|---|
-| **方法论层** | 决策逻辑、优先级、证据标准、降级与交付规范 | `SKILL.md` 七条铁律 · `references/methodology.md`（EALB / 三轨审计 / B1–B12）· `references/reporting.md`（DKTSS / 7 区块） |
+| **方法论层** | 决策逻辑、优先级、证据标准、降级与交付规范 | `SKILL.md` 七条铁律 · `references/methodology.md`（EALB / 三轨审计 / B1–B12）· `references/reporting.md`（DKTSS / 工作简报 + 7 个技术区块） |
 | **决策判据层** | **识别到什么特征 → 走哪条路**（含失败信号与回退条件） | **本文件 §3**（Phase 1 提取选路树、Phase 4 仿真选路树） |
 | **原子能力层** | **单个可调用的操作**（能力、实现方式、输入输出） | **本文件 §1、§4–§9** |
 
