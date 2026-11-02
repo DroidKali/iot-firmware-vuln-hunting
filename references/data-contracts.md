@@ -1,8 +1,8 @@
-# 数据契约（FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / SandboxRun / BenchManifest / EmbaImport / EmulationPlan / 黑板对象 / 执行路径）
+# 数据契约（FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / SandboxRun / BenchManifest / EmbaImport / EmulationPlan / QilingPlan / QilingEvent / QilingImport / 黑板对象 / 执行路径）
 
 本文件定义跨阶段传递的结构化数据，以及**校验入口、版本规则、兼容模式边界**。目标是消除「同一事实在 plan、报告、gate-config 里三种写法」的漂移：任何下游脚本要消费上游产物时，先看 schema 版本，再按本文件取字段。
 
-配套校验器：`scripts/contracts.py`（纯标准库）。`--list` 当前列出 18 种 schema；候选的整文件 envelope 由 `candidates` 文档校验器单独处理。
+配套校验器：`scripts/contracts.py`（纯标准库）。`--list` 当前列出 21 种 schema；候选的整文件 envelope 由 `candidates` 文档校验器单独处理。
 
 ```bash
 # 列出支持的所有 schema
@@ -188,7 +188,7 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 
 ### 8.1 SandboxPolicy（`sandbox-policy/1.0`）
 
-由 `scripts/resource_manager.py` 校验，**不在 `contracts.py` 的 18 种 schema 内**。策略是运维配置，不是每次运行的产物；其规范化 JSON 的 sha256 写入 `admission.policy_sha256`，用于证明「这次执行用的是哪份策略」。
+由 `scripts/resource_manager.py` 校验，**不在 `contracts.py` 的 21 种 schema 内**。策略是运维配置，不是每次运行的产物；其规范化 JSON 的 sha256 写入 `admission.policy_sha256`，用于证明「这次执行用的是哪份策略」。
 
 | 字段 | 默认 | 约束 | 说明 |
 |---|---|---|---|
@@ -222,7 +222,7 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 
 `scripts/exec_paths.py` 用 AST 扫描 `scripts/*.py` 的子进程调用，防止新增执行路径绕过统一入口。字段：`schema` / `tool` / `version` / `generated_at` / `root` / `files_scanned` / `total_paths` / `counts` / `ok` / `paths` / `unclassified`。每条 path 记录 `file` / `line` / `api` / `scope` / `call` / `classification` / `input_trust` / `note`。
 
-分类：`sandbox-boundary`（固件执行边界，必须经 `sandbox_run.py`）、`host-static-analyzer`（只解析不可信字节、不执行）、`trusted-metadata`（可信本地元数据）、`test-harness`、`inventory`。出现未知文件即 `unclassified` 并退出 1。当前 18 个脚本共 10 条调用；`sink_scan.py:131` / `sink_scan.py:148` 的 ast-grep / semgrep 仍是 `host-static-analyzer`，是已知残留风险（只解析、不执行）。
+分类：`sandbox-boundary`（固件执行边界，必须经 `sandbox_run.py`）、`host-static-analyzer`（只解析不可信字节、不执行）、`trusted-metadata`（可信本地元数据）、`test-harness`、`inventory`。出现未知文件即 `unclassified` 并退出 1。当前 20 个脚本共 11 条调用；`sink_scan.py:131` / `sink_scan.py:148` 的 ast-grep / semgrep 仍是 `host-static-analyzer`，是已知残留风险（只解析、不执行）。
 
 ## 9. BenchManifest / BenchResult（`bench-manifest/1.0` / `bench-result/1.0`）
 
@@ -532,3 +532,68 @@ EMBA 日志的**离线**解析结果，由 `scripts/adapter_emba.py parse` 产�
 - 产物与哈希：`assets/qemu/real-run-malta/`，含计划、结果、沙箱报告、串口与 `README.md`。
 
 该记录只支持「真实 rootfs 用户态启动到 shell」；不证明完整固件、厂商原机行为、网络/服务或漏洞成立。
+
+## 19. QilingPlan / QilingEvent / QilingImport（`qiling-*/1.0`）与定向仿真边界
+
+Qiling 分支用于「目标二进制明确、依赖可构建、可用受控输入定向验证」的用户态执行。三个 schema 分别约束计划、归一化事件和交付包；适配器 `scripts/adapter_qiling.py` 只做计划与离线解析，容器内 runner `scripts/qiling_runner.py` 只由 `scripts/sandbox_run.py` 启动。**计划 ready 只表示参数齐全，不代表能跑，更不代表漏洞成立。**
+
+### 19.1 QilingPlan（`qiling-plan/1.0`）
+
+| 字段 | 类型 | 必需 | 说明 |
+|---|---|---|---|
+| `schema` / `tool` / `version` | string | ✅ | `qiling-plan/1.0` 与生成器版本 |
+| `plan_id` | string | ✅ | `QPL-` 加 12 位十六进制；由计划内容（去掉 `plan_id`）派生 |
+| `status` | enum | ✅ | `ready` / `blocked`；`ready` 不得带 blockers，`blocked` 必须 blockers 非空 |
+| `run_id` / `intent_id` / `firmware_sha256` | string | ready 必需 | 绑定审计运行与 Intent；固件哈希必须 64 位十六进制 |
+| `firmware_root` | string | ✅ | 容器内固件挂载根；目标与 rootfs 必须在其中 |
+| `target` | object | ✅ | `{host_path, container_path, sha256, size, arch, bits, endian, elf_type, interpreter, needed, inside_rootfs}`；`interpreter` 可为 null |
+| `rootfs` | object | ✅ | `{host_path, container_path, file_count}` |
+| `runtime` | object | ✅ | `{backend: qiling, image, network: none, mode: sandbox, python}` |
+| `execution` | object | ✅ | `{argv, guest_argv0, target, rootfs, env, stdin, stdin_host}`；`argv` 使用容器内路径 |
+| `hooks` | array | ✅ | 每项 `{mechanism: syscall / api / libc / address, name, phase: enter / exit, args, signature}`；`args[]` 为 `{name, kind: string / string_array / int / hex / pointer}`；同一 mechanism+name+phase 不得重复 |
+| `filters` | object | ✅ | `{version, trigger_markers, sink_hooks, max_events, max_string}`；ready 计划必须至少各有一个 trigger marker 与 sink hook |
+| `budget` | object | ✅ | `{timeout_s}`；必须给出正整数 |
+| `blockers` / `limitations` | array | ✅ / — | blocker 为 `{code, message, next_action}`，不能只写「失败」；`limitations` 可选 |
+
+**blocker 码**：`FIRMWARE_ROOT_MISSING`、`TARGET_MISSING`、`ROOTFS_MISSING`、`TARGET_OUTSIDE_FIRMWARE`、`ROOTFS_OUTSIDE_FIRMWARE`、`TARGET_OUTSIDE_ROOTFS`、`ARCH_UNSUPPORTED`、`INTERPRETER_MISSING`、`LIBRARY_MISSING`、`TARGET_HASH_MISMATCH`、`RUN_ID_MISSING`、`INTENT_ID_MISSING`、`FIRMWARE_SHA_MISSING`、`BAD_ENV`、`STDIN_MISSING`、`TRIGGER_MARKERS_MISSING`、`SINK_HOOKS_MISSING`。没有触发标记或 sink Hook 时计划必须阻断，否则事件永远无法区分「普通运行」与「触发」。
+
+### 19.2 QilingEvent（`qiling-event/1.0`）
+
+| 字段 | 类型 | 必需 | 说明 |
+|---|---|---|---|
+| `schema` / `event_id` / `seq` | string / string / int | ✅ | `qiling-event/1.0`；`event_id=QE-` 加 12 位十六进制；`seq` 从 1 起 |
+| `run_id` / `firmware_sha256` | string | ✅ | 必须与导入包、黑板一致 |
+| `mechanism` | enum | ✅ | `syscall` / `api` / `libc` / `other`；`system()` 是 API Hook，`execve` 是 syscall Hook，不得混写 |
+| `hook` / `phase` | string / enum | ✅ | Hook 名；`enter` / `exit` |
+| `classified_as` | enum | ✅ | `sink-hit` / `observed` / `failure` |
+| `trigger` | bool | ✅ | `sink-hit` 必须为 true；`observed` / `failure` 不得为 true |
+| `args` | object | ✅ | 归一化后的 Hook 参数；长字符串按 `max_string` 截断 |
+| `source` | object | ✅ | `{path, line}`，指向原始事件日志，便于追溯 |
+| `filter` | object | ✅ | `{version, rule_id, reason}`；`sink-hit` 的 `rule_id` 必须是 `trigger-marker` |
+| `context` | object | — | PC、架构、位宽、线程等上下文 |
+
+**判定权在适配器**：适配器重算 trigger（参数中任一字符串包含 trigger marker），并且只有 Hook 属于 `sink_hooks` 且命中标记才归为 `sink-hit`。runner 自报 `sink-hit` 但未命中时降级为 `observed` 并写 warning；普通 `connect()`、`open()` 等运行事件只能是 `observed`。
+
+### 19.3 QilingImport（`qiling-import/1.0`）
+
+| 字段 | 说明 |
+|---|---|
+| `schema` / `adapter{name,version}` | 导入包版本与适配器信息 |
+| `run_id` / `intent_id` / `firmware_sha256` | 全包绑定；result、events、evidence、facts 任一不一致即拒绝 |
+| `status` | `parsed` / `partial` / `failed`；`parsed` 时 `errors` 必须为空，不完整不得伪装完整 |
+| `plan_id` / `backend{name,version,image}` | 计划 ID 与 Qiling 后端版本、镜像 |
+| `execution` | `{mode: sandbox / offline, host_fallback: false, sandbox}`；`host_fallback` 不是 false 即 `POLICY` 失败 |
+| `result` | EmulationResult；FAILED/BLOCKED/TIMED_OUT → 导入 `failed`，PARTIAL → `partial`，SUCCESS 不得标 `failed` |
+| `events` / `evidence` / `facts` | 逐项按各自 schema 校验并查重；fact 的 `evidence_refs` 与 result 的 `evidence_refs` 不得悬空 |
+| `errors` / `limitations` / `filters` | 解析错误、已知限制、生效过滤规则 |
+| `counts` | `events` / `sink_hits` / `observed` / `failure_events` / `parse_errors` / `evidence` / `facts` 及 `by_mechanism` / `by_classification`；必须与实际数组交叉一致 |
+
+### 19.4 执行与证据边界
+
+- **唯一执行入口**：`adapter_qiling.py run` 只调用 `sandbox_run.py`；容器参数、资源策略、槽位与预算都由沙箱决定，适配器不能放宽。计划被阻断时直接写 BLOCKED，不启动沙箱。
+- **状态不混淆**：沙箱报告 `mode` 不是 `sandbox`（例如 host）或 `host_fallback=true` → `BLOCKED` 且 `failure.category=policy-blocked`；计划自身阻断 → `BLOCKED` 且 `plan-blocked`；沙箱不可用或准入拒绝 → `BLOCKED` 且 `sandbox-unavailable`；超时 → `TIMED_OUT`；runner 崩溃或退出非 0 → `FAILED`。这些状态不能互相顶替。
+- **证据只来自命中**：目标文件生成 static 证据，运行本身生成 emulation 证据，只有 `sink-hit` 事件生成漏洞证据；`observed` 事件不生成证据，不产生 finding。`SUCCESS` 只表示 runner 正常结束，不等于漏洞成立，也不能让候选直接进入 `validated` / `confirmed`。
+- **原始日志可追溯**：`events[].source.path` 指向 runner 的原始 JSONL；`filter.version/rule_id` 固定过滤规则版本。事件被截断时导入状态必须是 `partial`。
+- **退出码**：`0` 正常、`1` 解析失败/FAILED、`2` 用法、`3` 计划阻断或 BLOCKED、`4` 策略拒绝、`5` 资源准入拒绝、`124` 超时。
+
+**当前验证边界（不得省略）**：2026-11-02 已在 Ubuntu 24.04.5 + Docker 29.9.2 + Qiling 1.4.6 上真实执行 `qiling_runner.py`；静态 MIPS 受控目标 `qltest-static` 产出 1 条 sink-hit、`SUCCESS` 结果、3 条 evidence / 3 条 fact，并成功导入黑板（evidence 4 / facts 4 / intents 1 / emulation_results 1，`verify` 通过）。原始产物、哈希与复现命令见 `assets/qiling/real-run-static/README.md`。同一链路对固件原始动态 musl `busybox` 为 `FAILED / memory-error / UC_ERR_WRITE_UNMAPPED`，无 sink-hit；该失败是 Qiling 1.4.6 的映射/重定位缺陷，不构成对 busybox 的安全性判断。对固件原始动态 `/usr/sbin/pineapd` 的六组执行（基础 1.4.6、`__do_open` 错误码 patched、TLB 刷新、Unicorn 2.1.2、patched + Unicorn 2.1.2、patched + `LD_LIBRARY_PATH`）也全部为 `FAILED / memory-error`、`sink_hit=0`，基础镜像在 `0x47d6d0c` 触发 `UC_ERR_READ_UNMAPPED`，patched 组在 `0x482d7e0` 附近触发 `UC_ERR_WRITE_UNMAPPED`，均未到达 `main`；原始产物、镜像 id、事件与哈希见 `assets/qiling/real-run-pineapd/README.md`，该失败不构成对 pineapd 的安全性判断。第 25 组仍使用合成 MIPS ELF 与假 sandbox，只证明计划、过滤、归一化、状态分类、Hook 安装边界与黑板导入，不替代真实执行。另有一个已知边界：blocked 计划若缺 `firmware_sha256`，`qiling-import` 仍要求 64 位哈希，会把该计划判为契约失败。

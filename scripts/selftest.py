@@ -32,7 +32,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 FAILS: list = []
 TOTAL = 0          # 实际执行的断言数：由脚本自己报，避免文档里的数字靠数日志漂移
-NGROUPS = 24       # 组数：与各处 [N/24] 表头一致，末尾会自校验，防止「13 组」再次漂移
+NGROUPS = 25       # 组数：与各处 [N/24] 表头一致，末尾会自校验，防止「13 组」再次漂移
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -301,7 +301,7 @@ def main() -> int:
         with open(p, "w", encoding="utf-8", newline="\n") as f:
             f.write(txt)
 
-    print("\n[1/24] fw_triage.py — 度量 / 加固画像 / 分层")
+    print("\n[1/25] fw_triage.py — 度量 / 加固画像 / 分层")
     r = run([os.path.join(HERE, "fw_triage.py"), img, "--rootfs", root, "--tier",
              "--budget", "800", "--out", metrics, "--plan", plan, "--pretty"])
     check("fw_triage 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
@@ -329,7 +329,7 @@ def main() -> int:
     check("T3 含 www/index.html", "www/index.html" in set(t["t3_list"]))
     check("EALB > 0", t["ealoc_total"] > 0, str(t["ealoc_total"]))
 
-    print("\n[2/24] sink_scan.py — Layer 1 危险模式扫描")
+    print("\n[2/25] sink_scan.py — Layer 1 危险模式扫描")
     r = run([os.path.join(HERE, "sink_scan.py"), root, "--json", sinks])
     check("sink_scan 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
     if r.returncode != 0:
@@ -343,19 +343,19 @@ def main() -> int:
     check("etc/passwd 不再误报 P1-S-020", ("P1-S-020", "etc/passwd") not in key)
     check("文档目录被跳过", not any(f["file"].startswith("usr/share/doc") for f in sd["findings"]))
 
-    print("\n[3/24] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
+    print("\n[3/25] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vpart, "--tiering", tiering])
     check("不完整输入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
 
-    print("\n[4/24] coverage_gate.py — 覆盖率门禁（完整应通过）")
+    print("\n[4/25] coverage_gate.py — 覆盖率门禁（完整应通过）")
     out = os.path.join(base, "40-coverage.md")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vfull, "--tiering", tiering, "--out", out])
     check("完整输入 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("门禁报告已生成", os.path.isfile(out))
 
-    print("\n[5/24] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
+    print("\n[5/25] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
     bad_rep = os.path.join(base, "report-bad.md")
     with open(bad_rep, "w", encoding="utf-8") as fh:
         fh.write(
@@ -443,7 +443,7 @@ def main() -> int:
     check("⑥ 保留指针行（移动语义）→ 退出码 0", r.returncode == 0,
           r.stdout.strip()[-200:])
 
-    print("\n[6/24] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
+    print("\n[6/25] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
     review_bad = os.path.join(base, "25-review-list.md")
     with open(review_bad, "w", encoding="utf-8") as fh:
         fh.write("- [x] `www/cgi-bin/ping.cgi`\n"     # 有结论 → OK
@@ -475,7 +475,7 @@ def main() -> int:
     check("审阅清单一致 → 退出码 0", r.returncode == 0,
           r.stdout.strip()[-160:])
 
-    print("\n[7/24] coverage_gate.py — 报告 9 必填字段校验")
+    print("\n[7/25] coverage_gate.py — 报告 9 必填字段校验")
     f_bad = os.path.join(base, "report-fields-bad.md")
     with open(f_bad, "w", encoding="utf-8") as fh:
         fh.write(
@@ -511,7 +511,7 @@ def main() -> int:
     check("9 字段齐全 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("报告模板字段不误报", _template_fields_clean())
 
-    print("\n[8/24] coverage_gate.py — G4 入口级覆盖（文件级 100% ≠ 入口级 100%）")
+    print("\n[8/25] coverage_gate.py — G4 入口级覆盖（文件级 100% ≠ 入口级 100%）")
     tj_g4 = os.path.join(base, "02-tiering-g4.json")
     with open(tj_g4, "w", encoding="utf-8") as fh:
         json.dump({"rootfs_analysis": {"tiering": {"shards": [{"items": [
@@ -553,7 +553,7 @@ def main() -> int:
              "--entrypoints", ep_ok, "--out", os.path.join(base, "40-g4c.md")])
     check("入口枚举 + 全部处置 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
 
-    print("\n[9/24] coverage_gate.py — G5 绕过矩阵（「有防护」≠「防护有效」）")
+    print("\n[9/25] coverage_gate.py — G5 绕过矩阵（「有防护」≠「防护有效」）")
     vp_bad = os.path.join(base, "30-claim-bad.md")
     with open(vp_bad, "w", encoding="utf-8") as fh:
         fh.write("# 结论\n\n## F-001 · x\n\n- 影响: 已鉴权，不可利用\n")
@@ -583,7 +583,7 @@ def main() -> int:
     check("G5 端到端接入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
     check("检出绕过矩阵缺失", "绕过矩阵完备（G5）" in open(out_g5, encoding="utf-8").read())
 
-    print("\n[10/24] coverage_gate.py — G6 跨请求污点溯源（持久化来源须声明写入面）")
+    print("\n[10/25] coverage_gate.py — G6 跨请求污点溯源（持久化来源须声明写入面）")
     _F = ("- **类型**：命令注入\n- **位置**：`usr/sbin/httpd:0x1`\n- **优先级**：P1\n"
           "- **置信度**：CONFIRMED\n- **CVSS 3.1**：`AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H` = 9.8\n"
           "{src}- **Sink**：system()\n- **完整调用链**：1. a @0x1\n- **证据**：`[E1]` disasm\n")
@@ -618,7 +618,7 @@ def main() -> int:
              os.path.join(base, "40-g6b.md")])
     check("声明写入面端到端 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
 
-    print("\n[11/24] coverage_gate.py — G1/G2/G3 自动修复 + 类型→Base 命中")
+    print("\n[11/25] coverage_gate.py — G1/G2/G3 自动修复 + 类型→Base 命中")
     out_rec = os.path.join(base, "40-recover.md")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vpart, "--tiering", tiering,
@@ -652,7 +652,7 @@ def main() -> int:
     check("可映射类型 → 不报",
           not _cg.check_type_base(rep_mapped, base_md)["unmapped"])
 
-    print("\n[12/24] sink_scan.py — 结构级二次过滤（正则初筛 → 结构确认 / 否定 / 回退）")
+    print("\n[12/25] sink_scan.py — 结构级二次过滤（正则初筛 → 结构确认 / 否定 / 回退）")
     if HERE not in sys.path:
         sys.path.insert(0, HERE)
     import sink_scan as _ss  # noqa
@@ -731,7 +731,7 @@ def main() -> int:
         _ss.structural_match = _orig_sm
 
     # ── 13. 扫描完整性 + 门禁严格性（改进计划 §3 / §4 / §6 的回归）──────────
-    print("\n[13/24] 扫描完整性与门禁严格性")
+    print("\n[13/25] 扫描完整性与门禁严格性")
 
     sz = os.path.join(base, "scanint")
     os.makedirs(sz, exist_ok=True)
@@ -893,7 +893,7 @@ def main() -> int:
     check("组数常量与表头数量一致", n_hdr == NGROUPS, f"表头 {n_hdr} / 常量 {NGROUPS}")
 
     # ── 15. 高阶污点图：写面/读面必须分属不同 action ──────────────────────────
-    print("\n[15/24] taint_graph.py — 跨请求污点图（BDG/ADG）与 G7 门禁")
+    print("\n[15/25] taint_graph.py — 跨请求污点图（BDG/ADG）与 G7 门禁")
     tg = os.path.join(base, "tg")
     os.makedirs(tg, exist_ok=True)
     TG = os.path.join(HERE, "taint_graph.py")
@@ -1074,7 +1074,7 @@ def main() -> int:
           and r.returncode != 0, f"{row.get('status')}/{row.get('required')}")
 
     # ── 16. 候选输入契约：解析失败必须可见，strict 只吃版本化输入 ─────────────
-    print("\n[16/24] 候选输入契约：解析失败可见 / strict 只接受版本化输入")
+    print("\n[16/25] 候选输入契约：解析失败可见 / strict 只接受版本化输入")
     cd16 = os.path.join(base, "cand")
     os.makedirs(cd16, exist_ok=True)
 
@@ -1174,7 +1174,7 @@ def main() -> int:
           f"rc={rr.returncode}")
 
     # ── 17. 扫描完整性 / 阶段状态 / 结构引擎：降级可见，且 strict 能阻断 ─────
-    print("\n[17/24] 扫描完整性与阶段状态：降级可见、可阻断")
+    print("\n[17/25] 扫描完整性与阶段状态：降级可见、可阻断")
     sd17 = os.path.join(base, "scangate")
     os.makedirs(sd17, exist_ok=True)
     layer1_partial = os.path.join(sz, "out2.json")
@@ -1285,7 +1285,7 @@ def main() -> int:
           f"{row.get('status')}/{row.get('required')} rc={rr.returncode}")
 
     # ── 18. 结构化契约 / 固件清单 / EALB 校准 ────────────────────────────────
-    print("\n[18/24] 契约校验（contracts.py）、FirmwareManifest、EALB 校准")
+    print("\n[18/25] 契约校验（contracts.py）、FirmwareManifest、EALB 校准")
     cd18 = os.path.join(base, "contracts")
     os.makedirs(cd18, exist_ok=True)
     CONTRACTS = os.path.join(HERE, "contracts.py")
@@ -1410,7 +1410,7 @@ def main() -> int:
           json.dumps((ee.get("targets") or {}).get("minutes") or {},
                      ensure_ascii=False))
 
-    print("\n[19/24] sandbox_run.py — 不可信固件的隔离边界（fail-closed）")
+    print("\n[19/25] sandbox_run.py — 不可信固件的隔离边界（fail-closed）")
     SANDBOX = os.path.join(HERE, "sandbox_run.py")
     sb_dir = os.path.join(base, "sandbox")
     os.makedirs(sb_dir, exist_ok=True)
@@ -1476,7 +1476,7 @@ def main() -> int:
           rr.returncode == 4, f"rc={rr.returncode}")
 
     # ── 20. 基准评估：指标可复算、严格模式不吞未复核标签、回归可阻断 ──────────
-    print("\n[20/24] bench_eval.py — 基准评估（precision/recall/回归阻断）")
+    print("\n[20/25] bench_eval.py — 基准评估（precision/recall/回归阻断）")
     BENCH = os.path.join(HERE, "bench_eval.py")
     bench_manifest = os.path.join(os.path.dirname(HERE), "assets", "bench", "manifest.json")
     bd = os.path.join(base, "bench")
@@ -1558,7 +1558,7 @@ def main() -> int:
               f"rc={rr.returncode} reasons={db.get('regression_reasons')}")
 
     # ── 21. 黑板：契约 / 事件日志 / 快照恢复 / 状态机 ────────────────────────
-    print("\n[21/24] board_* — 黑板契约、事件日志、快照恢复与状态转换")
+    print("\n[21/25] board_* — 黑板契约、事件日志、快照恢复与状态转换")
     BOARD = os.path.join(HERE, "board_store.py")
     BEV = os.path.join(HERE, "board_events.py")
     BTR = os.path.join(HERE, "board_transitions.py")
@@ -1884,7 +1884,7 @@ def main() -> int:
               for e in st21.get("emulation_results") or [])
           and run([BOARD, "verify", "--workspace", ws21]).returncode == 0)
 
-    print("\n[22/24] resource_manager.py — 资源准入、并发排队与执行路径清单")
+    print("\n[22/25] resource_manager.py — 资源准入、并发排队与执行路径清单")
     RM = os.path.join(HERE, "resource_manager.py")
     EXECP = os.path.join(HERE, "exec_paths.py")
     q22 = os.path.join(base, "resource22")
@@ -2104,7 +2104,7 @@ def main() -> int:
           rr.returncode == 1 and _r22(bad_out).get("ok") is False,
           f"rc={rr.returncode}")
 
-    print("\n[23/24] adapter_emba.py — 离线解析 EMBA 产物、三类观察与黑板导入")
+    print("\n[23/25] adapter_emba.py — 离线解析 EMBA 产物、三类观察与黑板导入")
     ADAPTER = os.path.join(HERE, "adapter_emba.py")
     q23 = os.path.join(base, "emba23")
     src23 = os.path.join(os.path.dirname(HERE), "assets", "emba-sample")
@@ -2390,7 +2390,7 @@ def main() -> int:
           and "REQUIREMENTS_INCONSISTENT" in rr_br.stdout,
           f"rc={rr_br.returncode}")
 
-    print("\n[24/24] emu_plan.py / emu_run.py — M4 计划、沙箱执行与结果分类")
+    print("\n[24/25] emu_plan.py / emu_run.py — M4 计划、沙箱执行与结果分类")
     EMUPLAN = os.path.join(HERE, "emu_plan.py")
     EMURUN = os.path.join(HERE, "emu_run.py")
     q24 = os.path.join(base, "m4")
@@ -2625,6 +2625,283 @@ sys.exit(0)
           and (res_panic.get("emulation_id") != res_part.get("emulation_id")),
           f"{res_ok.get('emulation_id')} / {res_panic.get('emulation_id')}")
 
+    print("\n[25/25] adapter_qiling.py — 计划、事件过滤、证据归一化与黑板导入")
+    ADAPTERQ = os.path.join(HERE, "adapter_qiling.py")
+    q25 = os.path.join(base, "qiling25")
+    fw25 = os.path.join(q25, "fw")
+    rootfs25 = os.path.join(fw25, "rootfs")
+    os.makedirs(os.path.join(rootfs25, "usr", "sbin"), exist_ok=True)
+    tgt25 = os.path.join(rootfs25, "usr", "sbin", "httpd")
+    with open(tgt25, "wb") as fh:
+        fh.write(b"\x7fELF" + bytes([1, 1, 1, 0]) + b"\x00" * 8
+                 + struct.pack("<HHIIIIIHHHHHH", 2, 8, 1, 0, 52, 0, 0,
+                               52, 32, 0, 0, 0, 0))
+    os.chmod(tgt25, 0o755)
+    RUN25 = "RUN-QL-25"
+    INTENT25 = "INTENT-QL-25"
+    FW25 = "d" * 64
+
+    def _w25(name: str, obj) -> str:
+        path = os.path.join(q25, name)
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(obj, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+        return path
+
+    def _r25(path: str):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return {}
+
+    def _qplan25(name: str, marker: bool = True):
+        out = os.path.join(q25, name + ".json")
+        args = [ADAPTERQ, "plan", "--target", tgt25, "--firmware-root", fw25,
+                "--rootfs", rootfs25, "--run-id", RUN25,
+                "--intent-id", INTENT25, "--firmware-sha256", FW25,
+                "--json", out, "--quiet"]
+        if marker:
+            args += ["--trigger-marker", "MAGIC"]
+        rr = run(args)
+        return rr, _r25(out), out
+
+    rr_plan25, plan25, plan25_path = _qplan25("plan")
+    check("adapter_qiling：合成 MIPS rootfs 生成 ready 计划，过滤标记写入 filters",
+          rr_plan25.returncode == 0 and plan25.get("status") == "ready"
+          and (plan25.get("filters") or {}).get("trigger_markers") == ["MAGIC"]
+          and str(plan25.get("plan_id") or "").startswith("QPL-"),
+          f"rc={rr_plan25.returncode} plan={plan25.get('plan_id')}")
+    check("adapter_qiling：ready 计划通过 qiling-plan 契约",
+          run([CONTRACTS, "--kind", "qiling-plan",
+               "--file", plan25_path]).returncode == 0)
+
+    rr_nomark, plan_nomark, _ = _qplan25("plan-no-marker", marker=False)
+    nomark_codes = [b.get("code") for b in plan_nomark.get("blockers") or []]
+    check("adapter_qiling：没有 trigger_marker → blocked + TRIGGER_MARKERS_MISSING（rc3）",
+          rr_nomark.returncode == 3 and plan_nomark.get("status") == "blocked"
+          and "TRIGGER_MARKERS_MISSING" in nomark_codes,
+          f"rc={rr_nomark.returncode} codes={nomark_codes}")
+
+    events25 = os.path.join(q25, "events.jsonl")
+    raw25 = [
+        {"seq": 1, "mechanism": "syscall", "hook": "connect", "phase": "enter",
+         "args": {"addr": "10.0.0.1"}},
+        {"seq": 2, "mechanism": "api", "hook": "system", "phase": "enter",
+         "args": {"command": "MAGIC reboot"}},
+        {"seq": 3, "mechanism": "syscall", "hook": "execve", "phase": "enter",
+         "args": {"pathname": "/bin/sh"}, "classified_as": "sink-hit"},
+        {"seq": 4, "mechanism": "api", "hook": "system", "phase": "enter",
+         "args": {"command": "ls"}, "classified_as": "sink-hit"},
+    ]
+    with open(events25, "w", encoding="utf-8", newline="\n") as fh:
+        for row in raw25:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    empty25 = os.path.join(q25, "empty.jsonl")
+    with open(empty25, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("")
+
+    def _parse25(name: str, sandbox: str = "", runner: str = "",
+                 events: str = ""):
+        out = os.path.join(q25, name + ".json")
+        args = [ADAPTERQ, "parse", "--plan", plan25_path,
+                "--events", events or events25, "--json", out, "--quiet"]
+        if sandbox:
+            args += ["--sandbox", sandbox]
+        if runner:
+            args += ["--runner", runner]
+        rr = run(args)
+        return rr, _r25(out), out
+
+    rr_q, qdoc, qdoc_path = _parse25("import")
+    qevents = qdoc.get("events") or []
+    sink25 = [e for e in qevents if e.get("classified_as") == "sink-hit"]
+    observed25 = [e for e in qevents if e.get("classified_as") == "observed"]
+    check("adapter_qiling：只有 sink_hook 且命中 trigger_marker 才升级为 sink-hit",
+          rr_q.returncode == 0 and len(sink25) == 1
+          and sink25[0].get("hook") == "system"
+          and sink25[0].get("trigger") is True
+          and len(observed25) == 3,
+          f"rc={rr_q.returncode} sink={len(sink25)} observed={len(observed25)}")
+    check("adapter_qiling：普通 connect() 与无标记 system 只记 observed，不生成漏洞证据",
+          all(e.get("trigger") is False for e in observed25 if e.get("hook") == "connect")
+          and len(qdoc.get("result", {}).get("evidence_refs") or []) == 1
+          and (qdoc.get("result", {}).get("evidence_refs") or [""])[0].startswith("E-QL-EVT-"),
+          str(qdoc.get("result", {}).get("evidence_refs")))
+    check("adapter_qiling：runner 自报 sink-hit 但未命中标记 → 降级并写 warning",
+          (qdoc.get("counts") or {}).get("sink_hits") == 1
+          and any("已降级为 observed" in x for x in qdoc.get("limitations") or []),
+          str(qdoc.get("counts")))
+    check("adapter_qiling：SUCCESS 只是执行完成，导入包仍为 partial（有降级警告）",
+          (qdoc.get("result") or {}).get("status") == "SUCCESS"
+          and qdoc.get("status") == "partial",
+          f"result={(qdoc.get('result') or {}).get('status')} doc={qdoc.get('status')}")
+    check("contracts.py：qiling-import 通过契约校验",
+          run([CONTRACTS, "--kind", "qiling-import",
+               "--file", qdoc_path]).returncode == 0)
+
+    sink_path = _w25("event-sink.json", sink25[0])
+    check("contracts.py：sink-hit 事件通过 qiling-event 契约",
+          run([CONTRACTS, "--kind", "qiling-event",
+               "--file", sink_path]).returncode == 0)
+    bad_sink = json.loads(json.dumps(sink25[0]))
+    bad_sink["trigger"] = False
+    bad_sink_path = _w25("event-bad-sink.json", bad_sink)
+    rr_bs = run([CONTRACTS, "--kind", "qiling-event", "--file", bad_sink_path])
+    check("contracts.py：sink-hit 缺 trigger=true → 契约拒绝",
+          rr_bs.returncode == 1 and "trigger" in rr_bs.stdout,
+          f"rc={rr_bs.returncode}")
+    bad_obs = json.loads(json.dumps(observed25[0]))
+    bad_obs["trigger"] = True
+    bad_obs_path = _w25("event-bad-observed.json", bad_obs)
+    rr_bo = run([CONTRACTS, "--kind", "qiling-event", "--file", bad_obs_path])
+    check("contracts.py：observed 不得声称 trigger=true",
+          rr_bo.returncode == 1 and "trigger" in rr_bo.stdout,
+          f"rc={rr_bo.returncode}")
+
+    sandbox_host = _w25("sandbox-host.json", {
+        "mode": "host", "host_fallback": True, "exit_code": 0,
+        "timed_out": False})
+    rr_host, qhost, _ = _parse25("host-fallback", sandbox=sandbox_host,
+                                  events=empty25)
+    check("adapter_qiling：sandbox 报告 host_fallback → BLOCKED，拒绝宿主机结果（rc3）",
+          rr_host.returncode == 3 and (qhost.get("result") or {}).get("status") == "BLOCKED"
+          and (qhost.get("result") or {}).get("failure", {}).get("category")
+          == "policy-blocked",
+          f"rc={rr_host.returncode} status={(qhost.get('result') or {}).get('status')}")
+    sandbox_timeout = _w25("sandbox-timeout.json", {
+        "mode": "sandbox", "host_fallback": False, "exit_code": 124,
+        "timed_out": True})
+    rr_to, qto, _ = _parse25("timeout", sandbox=sandbox_timeout,
+                              events=empty25)
+    check("adapter_qiling：沙箱超时 → TIMED_OUT（rc124），与 FAILED 区分",
+          rr_to.returncode == 124
+          and (qto.get("result") or {}).get("status") == "TIMED_OUT"
+          and (qto.get("result") or {}).get("failure", {}).get("retryable") is True,
+          f"rc={rr_to.returncode} status={(qto.get('result') or {}).get('status')}")
+    runner_bad = _w25("runner-bad.json", {
+        "ok": False, "exit_code": 1,
+        "error": {"category": "crash", "message": "target crashed",
+                  "retryable": False}})
+    sandbox_fail = _w25("sandbox-fail.json", {
+        "mode": "sandbox", "host_fallback": False, "exit_code": 1,
+        "timed_out": False})
+    rr_fail, qfail, _ = _parse25("runner-fail", sandbox=sandbox_fail,
+                                  runner=runner_bad,
+                                  events=empty25)
+    check("adapter_qiling：runner 报告失败 → FAILED（rc1），failure 可回溯",
+          rr_fail.returncode == 1
+          and (qfail.get("result") or {}).get("status") == "FAILED"
+          and (qfail.get("result") or {}).get("failure", {}).get("category") == "crash",
+          f"rc={rr_fail.returncode} status={(qfail.get('result') or {}).get('status')}")
+
+    runner_hook_non = _w25("runner-hook-non-sink.json", {
+        "ok": True, "status": "completed", "exit_code": 0, "event_count": 0,
+        "hook_errors": [{"hook": "getenv", "mechanism": "api",
+                         "error": "TypeError: symbol not found"}],
+        "error": None})
+    rr_hn, qhn, _ = _parse25("hook-non-sink", runner=runner_hook_non,
+                              events=empty25)
+    hlim = " ".join(qhn.get("limitations") or [])
+    check("adapter_qiling：非 sink Hook 未安装只记 limitation，不伪造 failure 事件",
+          rr_hn.returncode == 0
+          and (qhn.get("result") or {}).get("status") == "SUCCESS"
+          and (qhn.get("counts") or {}).get("failure_events") == 0
+          and "getenv" in hlim and "跳过" in hlim,
+          f"rc={rr_hn.returncode} status={(qhn.get('result') or {}).get('status')} counts={qhn.get('counts')}")
+
+    runner_hook_sink = _w25("runner-hook-sink.json", {
+        "ok": True, "status": "completed", "exit_code": 0, "event_count": 0,
+        "hook_errors": [{"hook": "system", "mechanism": "api",
+                         "error": "TypeError: symbol not found"}],
+        "error": None})
+    rr_hs, qhs, _ = _parse25("hook-sink", runner=runner_hook_sink,
+                              events=empty25)
+    check("adapter_qiling：声明的 sink Hook 未安装 → PARTIAL，不冒充完整覆盖",
+          rr_hs.returncode == 1
+          and (qhs.get("result") or {}).get("status") == "PARTIAL"
+          and qhs.get("status") == "partial"
+          and any("sink hook" in x for x in qhs.get("limitations") or []),
+          f"rc={rr_hs.returncode} status={(qhs.get('result') or {}).get('status')} doc={qhs.get('status')}")
+
+    ws25 = os.path.join(q25, "board")
+    run([BOARD, "init", "--workspace", ws25, "--run-id", RUN25,
+         "--firmware-sha256", FW25])
+    ev_boot = _w25("boot-evidence.json", {
+        "schema": "evidence/1.1", "evidence_id": "E-BOOT-25",
+        "run_id": RUN25, "firmware_sha256": FW25, "type": "static",
+        "observed_at": "2026-11-01T00:00:00Z", "status": "parsed",
+        "source": {"type": "manual", "tool": "selftest", "path": tgt25},
+    })
+    fact_boot = _w25("boot-fact.json", {
+        "schema": "fact/1.0", "fact_id": "F-BOOT-25", "run_id": RUN25,
+        "firmware_sha256": FW25, "type": "firmware",
+        "observed_at": "2026-11-01T00:00:00Z", "value": {"id": "FW-25"},
+        "evidence_refs": ["E-BOOT-25"],
+        "source": {"type": "manual", "tool": "selftest"},
+    })
+    intent25 = _w25("intent.json", {
+        "schema": "intent/1.0", "intent_id": INTENT25, "run_id": RUN25,
+        "firmware_sha256": FW25, "type": "emulation", "status": "open",
+        "from": ["F-BOOT-25"], "description": "验证 httpd 的命令注入路径",
+        "dedupe_key": "intent-ql-25", "creator": "selftest",
+        "created_at": "2026-11-01T00:00:00Z", "target": tgt25,
+    })
+    for path, kind in ((ev_boot, "evidence"), (fact_boot, "fact"),
+                       (intent25, "intent")):
+        run([BOARD, "add", "--workspace", ws25, "--kind", kind,
+             "--file", path])
+    imp1 = run([BOARD, "import", "--workspace", ws25, "--qiling", qdoc_path])
+    rep1 = _pj(imp1.stdout)
+    item1 = (rep1.get("items") or {}).get("qiling") or {}
+    imp2 = run([BOARD, "import", "--workspace", ws25, "--qiling", qdoc_path])
+    rep2 = _pj(imp2.stdout)
+    item2 = (rep2.get("items") or {}).get("qiling") or {}
+    check("黑板：Qiling 产物按 evidence→fact→EmulationResult 导入",
+          imp1.returncode == 0
+          and ((item1.get("evidence") or {}).get("added") == 3)
+          and ((item1.get("facts") or {}).get("added") == 3)
+          and ((item1.get("result") or {}).get("status") == "SUCCESS"),
+          f"rc={imp1.returncode} item={item1}")
+    check("黑板：重复导入 Qiling 产物全部去重，revision 不增长",
+          imp2.returncode == 0
+          and ((item2.get("evidence") or {}).get("duplicates") == 3)
+          and ((item2.get("facts") or {}).get("duplicates") == 3)
+          and ((item2.get("result") or {}).get("duplicate") is True),
+          f"rc={imp2.returncode} item={item2}")
+    st25 = _r25(os.path.join(ws25, "audit-board.json"))
+    results25 = st25.get("emulation_results") or []
+    check("黑板：Qiling 结果绑定 Intent 与固件，verify 通过",
+          len(results25) == 1
+          and results25[0].get("intent_id") == INTENT25
+          and results25[0].get("firmware_sha256") == FW25
+          and run([BOARD, "verify", "--workspace", ws25]).returncode == 0,
+          f"results={len(results25)}")
+
+    ws_missing = os.path.join(q25, "board-no-intent")
+    run([BOARD, "init", "--workspace", ws_missing, "--run-id", RUN25,
+         "--firmware-sha256", FW25])
+    rr_mi = run([BOARD, "import", "--workspace", ws_missing,
+                 "--qiling", qdoc_path])
+    check("黑板：Intent 不在黑板时拒绝导入 Qiling 结果（QILING_INTENT_MISSING）",
+          rr_mi.returncode == 1 and "QILING_INTENT_MISSING" in rr_mi.stderr,
+          f"rc={rr_mi.returncode} err={rr_mi.stderr.strip()[:120]}")
+    ws_run = os.path.join(q25, "board-run-mismatch")
+    run([BOARD, "init", "--workspace", ws_run, "--run-id", "RUN-OTHER",
+         "--firmware-sha256", FW25])
+    rr_rm = run([BOARD, "import", "--workspace", ws_run,
+                 "--qiling", qdoc_path])
+    check("黑板：Qiling 产物 run_id 与黑板不一致 → RUN_MISMATCH（rc1）",
+          rr_rm.returncode == 1 and "RUN_MISMATCH" in rr_rm.stderr,
+          f"rc={rr_rm.returncode} err={rr_rm.stderr.strip()[:120]}")
+
+    bad_host = json.loads(json.dumps(qdoc))
+    bad_host["execution"]["host_fallback"] = True
+    bad_host_path = _w25("import-host.json", bad_host)
+    rr_bh = run([CONTRACTS, "--kind", "qiling-import", "--file", bad_host_path])
+    check("contracts.py：qiling-import 禁止 host_fallback=true",
+          rr_bh.returncode == 1 and "宿主机" in rr_bh.stdout,
+          f"rc={rr_bh.returncode}")
     print()
     if FAILS:
         print(f"[selftest] 失败 {len(FAILS)}/{TOTAL} 项: {FAILS}")

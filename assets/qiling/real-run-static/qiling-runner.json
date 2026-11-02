@@ -1,0 +1,65 @@
+{
+  "schema": "qiling-runner/1.0",
+  "tool": "qiling_runner.py",
+  "version": "1.0",
+  "ok": true,
+  "status": "completed",
+  "backend": "qiling",
+  "qiling_version": "1.4.6",
+  "started_at": "2026-11-02T11:43:34Z",
+  "finished_at": "2026-11-02T11:43:34Z",
+  "target": "/firmware/rootfs/tmp/qltest-static",
+  "rootfs": "/firmware/rootfs",
+  "exit_code": 0,
+  "event_count": 1,
+  "events_truncated": false,
+  "hook_errors": [
+    {
+      "hook": "system",
+      "mechanism": "api",
+      "error": "TypeError: 'NoneType' object cannot be interpreted as an integer"
+    },
+    {
+      "hook": "popen",
+      "mechanism": "api",
+      "error": "TypeError: 'NoneType' object cannot be interpreted as an integer"
+    },
+    {
+      "hook": "fopen",
+      "mechanism": "api",
+      "error": "TypeError: 'NoneType' object cannot be interpreted as an integer"
+    },
+    {
+      "hook": "getenv",
+      "mechanism": "api",
+      "error": "TypeError: 'NoneType' object cannot be interpreted as an integer"
+    },
+    {
+      "hook": "strcpy",
+      "mechanism": "libc",
+      "error": "TypeError: 'NoneType' object cannot be interpreted as an integer"
+    },
+    {
+      "hook": "strcat",
+      "mechanism": "libc",
+      "error": "TypeError: 'NoneType' object cannot be interpreted as an integer"
+    },
+    {
+      "hook": "sprintf",
+      "mechanism": "libc",
+      "error": "TypeError: 'NoneType' object cannot be interpreted as an integer"
+    },
+    {
+      "hook": "snprintf",
+      "mechanism": "libc",
+      "error": "TypeError: 'NoneType' object cannot be interpreted as an integer"
+    },
+    {
+      "hook": "memcpy",
+      "mechanism": "libc",
+      "error": "TypeError: 'NoneType' object cannot be interpreted as an integer"
+    }
+  ],
+  "error": null,
+  "python": "3.11.17"
+}

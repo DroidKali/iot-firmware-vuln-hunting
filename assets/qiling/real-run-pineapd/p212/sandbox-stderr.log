@@ -1,0 +1,5 @@
+[sandbox] 模式：sandbox；运行时：docker 29.9.2；网络：none
+[sandbox] 固件：/root/iot-m4/fw → /firmware（只读），清单哈希：be146f27ed9a9ac90bb1704426e08e7304c380d35063a38d8f2e68e93b39279a
+[sandbox] 输出：/root/iot-m4/qiling-test/pineapd-out-1.4.6-p212 → /out（可写）
+[sandbox] 退出码：1；耗时：6.387s；超时：否；ok=False
+[sandbox] 准入：admitted（code=—）；槽位 0/1；等待 0.0s；预算剩余 1799.965s

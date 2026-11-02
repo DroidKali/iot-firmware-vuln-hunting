@@ -1,0 +1,1 @@
+{"args":{"dirfd":4294967196,"flags":8192,"mode":0,"pathname":"/etc/QLTEST"},"classified_as":"sink-hit","context":{"arch":"MIPS","bits":32,"pc":"0x40a38c"},"hook":"openat","mechanism":"syscall","phase":"enter","schema":"qiling-runner-event/1.0","seq":1,"trigger":true}

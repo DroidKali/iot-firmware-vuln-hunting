@@ -1,0 +1,23 @@
+{
+  "schema": "qiling-runner/1.0",
+  "tool": "qiling_runner.py",
+  "version": "1.0",
+  "ok": false,
+  "status": "failed",
+  "backend": "qiling",
+  "qiling_version": "1.4.6",
+  "started_at": "2026-11-02T12:10:08Z",
+  "finished_at": "2026-11-02T12:10:09Z",
+  "target": "/firmware/rootfs/usr/sbin/pineapd",
+  "rootfs": "/firmware/rootfs",
+  "exit_code": 1,
+  "event_count": 5,
+  "events_truncated": false,
+  "hook_errors": [],
+  "error": {
+    "category": "memory-error",
+    "message": "UcError: Invalid memory write (UC_ERR_WRITE_UNMAPPED)",
+    "retryable": false
+  },
+  "python": "3.11.17"
+}

@@ -694,7 +694,29 @@ uv run scripts/emu_run.py --plan fw-audit/$TARGET/45-emu/plan.json \
     --json fw-audit/$TARGET/45-emu/run/result.json
 ```
 
-`assets/qemu/Dockerfile` 提供含 `qemu-system-mips` / `qemu-system-misc` / `qemu-system-arm` / `qemu-system-x86` 与 `e2fsprogs` 的镜像（`docker build -t iot-fw/qemu:latest assets/qemu`）。selftest 第 24 组仍用假 sandbox 验证计划校验、哈希阻断、串口分类与结果契约；真实的 Hak5 WiFi Pineapple Nano / OpenWrt 19.07.2 rootfs 已在 Ubuntu 24.04.5 + Docker 29.9.2 + QEMU 7.2.22 的 Malta 机器上启动到 BusyBox `/bin/sh`，记录见 `assets/qemu/real-run-malta/`。该次使用通用 Malta 内核，不是厂商 ath79 内核；厂商 raw 内核尝试为 `FAILED / kernel-format`，不能据此判断 rootfs 不可用。完整固件、网络、服务与 Qiling 分支仍未验证。
+`assets/qemu/Dockerfile` 提供含 `qemu-system-mips` / `qemu-system-misc` / `qemu-system-arm` / `qemu-system-x86` 与 `e2fsprogs` 的镜像（`docker build -t iot-fw/qemu:latest assets/qemu`）。selftest 第 24 组仍用假 sandbox 验证计划校验、哈希阻断、串口分类与结果契约；真实的 Hak5 WiFi Pineapple Nano / OpenWrt 19.07.2 rootfs 已在 Ubuntu 24.04.5 + Docker 29.9.2 + QEMU 7.2.22 的 Malta 机器上启动到 BusyBox `/bin/sh`，记录见 `assets/qemu/real-run-malta/`。该次使用通用 Malta 内核，不是厂商 ath79 内核；厂商 raw 内核尝试为 `FAILED / kernel-format`，不能据此判断 rootfs 不可用。完整固件、网络与服务仍未验证；Qiling 分支只验证了静态受控目标；固件原始动态 `busybox` 与 `pineapd` 均失败（见下）。
+
+**Qiling 定向分支（适配器已落地；静态受控目标已在真实 Qiling 中执行，固件原始动态目标仍失败）。** 整机起不来但目标二进制与依赖可控时，用 `adapter_qiling.py` 分三步：`plan` 只读 ELF 架构/解释器/DT_NEEDED 并生成 `qiling-plan/1.0`；`run` 只经 `sandbox_run.py --mode sandbox` 启动容器内的 `qiling_runner.py`；`parse` 按 trigger marker 与 sink hook 重算事件，只有命中两者才生成 `sink-hit` 证据，普通 `connect`/`open` 只记 `observed`。沙箱不可用或 `host_fallback` 一律 `BLOCKED`，没有宿主机回退；`SUCCESS` 只表示后端跑完，不等于漏洞。selftest 第 25 组用合成 MIPS ELF 与假 sandbox 验证计划、过滤、负例和黑板导入，**该组本身不作为真实执行证据**。真实测试（2026-11-02，Ubuntu 24.04 + Docker 29.9.2 + Qiling 1.4.6）记录在 `assets/qiling/real-run-static/`：静态 MIPS 受控目标 `qltest-static` 执行成功，`openat("/etc/QLTEST")` 生成 1 条 sink-hit、`SUCCESS` 结果与 3 条 evidence / 3 条 fact，并成功导入黑板；固件原始动态 `busybox` 为 `FAILED`（Qiling 1.4.6 `UC_ERR_WRITE_UNMAPPED`），没有 sink-hit，不能据此判断 busybox 安全性；同一链路对固件原始动态 `/usr/sbin/pineapd` 的六组执行（基础 / patched / TLB / Unicorn 2.1.2 / patched + 2.1.2 / `LD_LIBRARY_PATH`）也全部为 `FAILED / memory-error`、`sink_hit=0`，均未到达 `main`，记录见 `assets/qiling/real-run-pineapd/`，不能据此判断 pineapd 安全性。`SUCCESS` / `sink-hit` 都不是漏洞结论。`assets/qemu/Dockerfile` 不含 Qiling，需另建 `iot-fw/qiling:1.4.6`（构建文件 `assets/qiling/Dockerfile`）。
+
+```bash
+# 计划 → 沙箱执行 → 事件归一化（全部命令的 --flag 都以 --help 为准）
+uv run scripts/adapter_qiling.py plan --target fw-audit/$TARGET/01-extract/usr/sbin/httpd \
+    --firmware-root fw-audit/$TARGET --rootfs fw-audit/$TARGET/01-extract \
+    --run-id RUN-001 --intent-id INTENT-001 --firmware-sha256 <64-hex> \
+    --trigger-marker QLTEST --json fw-audit/$TARGET/46-qiling/plan.json
+
+uv run scripts/adapter_qiling.py run --plan fw-audit/$TARGET/46-qiling/plan.json \
+    --out fw-audit/$TARGET/46-qiling/run --image iot-fw/qiling:latest
+
+uv run scripts/adapter_qiling.py parse --plan fw-audit/$TARGET/46-qiling/plan.json \
+    --events fw-audit/$TARGET/46-qiling/run/qiling-events.jsonl \
+    --runner fw-audit/$TARGET/46-qiling/run/qiling-runner.json \
+    --json fw-audit/$TARGET/46-qiling/import.json
+
+# 导入黑板前必须已有对应 Intent；缺 Intent 会以 QILING_INTENT_MISSING 拒绝
+uv run scripts/board_store.py import --workspace fw-audit/$TARGET/board \
+    --qiling fw-audit/$TARGET/46-qiling/import.json
+```
 
 ### 4.0 选路判据：要证明什么 → 需要哪组原子能力
 
@@ -999,7 +1021,7 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 | `references/reporting.md` | Phase 5 需要报告字段、工作简报、评分表、脱敏规范 |
 | `references/reporting-style.md` | **审计工作简报的受控中文规范**：10 个固定状态词、关键发现表、句子与证据规则、简报结构、示例、交付前自检 |
 | `references/resource-index.md` | 需要外部资料：awesome-connected-things-sec 精编索引（按阶段映射） |
-| `references/data-contracts.md` | **跨阶段数据契约**：18 种 schema——FirmwareManifest / AuditTask / Candidate / Finding / Evidence（含 `evidence/1.1` 归一化） / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / EmbaImport / EmulationPlan / Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent 的字段、版本规则、strict 兼容边界、黑板事件与状态机、**沙箱策略/资源准入/执行路径清单**、EMBA 导入、迁移清单 |
+| `references/data-contracts.md` | **跨阶段数据契约**：21 种 schema——FirmwareManifest / AuditTask / Candidate / Finding / Evidence（含 `evidence/1.1` 归一化） / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / EmbaImport / EmulationPlan / QilingPlan / QilingEvent / QilingImport / Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent 的字段、版本规则、strict 兼容边界、黑板事件与状态机、**沙箱策略/资源准入/执行路径清单**、EMBA / Qiling 导入、迁移清单 |
 
 ## 脚本
 
@@ -1010,10 +1032,10 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 | `scripts/coverage_gate.py` | Phase 5：覆盖率门禁校验 + **CVE 纪律检查**（`--report`）+ **审阅清单三方对齐**（`--review-list`）+ **G4 入口级覆盖**（`--entrypoints`）+ **G5 绕过矩阵**（`--bypass-check`）+ **G6 跨请求污点溯源**（`--cross-request`）+ **G7 跨请求污点图**（`--taint-graph`）+ **类型→Base 命中**（`--type-base`）+ **自动修复计划**（`--auto-recover`）+ **`--profile {light,standard,strict}` 档位与 `gate-config.json` 执行台账** |
 | `scripts/taint_graph.py` | Phase 3/5：跨请求污点图（BDG/ADG 最小实现）——`recover` 从反编译产物恢复常量键（literal / local-const / fill-composed），`build` 构图并校验「写请求 ≠ 触发读的请求、键一致、两端有证据、跨进程读带 via_control」；产出 `taint-graph.json` 供 G7 消费 |
 | `scripts/entrypoints_init.py` | Phase 3/5：从 `02-tiering.json` 生成入口枚举骨架 `entrypoints.json`（G4 的输入） |
-| `scripts/contracts.py` | Phase 0–5：数据契约校验（18 种 schema：FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / EmbaImport / EmulationPlan / Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent）；`--list` 列受支持版本，`--json` 出机器可读结果 |
+| `scripts/contracts.py` | Phase 0–5：数据契约校验（21 种 schema：FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / EmbaImport / EmulationPlan / QilingPlan / QilingEvent / QilingImport / Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent）；`--list` 列受支持版本，`--json` 出机器可读结果 |
 | `scripts/board_transitions.py` | M1 / Phase 3–5：候选状态机——`graph` 列合法转换，`check` 做类型化证据校验（run/固件绑定、证据类型、判据、触发上下文），`risk` 校验风险处置而非候选状态 |
 | `scripts/board_events.py` | M1：append-only 事件日志——`verify` 校验结构与 `seq` 连续性，`replay` 从日志重建快照；重复 `dedupe_key` 跳过，非法 JSON 行报错 |
-| `scripts/board_store.py` | M1：黑板存储与导入——`init` / `import` / `add` / `transition` / `intent` / `backtrack` / `replay` / `verify` / `show`；`import --emba` 导入 M3 适配结果；事件日志是真相源，快照可重建 |
+| `scripts/board_store.py` | M1：黑板存储与导入——`init` / `import` / `add` / `transition` / `intent` / `backtrack` / `replay` / `verify` / `show`；`import --emba` 导入 M3 适配结果、`import --qiling` 导入 M4 Qiling 结果；事件日志是真相源，快照可重建 |
 | `scripts/adapter_emba.py` | M3：EMBA 产物离线解析——F50/P99/S09/L15/L10/S115 → `emba-import/1.0`；三类观察分型（`service` / `runtime-process` / `port-response`）、PE32/ELF 区分、`--require` 显式产物、结构化失败、重复解析字节稳定 |
 | `scripts/ealb_calib.py` | Phase 2：用实测工时样本校准 EALB；样本不足时只报 `heuristic`，达到门槛才标 `calibrated` |
 | `scripts/sandbox_run.py` | Phase 4 / M2：不可信固件的一次性隔离执行（`--network none`、只读根、cap-drop、非 root、内存/CPU/PID 限额）；无隔离运行时 **fail-closed**（退出 3），宿主机执行必须显式授权；`sandbox-run/1.1` 记录资源准入（退出 5） |
@@ -1022,9 +1044,11 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 | `scripts/bench_eval.py` | Phase 5/回归：合成基准集上的 precision / recall / F1 / FPR 评估；`--baseline` 检测召回暴跌与 FPR 上升（退出码 3） |
 | `scripts/emu_plan.py` | M4：只读探测 rootfs/内核/init/镜像，生成 `emulation-plan/1.0`（架构、QEMU argv、blockers、预算）；不执行 QEMU，也不自动构建镜像 |
 | `scripts/emu_run.py` | M4：复核计划、镜像与内核哈希，固定经 `sandbox_run.py --mode sandbox` 执行 QEMU，采串口/退出码并输出 `emulation-result/1.0`；无宿主机回退 |
-| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证其余十七个脚本的判据，并把**文档示例命令与 CLI 参数表对拍**；覆盖黑板事件/快照/状态机、资源准入、EMBA 适配与整机仿真计划/结果分类（24 组 / 273 条断言，结尾自报总数） |
+| `scripts/adapter_qiling.py` | M4：Qiling 定向仿真——只读计划、经 sandbox 执行、按 trigger marker / sink hook 重算事件并输出 `qiling-import/1.0`；无宿主机回退 |
+| `scripts/qiling_runner.py` | M4：容器内 Qiling runner——安装 syscall / API / libc Hook，写事件 JSONL 与运行报告；不判定漏洞，无宿主模式 |
+| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证其余十九个脚本的判据，并把**文档示例命令与 CLI 参数表对拍**；覆盖黑板事件/快照/状态机、资源准入、EMBA 适配、整机仿真计划/结果分类与 Qiling 定向仿真（25 组 / 295 条断言，结尾自报总数） |
 
-脚本都只用 Python 标准库，无第三方依赖，Windows / Linux / macOS 均可运行。用 `uv` 管理环境（`uv run` 自动建临时环境；无 `uv` 时直接 `python scripts/xxx.py` 亦可）。安装后建议先跑一次自检：
+除 `qiling_runner.py`（只在 Qiling 容器镜像内运行）外，脚本都只用 Python 标准库，无第三方依赖，Windows / Linux / macOS 均可运行。用 `uv` 管理环境（`uv run` 自动建临时环境；无 `uv` 时直接 `python scripts/xxx.py` 亦可）。安装后建议先跑一次自检：
 
 ```bash
 uv run scripts/selftest.py

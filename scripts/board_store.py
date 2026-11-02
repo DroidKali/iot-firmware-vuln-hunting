@@ -51,6 +51,7 @@ try:
     from contracts import summarize as _contract_summary
     from contracts import validate_board_state as _validate_board_state
     from contracts import validate_emba_import as _validate_emba_import
+    from contracts import validate_qiling_import as _validate_qiling_import
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"无法加载同目录模块：{exc}")
 
@@ -466,6 +467,67 @@ class BoardStore:
                 "by_type": by_type,
                 "status": doc.get("status")}
 
+    # ── Qiling 适配器产物导入 ──────────────────────────────────────────────
+    def _check_qiling(self, path: str) -> Dict[str, Any]:
+        doc = _read_json(path)
+        if not isinstance(doc, dict):
+            raise StoreError("QILING_INVALID", f"{path}: 顶层必须是对象")
+        errors = _validate_qiling_import(doc)
+        if errors:
+            raise StoreError("QILING_INVALID",
+                             f"{path}: " + _contract_summary(errors))
+        if doc.get("run_id") != self.state["run_id"]:
+            raise StoreError("RUN_MISMATCH",
+                             f"Qiling run_id={doc.get('run_id')!r} 与黑板 "
+                             f"{self.state['run_id']!r} 不一致")
+        if str(doc.get("firmware_sha256") or "").lower() != \
+                str(self.state["firmware_sha256"]).lower():
+            raise StoreError("FIRMWARE_MISMATCH",
+                             "Qiling firmware_sha256 与黑板不一致")
+        intent_id = doc.get("intent_id")
+        found = any(isinstance(row, dict) and row.get("intent_id") == intent_id
+                    for row in self.state.get("intents") or [])
+        if not found:
+            raise StoreError("QILING_INTENT_MISSING",
+                             f"Qiling 结果绑定的 Intent 不在黑板：{intent_id}")
+        if not doc.get("evidence"):
+            raise StoreError("QILING_NO_EVIDENCE",
+                             "Qiling 导入包没有证据；不能只导入一个结论")
+        return doc
+
+    def _import_qiling(self, path: str,
+                       doc: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        doc = doc if doc is not None else self._check_qiling(path)
+        ev_added = ev_dup = 0
+        for row in doc.get("evidence") or []:
+            res = self.record_evidence(row)
+            if res.get("duplicate"):
+                ev_dup += 1
+            else:
+                ev_added += 1
+        fact_added = fact_dup = 0
+        by_type: Dict[str, int] = {}
+        for row in doc.get("facts") or []:
+            res = self.record_fact(row)
+            typ = str(row.get("type"))
+            by_type[typ] = by_type.get(typ, 0) + 1
+            if res.get("duplicate"):
+                fact_dup += 1
+            else:
+                fact_added += 1
+        result = doc.get("result") or {}
+        emu = self.record_emulation(result)
+        return {"input": {"evidence": len(doc.get("evidence") or []),
+                          "facts": len(doc.get("facts") or []),
+                          "result": 1},
+                "evidence": {"added": ev_added, "duplicates": ev_dup},
+                "facts": {"added": fact_added, "duplicates": fact_dup},
+                "result": {"emulation_id": result.get("emulation_id"),
+                           "status": result.get("status"),
+                           "duplicate": bool(emu.get("duplicate"))},
+                "by_type": by_type,
+                "status": doc.get("status")}
+
     def _load_candidates(self, path: str) -> List[Dict[str, Any]]:
         """读取候选：兼容 JSONL 逐行、envelope、裸数组与单个对象。
 
@@ -536,12 +598,14 @@ class BoardStore:
                          layer1: Optional[str] = None,
                          stages: Optional[str] = None,
                          candidates: Optional[str] = None,
-                         emba: Optional[str] = None) -> Dict[str, Any]:
+                         emba: Optional[str] = None,
+                         qiling: Optional[str] = None) -> Dict[str, Any]:
         report: Dict[str, Any] = {"schema": "board-import/1.0",
                                   "workspace": self.workspace, "items": {}}
         # 先解析最容易出错的输入，避免「导入一半才报错」留下半份状态。
         cand_rows = self._load_candidates(candidates) if candidates else None
         emba_doc = self._check_emba(emba) if emba else None
+        qiling_doc = self._check_qiling(qiling) if qiling else None
         if manifest:
             report["items"]["manifest"] = self._import_manifest(manifest)
         if layer1:
@@ -552,6 +616,8 @@ class BoardStore:
             report["items"]["candidates"] = self._import_candidates(candidates, cand_rows)
         if emba:
             report["items"]["emba"] = self._import_emba(emba, emba_doc)
+        if qiling:
+            report["items"]["qiling"] = self._import_qiling(qiling, qiling_doc)
         report["summary"] = self.summary()
         return report
 
@@ -581,6 +647,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--stages")
     p.add_argument("--candidates")
     p.add_argument("--emba", help="adapter_emba.py 输出的 emba-import/1.0")
+    p.add_argument("--qiling", help="adapter_qiling.py 输出的 qiling-import/1.0")
 
     p = sub.add_parser("add", help="追加一条记录")
     p.add_argument("--workspace", required=True)
@@ -637,7 +704,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.cmd == "import":
             report = store.import_artifacts(args.manifest, args.layer1,
                                             args.stages, args.candidates,
-                                            args.emba)
+                                            args.emba, args.qiling)
             print(json.dumps(report, ensure_ascii=False, indent=2))
             return 0
         if args.cmd == "add":

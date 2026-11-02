@@ -54,6 +54,11 @@ KNOWN = {
         "input_trust": "untrusted-firmware",
         "note": "只通过 sandbox_run.py 启动 QEMU；自身不组装容器参数、不回退宿主机",
     },
+    "adapter_qiling.py": {
+        "classification": "sandbox-client",
+        "input_trust": "untrusted-firmware",
+        "note": "只通过 sandbox_run.py 启动 Qiling；宿主机只做离线事件解析，不执行固件",
+    },
     "bench_eval.py": {
         "classification": "trusted-metadata",
         "input_trust": "trusted-local",

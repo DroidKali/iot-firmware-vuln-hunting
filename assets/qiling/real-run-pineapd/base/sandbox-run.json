@@ -1,0 +1,153 @@
+{
+  "schema": "sandbox-run/1.1",
+  "tool": "sandbox_run.py",
+  "version": "1.1",
+  "mode": "sandbox",
+  "host_fallback": false,
+  "check_only": false,
+  "image": "iot-fw/qiling:1.4.6",
+  "runtime": {
+    "name": "docker",
+    "version": "29.9.2",
+    "available": true,
+    "path": "/usr/bin/docker",
+    "probe": "ok",
+    "requested": "auto",
+    "argv": [
+      "/usr/bin/docker"
+    ],
+    "tried": [
+      {
+        "name": "docker",
+        "path": "/usr/bin/docker",
+        "version": "29.9.2",
+        "available": true,
+        "probe": "ok",
+        "argv": [
+          "/usr/bin/docker"
+        ]
+      }
+    ]
+  },
+  "command": [
+    "/usr/bin/docker",
+    "run",
+    "--rm",
+    "--name",
+    "iotfw-sandbox-929c5c5e95ed",
+    "--network",
+    "none",
+    "--read-only",
+    "--cap-drop=ALL",
+    "--security-opt=no-new-privileges",
+    "--user",
+    "65534:65534",
+    "--memory",
+    "512m",
+    "--cpus",
+    "1",
+    "--pids-limit",
+    "128",
+    "--tmpfs",
+    "/tmp:rw,noexec,nosuid,size=64m",
+    "--tmpfs",
+    "/var/tmp:rw,noexec,nosuid,size=64m",
+    "-e",
+    "TMPDIR=/tmp",
+    "-v",
+    "/root/iot-m4/fw:/firmware:ro",
+    "-v",
+    "/root/iot-m4/qiling-test/pineapd-out-base:/out:rw",
+    "--workdir",
+    "/out",
+    "iot-fw/qiling:1.4.6",
+    "/bin/sh",
+    "-c",
+    "python3 /out/qiling_runner.py --plan /out/qiling-plan.json --out /out"
+  ],
+  "mounts": {
+    "firmware": {
+      "path": "/root/iot-m4/fw",
+      "sha256": "be146f27ed9a9ac90bb1704426e08e7304c380d35063a38d8f2e68e93b39279a",
+      "read_only": true,
+      "target": "/firmware"
+    },
+    "out": {
+      "path": "/root/iot-m4/qiling-test/pineapd-out-base",
+      "read_only": false,
+      "target": "/out"
+    }
+  },
+  "policy": {
+    "network": "none",
+    "network_requested": "none",
+    "read_only_rootfs": true,
+    "cap_drop": "ALL",
+    "no_new_privileges": true,
+    "user": "65534:65534",
+    "memory": "512m",
+    "cpus": "1",
+    "pids_limit": 128,
+    "tmpfs": "/tmp:rw,noexec,nosuid,size=64m",
+    "tmpfs_var": "/var/tmp:rw,noexec,nosuid,size=64m",
+    "timeout_s": 90,
+    "host_execution": "forbidden"
+  },
+  "admission": {
+    "decision": "admitted",
+    "code": null,
+    "message": null,
+    "policy": {
+      "schema": "sandbox-policy/1.0",
+      "max_concurrency": 1,
+      "queue_timeout_s": 300,
+      "max_total_seconds": 1800,
+      "max_timeout_s": 300,
+      "max_memory_mb": 1024,
+      "max_cpus": 2.0,
+      "max_pids": 256,
+      "allowed_images": null,
+      "allow_host": true
+    },
+    "policy_sha256": "3b7ec7f137c87d14d3dd467c7780a481473b9f7eaafa81289765e81238541960",
+    "policy_source": "defaults",
+    "request": {
+      "mode": "sandbox",
+      "timeout": 90,
+      "memory": "512m",
+      "cpus": "1",
+      "pids": 128,
+      "image": "iot-fw/qiling:1.4.6"
+    },
+    "slots": {
+      "limit": 1,
+      "slot": 0,
+      "wait_s": 0.0,
+      "queued": false,
+      "state_dir": "/tmp/iot-firmware-sandbox-0"
+    },
+    "budget": {
+      "limit_s": 1800.0,
+      "used_s": 0.041,
+      "remaining_s": 1799.959
+    }
+  },
+  "started_at": "2026-11-02T12:10:43Z",
+  "finished_at": "2026-11-02T12:10:50Z",
+  "duration_s": 7.606,
+  "exit_code": 1,
+  "timed_out": false,
+  "stdout_bytes": 0,
+  "stderr_bytes": 1053,
+  "stdout_head": "",
+  "stderr_head": "WARNING: Your register accessing on id 0 is deprecated and will get UC_ERR_ARG in the future release (2.2.0) because the accessing is either no-op or not defined. If you believe the register should be implemented or there is a bug, please submit an issue to https://github.com/unicorn-engine/unicorn. Set UC_IGNORE_REG_BREAK=1 to ignore this warning.\nWARNING: Your register accessing on id 0 is deprecated and will get UC_ERR_ARG in the future release (2.2.0) because the accessing is either no-op or not defined. If you believe the register should be implemented or there is a bug, please submit an issue to https://github.com/unicorn-engine/unicorn. Set UC_IGNORE_REG_BREAK=1 to ignore this warning.\nWARNING: Your register accessing on id 0 is deprecated and will get UC_ERR_ARG in the future release (2.2.0) because the accessing is either no-op or not defined. If you believe the register should be implemented or there is a bug, please submit an issue to https://github.com/unicorn-engine/unicorn. Set UC_IGNORE_REG_BREAK=1 to ignore this warning.\n",
+  "ok": false,
+  "notes": [
+    "输出目录 /root/iot-m4/qiling-test/pineapd-out-base 原模式 0755，已补 other rwx + sticky 为 1757（容器以 uid 65534:65534 写入，bind mount 不做 UID 映射）",
+    "固件目录含符号链接 409 个，已跳过（不跟随、不计入清单哈希）",
+    "固件目录含非普通文件 1 个，已跳过（不计入清单哈希）",
+    "固件清单哈希覆盖 1973 个文件（按相对路径排序）",
+    "容器不注入任何宿主机环境变量（无凭据）；输出目录已按 uid 65534:65534 调整 other rwx + sticky，写入失败仍会如实记录 exit_code",
+    "命令已执行但返回非零（容器退出码 1）；进程退出码按约定映射为 1"
+  ]
+}
