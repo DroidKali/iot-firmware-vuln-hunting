@@ -493,7 +493,7 @@ python scripts/emu_run.py --plan plan.json --out ./out \
 - selftest 第 24 组仍用假 sandbox，只验证计划契约、哈希阻断与串口分类，不等于真实 QEMU 启动；
 - 真实记录使用的通用内核替代了厂商内核，不能据此推断厂商固件可启动；
 - 网络为 `none`，没有服务探测或漏洞触发；`backend_version` 在结果中为 `unverified`（独立测得 QEMU 7.2.22）；
-- Qiling 定向分支仍未实现；需要它的场景必须继续标 `BLOCKED` 或转人工，不得用整机 shell 结果代替。
+- Qiling 定向分支已实现（`adapter_qiling.py` + `qiling_runner.py`，固定经 `sandbox_run.py`，无宿主机回退）；Qiling 1.4.6 静态受控目标与 1.4.11 动态 `busybox` 单 applet 已有真实记录，见 `assets/qiling/real-run-static/` 与 `assets/qiling/real-run-busybox-sink/`。该分支仍只覆盖用户态单目标/单 applet，未覆盖网络、服务、多 applet 与厂商内核；不得用整机 shell 结果或 Qiling `SUCCESS` 代替漏洞结论。
 
 ---
 

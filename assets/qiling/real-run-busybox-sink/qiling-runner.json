@@ -1,0 +1,19 @@
+{
+  "schema": "qiling-runner/1.0",
+  "tool": "qiling_runner.py",
+  "version": "1.0",
+  "ok": true,
+  "status": "completed",
+  "backend": "qiling",
+  "qiling_version": "1.4.11",
+  "started_at": "2026-11-03T12:01:28Z",
+  "finished_at": "2026-11-03T12:01:29Z",
+  "target": "/firmware/rootfs/bin/busybox",
+  "rootfs": "/firmware/rootfs",
+  "exit_code": 0,
+  "event_count": 4,
+  "events_truncated": false,
+  "hook_errors": [],
+  "error": null,
+  "python": "3.11.17"
+}

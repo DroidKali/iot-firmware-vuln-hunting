@@ -1,0 +1,27 @@
+{
+  "schema": "fact/1.0",
+  "fact_id": "F-BUSYBOX-STATIC-001",
+  "run_id": "RUN-QL-BUSYBOX-SINK-001",
+  "firmware_sha256": "c69629ef90c715600e09f22ef12732c593f886db3b0ed145f549de551c48f79d",
+  "type": "elf",
+  "value": {
+    "format": "ELF32",
+    "arch": "mips",
+    "bits": 32,
+    "endian": "big",
+    "interpreter": "/lib/ld-musl-mips-sf.so.1",
+    "path": "/root/iot-m4/fw/rootfs/bin/busybox"
+  },
+  "evidence_refs": [
+    "E-BUSYBOX-STATIC-001"
+  ],
+  "source": {
+    "type": "static",
+    "tool": "file",
+    "path": "/root/iot-m4/fw/rootfs/bin/busybox"
+  },
+  "observed_at": "2026-11-03T11:52:00Z",
+  "scope": {
+    "target": "/root/iot-m4/fw/rootfs/bin/busybox"
+  }
+}

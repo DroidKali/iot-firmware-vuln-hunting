@@ -1,0 +1,492 @@
+{
+  "schema": "qiling-import/1.0",
+  "adapter": {
+    "name": "adapter_qiling.py",
+    "version": "1.0"
+  },
+  "run_id": "RUN-QL-BUSYBOX-SINK-001",
+  "intent_id": "INT-QL-BUSYBOX-SINK-001",
+  "firmware_sha256": "c69629ef90c715600e09f22ef12732c593f886db3b0ed145f549de551c48f79d",
+  "status": "parsed",
+  "plan_id": "QPL-6faa8c4bcbbd",
+  "backend": {
+    "name": "qiling",
+    "version": "1.4.11",
+    "image": "iot-fw/qiling:1.4.11"
+  },
+  "execution": {
+    "mode": "offline",
+    "host_fallback": false,
+    "sandbox": {
+      "mode": "sandbox",
+      "exit_code": 0,
+      "timed_out": false,
+      "image": "iot-fw/qiling:1.4.11"
+    }
+  },
+  "result": {
+    "schema": "emulation-result/1.0",
+    "emulation_id": "QL-a8427b55a4ab",
+    "run_id": "RUN-QL-BUSYBOX-SINK-001",
+    "intent_id": "INT-QL-BUSYBOX-SINK-001",
+    "firmware_sha256": "c69629ef90c715600e09f22ef12732c593f886db3b0ed145f549de551c48f79d",
+    "target_sha256": "0fdc7d06b5068d3e80f05b6069eeff9ae70deeb37d254a67b5f297a86ff35716",
+    "backend": "qiling",
+    "backend_version": "1.4.11",
+    "status": "SUCCESS",
+    "environment": {
+      "mode": "offline",
+      "host_fallback": false,
+      "sandbox_mode": "sandbox",
+      "sandbox_exit_code": 0,
+      "sandbox_timed_out": false,
+      "sandbox_image": "iot-fw/qiling:1.4.11",
+      "qiling_version": "1.4.11",
+      "qiling_plan_id": "QPL-6faa8c4bcbbd",
+      "target": "/root/iot-m4/fw/rootfs/bin/busybox",
+      "rootfs": "/root/iot-m4/fw/rootfs",
+      "network": "none"
+    },
+    "observations": [
+      {
+        "type": "emulation",
+        "kind": "qiling-event",
+        "seq": 1,
+        "mechanism": "syscall",
+        "hook": "open",
+        "phase": "enter",
+        "args": {
+          "flags": 532480,
+          "mode": 438,
+          "pathname": "/etc/ld-musl-mips-sf.path"
+        },
+        "trigger": false,
+        "classified_as": "observed"
+      },
+      {
+        "type": "emulation",
+        "kind": "qiling-event",
+        "seq": 2,
+        "mechanism": "syscall",
+        "hook": "open",
+        "phase": "enter",
+        "args": {
+          "flags": 532480,
+          "mode": 0,
+          "pathname": "/lib/libgcc_s.so.1"
+        },
+        "trigger": false,
+        "classified_as": "observed"
+      },
+      {
+        "type": "emulation",
+        "kind": "qiling-event",
+        "seq": 3,
+        "mechanism": "libc",
+        "hook": "strcpy",
+        "phase": "enter",
+        "args": {
+          "dest": 2146683360,
+          "src": "u"
+        },
+        "trigger": false,
+        "classified_as": "observed"
+      },
+      {
+        "type": "emulation",
+        "kind": "qiling-event",
+        "seq": 4,
+        "mechanism": "syscall",
+        "hook": "open",
+        "phase": "enter",
+        "args": {
+          "flags": 8192,
+          "mode": 0,
+          "pathname": "/etc/QLTEST"
+        },
+        "trigger": true,
+        "classified_as": "sink-hit"
+      }
+    ],
+    "evidence_refs": [
+      "E-QL-EVT-144acc4f1da5"
+    ],
+    "artifacts": [
+      {
+        "path": "/root/iot-m4/qiling-test/busybox-sink-plan.json",
+        "sha256": "5b1f9183447ce53af7f3d177706a6549c627b5003c3a6e64d6148cd3cfcdba33",
+        "size": 9288
+      },
+      {
+        "path": "/root/iot-m4/qiling-test/busybox-sink-out-clean/qiling-events.jsonl",
+        "sha256": "e6b408cf145fc0178d857014079735a2497b15575a7c5f4a08bb9e894e94e611",
+        "size": 1001
+      },
+      {
+        "path": "/root/iot-m4/qiling-test/busybox-sink-out-clean/qiling-runner.json",
+        "sha256": "5835e7eb06acf58d8e0edbc874b5b6501c3665fcf49ec8d2099d88cd2be10290",
+        "size": 463
+      },
+      {
+        "path": "/root/iot-m4/qiling-test/busybox-sink-out-clean/sandbox-run.json",
+        "sha256": "424b54f2975e19657420bfac21ac51ee8ac9e160d622b800578cf092a3639242",
+        "size": 3948
+      }
+    ],
+    "resource_usage": {
+      "duration_s": 1.0,
+      "timeout_s": 60,
+      "exit_code": 0,
+      "timed_out": false,
+      "event_count": 4,
+      "sink_hits": 1,
+      "observed": 3,
+      "parse_errors": 0
+    },
+    "started_at": "2026-11-03T12:01:28Z",
+    "finished_at": "2026-11-03T12:01:29Z",
+    "limitations": [
+      "Qiling 只模拟用户态；不覆盖内核、驱动、硬件外设与真实网络。",
+      "命中 trigger_marker 只证明参数到达 sink，不等于可利用；漏洞结论仍需候选验证。",
+      "SUCCESS 只表示 Qiling 按计划跑完，不表示发现漏洞。",
+      "Qiling 只覆盖用户态执行；内核、驱动、硬件外设与真实网络不在范围内。",
+      "SUCCESS 只表示执行完成；sink-hit 不是漏洞结论，仍需按类型判据验证。"
+    ]
+  },
+  "events": [
+    {
+      "schema": "qiling-event/1.0",
+      "event_id": "QE-24062ea67a1f",
+      "seq": 1,
+      "run_id": "RUN-QL-BUSYBOX-SINK-001",
+      "firmware_sha256": "c69629ef90c715600e09f22ef12732c593f886db3b0ed145f549de551c48f79d",
+      "mechanism": "syscall",
+      "hook": "open",
+      "phase": "enter",
+      "trigger": false,
+      "classified_as": "observed",
+      "args": {
+        "flags": 532480,
+        "mode": 438,
+        "pathname": "/etc/ld-musl-mips-sf.path"
+      },
+      "source": {
+        "path": "/root/iot-m4/qiling-test/busybox-sink-out-clean/qiling-events.jsonl",
+        "line": 1
+      },
+      "filter": {
+        "version": "qiling-filter/1.0",
+        "rule_id": "observe-only",
+        "reason": "无触发标记或非 sink hook，只记录观察"
+      },
+      "context": {
+        "arch": "MIPS",
+        "bits": 32,
+        "pc": "0x4821dd4"
+      }
+    },
+    {
+      "schema": "qiling-event/1.0",
+      "event_id": "QE-a362b8dffc18",
+      "seq": 2,
+      "run_id": "RUN-QL-BUSYBOX-SINK-001",
+      "firmware_sha256": "c69629ef90c715600e09f22ef12732c593f886db3b0ed145f549de551c48f79d",
+      "mechanism": "syscall",
+      "hook": "open",
+      "phase": "enter",
+      "trigger": false,
+      "classified_as": "observed",
+      "args": {
+        "flags": 532480,
+        "mode": 0,
+        "pathname": "/lib/libgcc_s.so.1"
+      },
+      "source": {
+        "path": "/root/iot-m4/qiling-test/busybox-sink-out-clean/qiling-events.jsonl",
+        "line": 2
+      },
+      "filter": {
+        "version": "qiling-filter/1.0",
+        "rule_id": "observe-only",
+        "reason": "无触发标记或非 sink hook，只记录观察"
+      },
+      "context": {
+        "arch": "MIPS",
+        "bits": 32,
+        "pc": "0x47c78a4"
+      }
+    },
+    {
+      "schema": "qiling-event/1.0",
+      "event_id": "QE-d69478ec4803",
+      "seq": 3,
+      "run_id": "RUN-QL-BUSYBOX-SINK-001",
+      "firmware_sha256": "c69629ef90c715600e09f22ef12732c593f886db3b0ed145f549de551c48f79d",
+      "mechanism": "libc",
+      "hook": "strcpy",
+      "phase": "enter",
+      "trigger": false,
+      "classified_as": "observed",
+      "args": {
+        "dest": 2146683360,
+        "src": "u"
+      },
+      "source": {
+        "path": "/root/iot-m4/qiling-test/busybox-sink-out-clean/qiling-events.jsonl",
+        "line": 3
+      },
+      "filter": {
+        "version": "qiling-filter/1.0",
+        "rule_id": "observe-only",
+        "reason": "无触发标记或非 sink hook，只记录观察"
+      },
+      "context": {
+        "arch": "MIPS",
+        "bits": 32,
+        "pc": "0x45b400"
+      }
+    },
+    {
+      "schema": "qiling-event/1.0",
+      "event_id": "QE-0cdcc4c10602",
+      "seq": 4,
+      "run_id": "RUN-QL-BUSYBOX-SINK-001",
+      "firmware_sha256": "c69629ef90c715600e09f22ef12732c593f886db3b0ed145f549de551c48f79d",
+      "mechanism": "syscall",
+      "hook": "open",
+      "phase": "enter",
+      "trigger": true,
+      "classified_as": "sink-hit",
+      "args": {
+        "flags": 8192,
+        "mode": 0,
+        "pathname": "/etc/QLTEST"
+      },
+      "source": {
+        "path": "/root/iot-m4/qiling-test/busybox-sink-out-clean/qiling-events.jsonl",
+        "line": 4
+      },
+      "filter": {
+        "version": "qiling-filter/1.0",
+        "rule_id": "trigger-marker",
+        "reason": "参数命中 trigger_marker 且 hook 属于 sink_hooks"
+      },
+      "context": {
+        "arch": "MIPS",
+        "bits": 32,
+        "pc": "0x47c78a4"
+      }
+    }
+  ],
+  "evidence": [
+    {
+      "schema": "evidence/1.1",
+      "evidence_id": "E-QL-TGT-f90def646a80",
+      "run_id": "RUN-QL-BUSYBOX-SINK-001",
+      "firmware_sha256": "c69629ef90c715600e09f22ef12732c593f886db3b0ed145f549de551c48f79d",
+      "type": "static",
+      "observed_at": "2020-02-27T21:05:12Z",
+      "status": "parsed",
+      "source": {
+        "type": "manual",
+        "tool": "adapter_qiling.py",
+        "path": "/root/iot-m4/fw/rootfs/bin/busybox"
+      },
+      "artifact": {
+        "path": "/root/iot-m4/fw/rootfs/bin/busybox",
+        "sha256": "0fdc7d06b5068d3e80f05b6069eeff9ae70deeb37d254a67b5f297a86ff35716",
+        "size": 303157
+      },
+      "limitations": [
+        "只证明目标文件字节与架构；不证明它可被 Qiling 执行。"
+      ]
+    },
+    {
+      "schema": "evidence/1.1",
+      "evidence_id": "E-QL-RUN-2c1284573c34",
+      "run_id": "RUN-QL-BUSYBOX-SINK-001",
+      "firmware_sha256": "c69629ef90c715600e09f22ef12732c593f886db3b0ed145f549de551c48f79d",
+      "type": "emulation",
+      "observed_at": "2026-11-03T12:01:53Z",
+      "status": "parsed",
+      "source": {
+        "type": "emulation",
+        "tool": "qiling",
+        "path": "/root/iot-m4/qiling-test/busybox-sink-out-clean/qiling-events.jsonl"
+      },
+      "artifact": {
+        "path": "/root/iot-m4/qiling-test/busybox-sink-out-clean/qiling-events.jsonl",
+        "sha256": "e6b408cf145fc0178d857014079735a2497b15575a7c5f4a08bb9e894e94e611",
+        "size": 1001
+      },
+      "event": {
+        "type": "run",
+        "trigger": false,
+        "args": {
+          "result_status": "SUCCESS",
+          "exit_code": 0
+        }
+      },
+      "limitations": [
+        "运行证据只证明 Qiling 进程启动并产生了这些 Hook 事件。"
+      ]
+    },
+    {
+      "schema": "evidence/1.1",
+      "evidence_id": "E-QL-EVT-144acc4f1da5",
+      "run_id": "RUN-QL-BUSYBOX-SINK-001",
+      "firmware_sha256": "c69629ef90c715600e09f22ef12732c593f886db3b0ed145f549de551c48f79d",
+      "type": "emulation",
+      "observed_at": "2026-11-03T12:01:53Z",
+      "status": "parsed",
+      "source": {
+        "type": "emulation",
+        "tool": "qiling",
+        "path": "/root/iot-m4/qiling-test/busybox-sink-out-clean/qiling-events.jsonl",
+        "line": 4
+      },
+      "artifact": {
+        "path": "/root/iot-m4/qiling-test/busybox-sink-out-clean/qiling-events.jsonl",
+        "sha256": "e6b408cf145fc0178d857014079735a2497b15575a7c5f4a08bb9e894e94e611",
+        "size": 1001
+      },
+      "hook": {
+        "mechanism": "syscall",
+        "name": "open"
+      },
+      "event": {
+        "type": "open",
+        "trigger": true,
+        "args": {
+          "flags": 8192,
+          "mode": 0,
+          "pathname": "/etc/QLTEST"
+        }
+      },
+      "limitations": [
+        "命中 trigger_marker 只证明参数到达该 Hook；不证明可利用或影响范围。",
+        "Qiling 用户态 Hook 可能被目标自身实现绕过；未覆盖路径不在本证据内。"
+      ]
+    }
+  ],
+  "facts": [
+    {
+      "schema": "fact/1.0",
+      "fact_id": "F-QL-TGT-f90def646a80",
+      "run_id": "RUN-QL-BUSYBOX-SINK-001",
+      "firmware_sha256": "c69629ef90c715600e09f22ef12732c593f886db3b0ed145f549de551c48f79d",
+      "type": "elf",
+      "observed_at": "2020-02-27T21:05:12Z",
+      "value": {
+        "path": "/root/iot-m4/fw/rootfs/bin/busybox",
+        "sha256": "0fdc7d06b5068d3e80f05b6069eeff9ae70deeb37d254a67b5f297a86ff35716",
+        "arch": "mips",
+        "bits": 32,
+        "endian": "big",
+        "interpreter": "/lib/ld-musl-mips-sf.so.1",
+        "needed": [
+          "libgcc_s.so.1",
+          "libc.so"
+        ]
+      },
+      "evidence_refs": [
+        "E-QL-TGT-f90def646a80"
+      ],
+      "source": {
+        "type": "manual",
+        "tool": "adapter_qiling.py",
+        "path": "/root/iot-m4/fw/rootfs/bin/busybox"
+      }
+    },
+    {
+      "schema": "fact/1.0",
+      "fact_id": "F-QL-EVT-144acc4f1da5",
+      "run_id": "RUN-QL-BUSYBOX-SINK-001",
+      "firmware_sha256": "c69629ef90c715600e09f22ef12732c593f886db3b0ed145f549de551c48f79d",
+      "type": "syscall",
+      "observed_at": "2026-11-03T12:01:53Z",
+      "value": {
+        "hook": "open",
+        "mechanism": "syscall",
+        "args": {
+          "flags": 8192,
+          "mode": 0,
+          "pathname": "/etc/QLTEST"
+        },
+        "trigger": true,
+        "event_id": "QE-0cdcc4c10602"
+      },
+      "evidence_refs": [
+        "E-QL-EVT-144acc4f1da5"
+      ],
+      "source": {
+        "type": "emulation",
+        "tool": "qiling"
+      }
+    },
+    {
+      "schema": "fact/1.0",
+      "fact_id": "F-QL-RUN-dd86a39cadd2",
+      "run_id": "RUN-QL-BUSYBOX-SINK-001",
+      "firmware_sha256": "c69629ef90c715600e09f22ef12732c593f886db3b0ed145f549de551c48f79d",
+      "type": "stage",
+      "observed_at": "2026-11-03T12:01:53Z",
+      "value": {
+        "status": "SUCCESS",
+        "backend": "qiling",
+        "events": 4,
+        "sink_hits": 1,
+        "observed": 3,
+        "exit_code": 0
+      },
+      "evidence_refs": [
+        "E-QL-RUN-2c1284573c34",
+        "E-QL-EVT-144acc4f1da5"
+      ],
+      "source": {
+        "type": "emulation",
+        "tool": "qiling",
+        "path": "/firmware/rootfs/bin/busybox"
+      }
+    }
+  ],
+  "errors": [],
+  "limitations": [
+    "Qiling 只模拟用户态；不覆盖内核、驱动、硬件外设与真实网络。",
+    "命中 trigger_marker 只证明参数到达 sink，不等于可利用；漏洞结论仍需候选验证。",
+    "SUCCESS 只表示 Qiling 按计划跑完，不表示发现漏洞。",
+    "Qiling 只覆盖用户态执行；内核、驱动、硬件外设与真实网络不在范围内。",
+    "SUCCESS 只表示执行完成；sink-hit 不是漏洞结论，仍需按类型判据验证。"
+  ],
+  "filters": {
+    "version": "qiling-filter/1.0",
+    "trigger_markers": [
+      "QLTEST"
+    ],
+    "sink_hooks": [
+      "open",
+      "openat",
+      "execve"
+    ],
+    "max_events": 2000,
+    "max_string": 512
+  },
+  "counts": {
+    "events": 4,
+    "sink_hits": 1,
+    "observed": 3,
+    "failure_events": 0,
+    "parse_errors": 0,
+    "evidence": 3,
+    "facts": 3,
+    "by_mechanism": {
+      "libc": 1,
+      "syscall": 3
+    },
+    "by_classification": {
+      "sink-hit": 1,
+      "observed": 3,
+      "failure": 0
+    }
+  }
+}

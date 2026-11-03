@@ -1,2 +1,0 @@
-{"args":{"flags":532480,"mode":438,"pathname":"/etc/ld-musl-mips-sf.path"},"classified_as":"observed","context":{"arch":"MIPS","bits":32,"pc":"0x4821dd4"},"hook":"open","mechanism":"syscall","phase":"enter","schema":"qiling-runner-event/1.0","seq":1,"trigger":false}
-{"args":{"error":"UcError: Invalid memory read (UC_ERR_READ_UNMAPPED)"},"classified_as":"failure","context":{"arch":"MIPS","bits":32,"pc":"0x47d6d0c"},"hook":"exception","mechanism":"other","phase":"signal","schema":"qiling-runner-event/1.0","seq":2,"trigger":false}

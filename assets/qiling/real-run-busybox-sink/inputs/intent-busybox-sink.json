@@ -1,0 +1,23 @@
+{
+  "schema": "intent/1.0",
+  "intent_id": "INT-QL-BUSYBOX-SINK-001",
+  "run_id": "RUN-QL-BUSYBOX-SINK-001",
+  "firmware_sha256": "c69629ef90c715600e09f22ef12732c593f886db3b0ed145f549de551c48f79d",
+  "type": "dynamic-validation",
+  "status": "open",
+  "from": [
+    "F-BUSYBOX-STATIC-001"
+  ],
+  "description": "真实固件 busybox 的受控文件读取：确认 cat /etc/QLTEST 到达 open sink",
+  "dedupe_key": "qiling-busybox-sink-001",
+  "creator": "operator",
+  "created_at": "2026-11-03T11:52:00Z",
+  "target": {
+    "path": "/root/iot-m4/fw/rootfs/bin/busybox",
+    "argv": [
+      "/firmware/rootfs/bin/busybox",
+      "cat",
+      "/etc/QLTEST"
+    ]
+  }
+}

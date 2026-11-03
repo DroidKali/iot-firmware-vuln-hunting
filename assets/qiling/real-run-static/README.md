@@ -5,7 +5,7 @@
 ## 结论
 
 - **受控静态目标成功**：真实 Qiling 用户态执行了一个静态链接的 MIPS 大端测试二进制；`openat("/etc/QLTEST")` 命中 trigger marker，产生 1 条 `sink-hit` 事件、1 条 `EmulationResult`（`SUCCESS`）和 3 条 evidence / 3 条 fact；执行经 `sandbox_run.py` 的真实 Docker 隔离，`host_fallback=false`。
-- **固件原始 busybox 失败**：同一套链路对固件自带的动态 musl `busybox` 执行失败，`EmulationResult` 为 `FAILED`（`memory-error`，`UC_ERR_WRITE_UNMAPPED`），没有 sink-hit。原因是 Qiling 1.4.6 对该 musl 动态二进制的映射/重定位缺陷，不是本项目适配器伪造的成功。
+- **动态 busybox 已在 1.4.11 复验成功**：本目录不保留 Qiling 1.4.6 对动态 musl `busybox` 的失败产物；同一个固件 busybox 已由 `assets/qiling/real-run-busybox-sink/` 在 Qiling 1.4.11 上执行成功。1.4.6 的失败只能说明该版本/该镜像的动态加载问题，不能概括为“固件动态目标不可执行”。
 - **测试目标不是固件漏洞**：静态目标由本目录的 `qltest-static.c` 编译并放入 rootfs 的 `tmp/`，用于验证「沙箱 → Qiling → Hook → 事件过滤 → Evidence → 黑板」链路；它不能证明固件存在漏洞，也不能替代对真实固件二进制的验证。
 - **黑板端到端可用**：把 `qiling-import.json` 导入黑板后，evidence 4 / facts 4 / intents 1 / emulation_results 1，`revision=11`，`verify` 通过。
 
@@ -103,19 +103,10 @@ python3 "$REPO/scripts/board_store.py" import \
 
 导入结果：evidence 新增 3、fact 新增 3、EmulationResult 1；加上种子记录后黑板计数为 evidence 4 / facts 4 / intents 1 / emulation_results 1 / candidates 0，`revision=11`、`event_count=11`，`verify` 返回 `ok=true`、`duplicates=0`。完整快照与事件日志见 `board/audit-board.json` 与 `board/audit-events.jsonl`。
 
-## 动态 busybox 失败
+## 动态目标
 
-计划：`plan_id=QPL-45fd38653849`，`run_id=RUN-QL-REAL-001`，`intent_id=INT-QL-001`，目标 `/firmware/rootfs/bin/busybox`，`argv=[busybox, cat, /etc/QLTEST]`，trigger `QLTEST`，sink `openat`。
-
-失败过程：
-
-1. 基础 Qiling 1.4.6 在加载 musl 动态链接器时，所有失败的 `open()` 都返回 `-1`。Qiling 的 `qiling/os/posix/syscall/fcntl.py` 在 `__do_open` 捕获 `QlSyscallError` 后 `return -1`，而 Linux syscall ABI 把 `-1` 解释为 `EPERM`，导致 `libgcc_s.so.1` 等依赖被误报为 `Operation not permitted`。
-2. 为排除该缺陷，构建 `iot-fw/qiling:1.4.6-patched`：把 `__do_open` 的异常分支改为 `return -e.errno`。补丁后 `libgcc_s.so.1` 能打开，但 guest 在 `PC=0x482d7e0` 执行 `sb` 时仍触发 `UC_ERR_WRITE_UNMAPPED`（写入地址 `0x90023100`）。该地址在 `ql.mem.is_mapped` 与 `ql.uc.mem_regions` 中均显示已映射，从 Hook 调用 `ql.uc.mem_write` 也能写入；失败发生在 guest 指令路径，属于 Qiling/Unicorn 的动态链接映射缺陷。
-3. 另试 `iot-fw/qiling:1.4.6-tlb`（在映射后刷新 TLB）以及 Unicorn 2.1.2 镜像，均未改变 `UC_ERR_WRITE_UNMAPPED`。
-
-因此 `dynamic-busybox/qiling-import.json` 为 `status=failed`：`result.status=FAILED`，`failure={category: memory-error, reason: UcError: Invalid memory write (UC_ERR_WRITE_UNMAPPED), retryable: false}`，runner `ok=false`、`exit_code=1`、事件 3 条（2 observed、1 failure、0 sink-hit）；sandbox 仍为 `mode=sandbox`、`host_fallback=false`。
-
-该失败只说明当前 Qiling 版本不能执行这个 musl 动态 busybox，不能据此判断 busybox 是否有漏洞，也不能把该结果升级为成功。
+本目录只保留 1.4.6 的静态目标成功记录。1.4.6 对固件动态 musl `busybox` 的失败产物已删除；同一固件 busybox 在 Qiling 1.4.11 上已成功执行 `cat /etc/QLTEST`，记录见
+`assets/qiling/real-run-busybox-sink/README.md`。旧失败不能再作为“固件动态目标不可执行”的证据。
 
 ## 文件表
 
@@ -131,14 +122,6 @@ python3 "$REPO/scripts/board_store.py" import \
 - `sandbox-run.md` — 2,408 B — `5bbf614a4cc265cbabc1196b42ac5c00be8b1edb4ad23feecdc0a9f54f64fd22` — 沙箱执行报告（Markdown）
 - `qltest-static.c` — 522 B — `401731842277f6ce7ab94d57de840a1cc42ee090b2a6430a390eccae533058c9` — 测试源码
 
-动态失败链路（`dynamic-busybox/`）：
-
-- `qiling-plan.json` — 9,237 B — `fd7ed94c8bd7f3b058f70241f0bf903f6ecb640511b0bde7e3ea5e26691a3147` — 计划（ready，`QPL-45fd38653849`）
-- `qiling-import.json` — 12,785 B — `e08ef11a46114be0b65b0fc52a907b708c33dbf4c4927d3da701a5810f120df2` — 归一化导入包（failed，FAILED）
-- `qiling-runner.json` — 588 B — `9cf52b3dac59c8a0cd3e44befa44d1ad7c5acddbd626c099e419435bd111eb4d` — runner 失败报告
-- `qiling-events.jsonl` — 794 B — `a3ddfd5e15ae54e0b8ae420e5517fde52073a2ff7b02348b3ac9b2af7dbe4d79` — 3 条事件
-- `sandbox-run.json` — 5,076 B — `fc1451b811aa5e4874b7840ce8e79425efcbef2f9dd72d71eace12564bed4331` — 沙箱执行报告
-
 黑板快照（`board/`）：
 
 - `audit-board.json` — 11,043 B — `dcaaf68fa06da22d2d52f4fec47daa171ec9e133f43de76c5b588485d65ca665` — 最终快照
@@ -149,6 +132,6 @@ python3 "$REPO/scripts/board_store.py" import \
 1. 只验证了一个手工编译的静态 MIPS 目标，不是固件自带二进制；`SUCCESS` 只表示 Qiling 按计划跑完并产生事件，不是漏洞结论。
 2. `openat` 命中仅因路径参数包含 trigger marker；`sink-hit` 不等于可利用，仍需按漏洞类型的 `validate_transition` 判据验证。
 3. 没有覆盖内核、驱动、硬件外设、真实网络或多架构；Qiling 只模拟用户态。
-4. 动态 busybox 的 `FAILED` 是工具链/仿真器限制，不构成对 busybox 的安全性判断。
+4. 1.4.6 对动态 busybox 的失败已由 1.4.11 的独立复验取代；该失败不构成对 busybox 的安全性判断。
 5. 本记录只对应 Qiling 1.4.6、该镜像与该宿主；换版本、换镜像或换目标需重新执行并重新记录哈希。
 6. 原始产物来自 `/root/iot-m4/qiling-test/out-static2`、`out3` 与 `board-real`；复制到本目录时未改写内容。

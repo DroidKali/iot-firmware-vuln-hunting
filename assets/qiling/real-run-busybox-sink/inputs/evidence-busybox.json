@@ -1,0 +1,22 @@
+{
+  "schema": "evidence/1.1",
+  "evidence_id": "E-BUSYBOX-STATIC-001",
+  "run_id": "RUN-QL-BUSYBOX-SINK-001",
+  "firmware_sha256": "c69629ef90c715600e09f22ef12732c593f886db3b0ed145f549de551c48f79d",
+  "type": "static",
+  "observed_at": "2026-11-03T11:52:00Z",
+  "status": "parsed",
+  "source": {
+    "type": "static",
+    "tool": "file",
+    "path": "/root/iot-m4/fw/rootfs/bin/busybox"
+  },
+  "artifact": {
+    "path": "/root/iot-m4/fw/rootfs/bin/busybox",
+    "sha256": "0fdc7d06b5068d3e80f05b6069eeff9ae70deeb37d254a67b5f297a86ff35716",
+    "size": 303157
+  },
+  "limitations": [
+    "仅确认 ELF 架构与解释器，不证明运行时行为"
+  ]
+}

@@ -239,7 +239,11 @@ def _api_handler(spec: Dict[str, Any], sink: EventSink,
     def handler(ql: Any) -> None:
         values: Dict[str, Any] = {}
         try:
-            from qiling.os.const import INTEGER, POINTER, STRING
+            try:
+                from qiling.os.const import INTEGER, POINTER, STRING
+            except ImportError:
+                # Qiling 1.4.11 renamed INTEGER to INT; keep the 1.4.6 path too.
+                from qiling.os.const import INT as INTEGER, POINTER, STRING
             type_map = {"STRING": STRING, "POINTER": POINTER, "INTEGER": INTEGER}
             sig = {str(k): type_map.get(str(v), STRING) for k, v in signature.items()}
             if sig:

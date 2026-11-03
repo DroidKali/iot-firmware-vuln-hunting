@@ -4,7 +4,7 @@
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">  
   <img alt="python" src="https://img.shields.io/badge/python-3.8%2B%20stdlib%20only-3776AB.svg?logo=python\&logoColor=white">  
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg">  
-  <img alt="files" src="https://img.shields.io/badge/package-169%20files%20%C2%B7%2042410%20lines-informational.svg">
+  <img alt="files" src="https://img.shields.io/badge/package-117%20files%20%C2%B7%2035504%20lines-informational.svg">
   <img alt="selftest" src="https://img.shields.io/badge/selftest-295%20assertions%20passing-brightgreen.svg">
   <img alt="agent" src="https://img.shields.io/badge/type-Agent%20Skill-7B42BC.svg">  
 </p>
@@ -426,10 +426,9 @@ uv run scripts/emu_run.py --plan fw-audit/$TARGET/45-emu/plan.json \
 - **事件按机制分型**：`system`/`popen` 是 API Hook，`execve` 是 syscall Hook，`strcpy` 等是 libc Hook；机制由计划声明，不由 runner 自报。
 - **证据重算**：适配器重新检查 `trigger_marker` 与 `sink_hooks`；只有两者都命中的事件才是 `sink-hit` 并生成证据，普通 `connect`/`open` 只记 `observed`。runner 自报的 sink-hit 若未命中标记会被降级并写 warning。
 - **状态不混淆**：`SUCCESS` 只表示 Qiling 跑完；`FAILED` / `BLOCKED` / `TIMED_OUT` 分开，`PARTIAL` 必带 limitations。Qiling 只覆盖用户态，SUCCESS 不是漏洞结论。
-- **真实执行记录（2026-11-02）**：在 Ubuntu 24.04 + Docker 29.9.2 + Qiling 1.4.6 上，静态 MIPS 受控目标 `qltest-static` 经真实 `sandbox_run.py` 执行成功，`openat("/etc/QLTEST")` 命中 trigger marker 并生成 1 条 sink-hit 事件、`SUCCESS` 结果与 3 条 evidence / 3 条 fact；黑板导入后 evidence 4 / facts 4 / intents 1 / emulation_results 1，`verify` 通过。原始产物、哈希与复现命令见 `assets/qiling/real-run-static/README.md`。
-- **已知失败（动态 musl busybox）**：固件自带的动态 musl `busybox` 在同一链路下为 `FAILED`（`UC_ERR_WRITE_UNMAPPED`，Qiling 1.4.6 的映射/重定位缺陷），没有 sink-hit；该失败不是漏洞结论，也不能据此判定 busybox 安全或危险。记录同时保存了 `dynamic-busybox/` 的原始产物。
-- **已知失败（固件原始 pineapd）**：同一链路对 WiFi Pineapple Nano 固件自带的动态 musl `/usr/sbin/pineapd` 做了六组真实执行（基础 1.4.6、open() 错误码 patched、TLB 刷新、Unicorn 2.1.2、patched + Unicorn 2.1.2、patched + `LD_LIBRARY_PATH`），全部为 `FAILED / memory-error`、`sink_hit=0`，没有到达 `main`；失败发生在 musl 动态加载阶段（`UC_ERR_READ_UNMAPPED` 或 `UC_ERR_WRITE_UNMAPPED`），不是缺 libpcap，也不是拿错 rootfs。原始产物、镜像 id、事件、哈希与复现命令见 `assets/qiling/real-run-pineapd/README.md`；该结果不是漏洞结论。
-- **验证边界**：上述成功只覆盖一个手工编译的静态目标，证明「沙箱 → Qiling → Hook → 事件过滤 → Evidence → 黑板」链路；固件原始动态目标（busybox、pineapd）均未在 Qiling 中进入应用代码，不覆盖内核、网络或多架构。`SUCCESS` / `sink-hit` 均不是漏洞结论。`assets/qemu/Dockerfile` 只含 QEMU，Qiling 需另建 `iot-fw/qiling:1.4.6`；镜像构建文件见 `assets/qiling/Dockerfile`。
+- **真实执行记录（2026-11-02 / 2026-11-03）**：在 Ubuntu 24.04 + Docker 29.9.2 上，Qiling 1.4.6 执行静态 MIPS 受控目标 `qltest-static` 成功，`openat("/etc/QLTEST")` 命中 trigger marker，生成 1 条 sink-hit、`SUCCESS` 结果与 3 条 evidence / 3 条 fact；Qiling 1.4.11 执行同一固件自带的动态 MIPS/musl `busybox cat /etc/QLTEST`，guest 退出码 0，4 条事件中 `open("/etc/QLTEST")` 命中 sink，生成 1 条 sink-hit、`SUCCESS`、3 条 evidence / 3 条 fact。两次黑板导入后均为 evidence 4 / facts 4 / intents 1 / emulation_results 1，`verify` 通过。原始产物、哈希与复现命令见 `assets/qiling/real-run-static/README.md` 与 `assets/qiling/real-run-busybox-sink/README.md`。
+- **1.4.6 动态失败已修正**：上一次记录把 Qiling 1.4.6 对动态 musl `busybox` 的 `UC_ERR_WRITE_UNMAPPED` 写成固件原始动态目标失败；1.4.11 复验成功，说明这是该版本/该镜像的加载问题，不能概括为「Qiling 不支持 musl」或「固件动态目标不可执行」。旧失败产物已删除，1.4.6 的静态成功记录保留。
+- **验证边界**：上述动态成功只覆盖 `busybox cat /etc/QLTEST` 一个 applet，证明「沙箱 → Qiling → Hook → 事件过滤 → Evidence → 黑板」链路；未覆盖网络、服务、多 applet、内核或多架构。`SUCCESS` / `sink-hit` 均不是漏洞结论。`assets/qemu/Dockerfile` 只含 QEMU，Qiling 需另建 `iot-fw/qiling:1.4.11`；镜像构建文件见 `assets/qiling/Dockerfile`（固定 Qiling 1.4.11 commit）。
 
 ```bash
 # 1) 只读计划：ready 只表示参数齐全，不代表能跑
@@ -473,7 +472,7 @@ uv run scripts/board_store.py import --workspace fw-audit/$TARGET/board \
 - **M1 契约与黑板**：Fact / Intent / EmulationResult / BoardState 契约、事件日志、快照、去重与 `validate_transition`。
 - **M2 资源与沙箱**：所有执行统一经过 Sandbox Runner，预算、并发准入、超时与失败关闭。
 - **M3 EmbaAdapter**（已落地）：解析既有 EMBA 产物，区分「静态发现 / 进程运行 / 端口响应」，三类观察不可互升。
-- **M4 轻量整机仿真**（执行器、真实 rootfs 启动记录、Qiling 适配器与静态目标真实执行已落地；固件原始动态目标仍受 Qiling 1.4.6 缺陷阻塞，厂商内核未验证）：按 EMBA 的方法论（不安装 EMBA）用 QEMU 起整机；Qiling 定向仿真作为整机失败后的分支。
+- **M4 轻量整机仿真**（执行器、真实 rootfs 启动记录、Qiling 适配器、1.4.6 静态目标与 1.4.11 动态 busybox 真实执行已落地；厂商内核、网络/服务与多 applet 未验证）：按 EMBA 的方法论（不安装 EMBA）用 QEMU 起整机；Qiling 定向仿真作为整机失败后的分支。
 - **M5 真实固件基准**：合法来源、人工复核、Precision / Recall / 成本与 EALB 校准。
 
 完整对象模型、门禁分层、各里程碑交付物/验收标准、风险清单与实施前检查表见 [ROADMAP.md](ROADMAP.md)。
@@ -504,7 +503,7 @@ uv run scripts/board_store.py import --workspace fw-audit/$TARGET/board \
 | `scripts/emu_plan.py`    | 1006 | M4：只读探测 rootfs/内核/init/镜像，生成 `emulation-plan/1.0`（架构、QEMU argv、blockers、预算）；不执行 QEMU，也不自动构建镜像 |
 | `scripts/emu_run.py`     | 762  | M4：校验计划、镜像与内核哈希，固定经 `sandbox_run.py --mode sandbox` 执行 QEMU，采串口/退出码并输出 `emulation-result/1.0`；无宿主机回退 |
 | `scripts/adapter_qiling.py` | 1388 | M4：Qiling 定向仿真——只读生成 `qiling-plan/1.0`，经 `sandbox_run.py` 执行，按 trigger marker / sink hook 重算事件并输出 `qiling-import/1.0`；无宿主机回退 |
-| `scripts/qiling_runner.py` | 485 | M4：容器内 Qiling runner——按计划安装 syscall / API / libc Hook，写事件 JSONL 与运行报告；不判定漏洞，无宿主模式 |
+| `scripts/qiling_runner.py` | 489 | M4：容器内 Qiling runner——按计划安装 syscall / API / libc Hook，写事件 JSONL 与运行报告；不判定漏洞，无宿主模式 |
 | `scripts/selftest.py`      | 2918 | 安装自检：合成固件与 rootfs，端到端验证其余十九个脚本的判据 + **文档与 CLI 一致性** + 基准回归 + 黑板事件/快照/状态机 + 资源准入 + EMBA 适配 + 整机仿真计划/结果分类 + Qiling 定向仿真（25 组 / 295 条断言，结尾自报总数）                 |
 
 ### 覆盖率门禁判据
@@ -633,7 +632,7 @@ iot-firmware-vuln-hunting/
 │   ├── bench/                    # 合成基准集：manifest.json + samples/B-001…B-011
 │   ├── emba-sample/              # 合成 EMBA 日志夹具：F50/P99/S09/L15/L10/S115 + README
 │   ├── qemu/                     # QEMU 执行镜像 Dockerfile + real-run-malta/ 真实 rootfs 启动记录
-│   ├── qiling/                   # Qiling 运行时 Dockerfile + real-run-static/（静态目标成功）与 real-run-pineapd/（六组固件原始动态目标失败）
+│   ├── qiling/                   # Qiling 运行时 Dockerfile（1.4.11）+ real-run-static/（1.4.6 静态目标）与 real-run-busybox-sink/（1.4.11 动态 busybox）
 │   └── report-template.md        # 工作简报 + 固定 7 个技术区块报告模板
 └── scripts/                      # 20 个纯标准库 Python 脚本
     ├── fw_triage.py
