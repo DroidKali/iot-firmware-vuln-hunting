@@ -1565,6 +1565,7 @@ def main() -> int:
     b21 = os.path.join(base, "board21")
     os.makedirs(b21, exist_ok=True)
     FW21 = "a" * 64
+    TGT21 = "b" * 64
     RUN21 = "RUN-SELFTEST"
 
     def _wj(name: str, obj) -> str:
@@ -1657,7 +1658,8 @@ def main() -> int:
 
     cand21 = _wj("candidate.json", {
         "id": "C-21", "status": "hypothesis", "type": "command-injection",
-        "file": "usr/sbin/httpd"})
+        "file": "usr/sbin/httpd", "run_id": RUN21, "firmware_sha256": FW21,
+        "target_sha256": TGT21})
     run([BOARD, "add", "--workspace", ws21, "--kind", "candidate", "--file", cand21])
     rr = run([BOARD, "add", "--workspace", ws21, "--kind", "candidate",
               "--file", cand21])
@@ -1680,7 +1682,7 @@ def main() -> int:
 
     ev21 = _wj("evidence.json", {
         "schema": "evidence/1.1", "evidence_id": "E-21", "run_id": RUN21,
-        "firmware_sha256": FW21, "type": "emulation",
+        "firmware_sha256": FW21, "target_sha256": TGT21, "type": "emulation",
         "observed_at": "2026-01-01T00:00:00Z", "status": "parsed",
         "source": {"type": "emulation", "tool": "qiling"},
         "event": {"type": "execve", "trigger": True}})
@@ -1688,7 +1690,7 @@ def main() -> int:
           run([BOARD, "add", "--workspace", ws21, "--kind", "evidence",
                "--file", ev21]).returncode == 0)
     policy21 = _wj("policy.json", {
-        "vuln_type": "command-injection",
+        "vuln_type": "command-injection", "target_sha256": TGT21,
         "criteria": {"sink_reachable": True, "user_controlled_input": True,
                      "command_execution": True}})
     rr = run([BOARD, "transition", "--workspace", ws21, "--candidate", "C-21",
@@ -1719,14 +1721,14 @@ def main() -> int:
 
     bad_ev = _wj("evidence-bad-run.json", {
         "schema": "evidence/1.1", "evidence_id": "E-BAD", "run_id": "RUN-OTHER",
-        "firmware_sha256": FW21, "type": "emulation",
+        "firmware_sha256": FW21, "target_sha256": TGT21, "type": "emulation",
         "observed_at": "2026-01-01T00:00:00Z", "status": "parsed",
         "source": {"type": "emulation", "tool": "qiling"},
         "event": {"type": "execve", "trigger": True}})
     pending = _wj("pending.json", {
         "id": "C-X", "status": "pending_dynamic_validation",
         "type": "command-injection", "run_id": RUN21,
-        "firmware_sha256": FW21})
+        "firmware_sha256": FW21, "target_sha256": TGT21})
     out21 = os.path.join(b21, "transition-bad.json")
     run([BTR, "check", "--candidate", pending, "--to", "validated",
          "--evidence", bad_ev, "--policy", policy21, "--run-id", RUN21,
@@ -1737,7 +1739,7 @@ def main() -> int:
 
     static_ev = _wj("evidence-static.json", {
         "schema": "evidence/1.1", "evidence_id": "E-STA", "run_id": RUN21,
-        "firmware_sha256": FW21, "type": "static",
+        "firmware_sha256": FW21, "target_sha256": TGT21, "type": "static",
         "observed_at": "2026-01-01T00:00:00Z", "status": "parsed",
         "source": {"type": "static", "tool": "sink_scan", "path": "usr/sbin/httpd"}})
     out21b = os.path.join(b21, "transition-static.json")
@@ -1753,6 +1755,130 @@ def main() -> int:
          "--firmware-sha256", FW21, "--json", out21c, "--quiet"])
     check("状态机：同 run 动态证据 + 全判据 → validated",
           _rj(out21c).get("code") == "OK", _rj(out21c).get("code", ""))
+
+    # ── M6 / EV-01..EV-10：证据与状态转换强绑定（负面用例）────────────────
+    def _without(row: dict, key: str) -> dict:
+        out = dict(row)
+        out.pop(key, None)
+        return out
+
+    def _cand_ev(**over) -> dict:
+        row = {"id": "C-EV", "status": "pending_dynamic_validation",
+               "type": "command-injection", "run_id": RUN21,
+               "firmware_sha256": FW21, "target_sha256": TGT21}
+        row.update(over)
+        return row
+
+    def _btr_case(name: str, cand_obj: dict, ev_objs: list,
+                  policy_path: str = policy21) -> dict:
+        cpath = _wj(f"ev-{name}-cand.json", cand_obj)
+        epaths = [_wj(f"ev-{name}-{j}.json", ev) for j, ev in enumerate(ev_objs)]
+        out = os.path.join(b21, f"ev-{name}-out.json")
+        cmd = [BTR, "check", "--candidate", cpath, "--to", "validated",
+               "--policy", policy_path, "--json", out, "--quiet"]
+        for ep in epaths:
+            cmd += ["--evidence", ep]
+        run(cmd)
+        return _rj(out)
+
+    ev21_row = _rj(ev21)
+    bad_ev_row = _rj(bad_ev)
+    static_ev_row = _rj(static_ev)
+
+    r = _btr_case("01", _without(_cand_ev(), "run_id"), [])
+    check("EV-01 候选缺 run_id → CANDIDATE_RUN_ID_MISSING",
+          r.get("code") == "CANDIDATE_RUN_ID_MISSING", r.get("code", ""))
+    r = _btr_case("02", _without(_cand_ev(), "firmware_sha256"), [])
+    check("EV-02 候选缺 firmware_sha256 → CANDIDATE_FIRMWARE_MISSING",
+          r.get("code") == "CANDIDATE_FIRMWARE_MISSING", r.get("code", ""))
+    r = _btr_case("03", _cand_ev(), [bad_ev_row])
+    check("EV-03 证据 run_id 与候选不一致 → EVIDENCE_NOT_BOUND_TO_RUN",
+          r.get("code") == "EVIDENCE_NOT_BOUND_TO_RUN", r.get("code", ""))
+
+    ev_fw_bad = dict(ev21_row, evidence_id="E-FW", firmware_sha256="c" * 64)
+    r = _btr_case("04", _cand_ev(), [ev_fw_bad])
+    check("EV-04 证据固件哈希与候选不一致 → FIRMWARE_MISMATCH",
+          r.get("code") == "FIRMWARE_MISMATCH", r.get("code", ""))
+
+    ev_no_target = _without(dict(ev21_row, evidence_id="E-NT"), "target_sha256")
+    r = _btr_case("05", _cand_ev(), [ev_no_target])
+    check("EV-05 规则要求目标但证据缺 target_sha256 → TARGET_HASH_REQUIRED",
+          r.get("code") == "TARGET_HASH_REQUIRED", r.get("code", ""))
+
+    ev_no_schema = _without(dict(ev21_row, evidence_id="E-NS"), "schema")
+    r = _btr_case("06", _cand_ev(), [ev_no_schema])
+    check("EV-06 证据缺 schema → EVIDENCE_SCHEMA_REQUIRED",
+          r.get("code") == "EVIDENCE_SCHEMA_REQUIRED", r.get("code", ""))
+
+    nc_dir = os.path.join(b21, "nocontracts")
+    os.makedirs(nc_dir, exist_ok=True)
+    nc_btr = os.path.join(nc_dir, "board_transitions.py")
+    shutil.copyfile(BTR, nc_btr)
+    nc_cand = _wj("ev-07-cand.json", _cand_ev())
+    nc_out = os.path.join(b21, "ev-07-out.json")
+    run([nc_btr, "check", "--candidate", nc_cand, "--to", "validated",
+         "--evidence", ev21, "--policy", policy21, "--json", nc_out, "--quiet"])
+    check("EV-07 contracts.py 不可导入 → CONTRACT_UNAVAILABLE（fail-closed）",
+          _rj(nc_out).get("code") == "CONTRACT_UNAVAILABLE",
+          _rj(nc_out).get("code", ""))
+
+    r = _btr_case("08", _cand_ev(), [ev21_row, bad_ev_row])
+    check("EV-08 多条证据中一条来自其他 run → 整体拒绝",
+          r.get("code") == "EVIDENCE_NOT_BOUND_TO_RUN", r.get("code", ""))
+
+    ev_revoked = dict(ev21_row, evidence_id="E-REV", revoked=True,
+                      revoked_at="2026-01-01T00:00:00Z")
+    r = _btr_case("09", _cand_ev(), [ev_revoked])
+    check("EV-09 已撤销证据 → EVIDENCE_REVOKED",
+          r.get("code") == "EVIDENCE_REVOKED", r.get("code", ""))
+
+    ev_expired = dict(ev21_row, evidence_id="E-EXP",
+                      expires_at="2020-01-01T00:00:00Z")
+    r = _btr_case("09b", _cand_ev(), [ev_expired])
+    check("EV-09b 已过期证据 → EVIDENCE_EXPIRED",
+          r.get("code") == "EVIDENCE_EXPIRED", r.get("code", ""))
+
+    ev_conflict_a = dict(ev21_row, evidence_id="E-CA", conflict_group="CG-21")
+    ev_conflict_b = dict(static_ev_row, evidence_id="E-CB", conflict_group="CG-21")
+    r = _btr_case("10", _cand_ev(), [ev_conflict_a, ev_conflict_b])
+    check("EV-10 同一冲突组内结论不一致 → EVIDENCE_CONFLICT",
+          r.get("code") == "EVIDENCE_CONFLICT", r.get("code", ""))
+
+    ev_supersedes = dict(ev21_row, evidence_id="E-SUP", supersedes=["E-21"])
+    r = _btr_case("11", _cand_ev(), [ev21_row, ev_supersedes])
+    check("EV-11 证据声明取代同时选中的证据 → EVIDENCE_SUPERSEDES_CONFLICT",
+          r.get("code") == "EVIDENCE_SUPERSEDES_CONFLICT", r.get("code", ""))
+
+    ev_life = _wj("evidence-life.json", dict(
+        ev21_row, evidence_id="E-LIFE", revoked=False,
+        source={"type": "emulation", "tool": "qiling",
+                "tool_version": "1.4.11", "reliability": "high"}))
+    check("contracts.py：Evidence 生命周期可选字段合法时通过",
+          run([CONTRACTS, "--kind", "evidence", "--file", ev_life]).returncode == 0)
+    ev_life_bad = _wj("evidence-life-bad.json", dict(
+        ev21_row, evidence_id="E-LIFE-BAD", revoked=True))
+    check("contracts.py：revoked=true 缺 revoked_at → 拒绝",
+          run([CONTRACTS, "--kind", "evidence", "--file", ev_life_bad]).returncode == 1)
+    ev_rel_bad = _wj("evidence-rel-bad.json", dict(
+        ev21_row, evidence_id="E-REL-BAD",
+        source={"type": "emulation", "tool": "qiling", "reliability": "certain"}))
+    check("contracts.py：source.reliability 非法 → 拒绝",
+          run([CONTRACTS, "--kind", "evidence", "--file", ev_rel_bad]).returncode == 1)
+
+    ws_ref = os.path.join(b21, "refcheck")
+    run([BOARD, "init", "--workspace", ws_ref, "--run-id", RUN21,
+         "--firmware-sha256", FW21])
+    ref_cand = _wj("ref-cand.json", {
+        "id": "C-REF", "status": "pending_dynamic_validation",
+        "type": "command-injection", "target_sha256": TGT21})
+    run([BOARD, "add", "--workspace", ws_ref, "--kind", "candidate",
+         "--file", ref_cand])
+    rr = run([BOARD, "transition", "--workspace", ws_ref, "--candidate", "C-REF",
+              "--to", "validated", "--reason", "引用不存在的证据",
+              "--evidence", "E-MISSING", "--policy", policy21])
+    check("board_store：引用不存在的 evidence → EVIDENCE_REF_NOT_FOUND",
+          rr.returncode == 1 and "EVIDENCE_REF_NOT_FOUND" in rr.stderr,
+          f"rc={rr.returncode} err={rr.stderr[:120]}")
 
     risk_bad = _wj("risk.json", {
         "candidate_id": "C-21", "status": "ACCEPTED_WITH_RISK",

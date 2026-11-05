@@ -29,17 +29,22 @@ Candidate 的 status 以前只是报告里的一个字符串：`hypothesis` 可�
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import sys
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
 try:
     from contracts import validate_evidence as _validate_evidence
-except Exception:  # pragma: no cover - 单独拷走时退化为不校验证据结构
+except Exception:  # pragma: no cover - 单独拷走时状态机必须拒绝升级（fail-closed）
     _validate_evidence = None
 
-VERSION = "1.0"
+VERSION = "1.1"
+EVIDENCE_SCHEMA = "evidence/1.1"
+HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
 
 #: Candidate 状态转换白名单。终态不在键里：重开必须走 BACKTRACK。
 TRANSITIONS: Dict[str, tuple] = {
@@ -145,6 +150,12 @@ VERIFICATION_RULES: Dict[str, Dict[str, Any]] = {
     },
 }
 
+#: 规则是否要求证据绑定具体目标（ELF / 共享库 / 可执行文件）。
+#: hardcoded-credential 可能来自配置文件，other 可能没有二进制目标；这两类只有在
+#: 策略或候选显式给出 target_sha256 时才强制绑定。
+for _rule_name, _rule in VERIFICATION_RULES.items():
+    _rule["requires_target"] = _rule_name not in ("hardcoded-credential", "other")
+
 #: Intent 状态机：open → claimed → done/failed；claim 可以被释放回 open。
 INTENT_TRANSITIONS: Dict[str, tuple] = {
     "open": ("claimed", "cancelled"),
@@ -190,15 +201,63 @@ def _result(ok: bool, code: str, message: str, **extra: Any) -> Dict[str, Any]:
     return out
 
 
+def _valid_run_id(value: Any) -> bool:
+    """run_id 必须是非空、无空白、无控制字符的字符串，最长 128。"""
+    if not isinstance(value, str) or not value or len(value) > 128:
+        return False
+    if value != value.strip():
+        return False
+    return all((not ch.isspace()) and ord(ch) >= 0x20 and ord(ch) != 0x7f for ch in value)
+
+
+def _is_sha256(value: Any) -> bool:
+    return isinstance(value, str) and bool(HEX64.match(value))
+
+
+def _parse_ts(value: Any) -> Optional[datetime]:
+    """解析带时区的 ISO-8601；naive 时间视为非法，避免本地时区歧义。"""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return None
+    return dt.astimezone(timezone.utc)
+
+
+def _evidence_signature(ev: Dict[str, Any]) -> str:
+    """证据内容签名：优先 content_sha256，否则对判定相关字段做 canonical hash。"""
+    content = ev.get("content_sha256")
+    if _is_sha256(content):
+        return str(content).lower()
+    material = {k: ev.get(k) for k in
+                ("type", "status", "target_sha256", "event", "artifact", "source")
+                if k in ev}
+    try:
+        blob = json.dumps(material, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"))
+    except (TypeError, ValueError):
+        blob = repr(material)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
 def validate_transition(candidate: Any, to_state: str,
                         evidence: Optional[Sequence[Dict[str, Any]]] = None,
                         policy: Optional[Dict[str, Any]] = None,
                         run_id: Optional[str] = None,
-                        firmware_sha256: Optional[str] = None) -> Dict[str, Any]:
+                        firmware_sha256: Optional[str] = None,
+                        now: Optional[str] = None) -> Dict[str, Any]:
     """校验一次 Candidate 状态转换，返回 {ok, code, message, ...}。
 
     * 普通状态只检查白名单与终态；
-    * 进入 `validated` / `confirmed` 时追加类型化验证：证据绑定、类型、判据、触发上下文；
+    * 进入 `validated` / `confirmed` 时执行严格验证：候选自带 run_id 与
+      firmware_sha256、证据全部为 evidence/1.1 且同 run 同固件、目标哈希绑定、
+      证据生命周期与冲突检查；
     * 任何失败都不修改候选对象，调用方可以安全地先校验再落日志。
     """
     if not isinstance(candidate, dict):
@@ -229,7 +288,16 @@ def validate_transition(candidate: Any, to_state: str,
                        **{"from": frm, "to": to})
 
     # ── validated / confirmed：类型化验证 ───────────────────────────────────
-    pol: Dict[str, Any] = policy if isinstance(policy, dict) else {}
+    if _validate_evidence is None:
+        return _result(False, "CONTRACT_UNAVAILABLE",
+                       "contracts.py 不可用或导入失败，拒绝在没有契约校验时提升候选状态",
+                       **{"from": frm, "to": to})
+
+    if policy is not None and not isinstance(policy, dict):
+        return _result(False, "POLICY_INVALID",
+                       "验证策略必须是 JSON 对象；空对象可以省略，但不能传数组或标量",
+                       **{"from": frm, "to": to})
+    pol: Dict[str, Any] = policy or {}
     vuln_type, rule = _rule_for(candidate, pol)
     if rule is None:
         return _result(False, "TYPE_RULE_MISSING",
@@ -241,40 +309,174 @@ def validate_transition(candidate: Any, to_state: str,
                        f"策略类型 {pol['vuln_type']!r} 与候选类型 {cand_type!r} 不一致",
                        **{"from": frm, "to": to, "vuln_type": vuln_type})
 
-    rows = [e for e in (evidence or []) if isinstance(e, dict)]
-    if not rows:
+    # 候选自身必须声明审计运行与固件；参数只用于交叉校验，不作为兜底。
+    cand_run_raw = candidate.get("run_id")
+    if cand_run_raw is None:
+        return _result(False, "CANDIDATE_RUN_ID_MISSING",
+                       "候选缺少 run_id；提升状态前必须绑定一次审计运行",
+                       **{"from": frm, "to": to, "vuln_type": vuln_type})
+    if not _valid_run_id(cand_run_raw):
+        return _result(False, "CANDIDATE_RUN_ID_INVALID",
+                       f"候选 run_id 非法：{cand_run_raw!r}",
+                       **{"from": frm, "to": to, "vuln_type": vuln_type})
+    cand_run = cand_run_raw
+    if run_id is not None and run_id != cand_run:
+        return _result(False, "RUN_ID_MISMATCH",
+                       f"调用方 run_id {run_id!r} 与候选 {cand_run!r} 不一致",
+                       **{"from": frm, "to": to, "vuln_type": vuln_type})
+
+    cand_fw_raw = candidate.get("firmware_sha256")
+    if cand_fw_raw is None:
+        return _result(False, "CANDIDATE_FIRMWARE_MISSING",
+                       "候选缺少 firmware_sha256；提升状态前必须绑定固件哈希",
+                       **{"from": frm, "to": to, "vuln_type": vuln_type})
+    if not _is_sha256(cand_fw_raw):
+        return _result(False, "CANDIDATE_FIRMWARE_INVALID",
+                       "候选 firmware_sha256 必须是 64 位十六进制 sha256",
+                       **{"from": frm, "to": to, "vuln_type": vuln_type})
+    cand_fw = cand_fw_raw.lower()
+    if firmware_sha256 is not None:
+        if not _is_sha256(firmware_sha256):
+            return _result(False, "FIRMWARE_HASH_INVALID",
+                           "调用方 firmware_sha256 必须是 64 位十六进制 sha256",
+                           **{"from": frm, "to": to, "vuln_type": vuln_type})
+        if firmware_sha256.lower() != cand_fw:
+            return _result(False, "FIRMWARE_MISMATCH",
+                           "调用方 firmware_sha256 与候选不一致",
+                           **{"from": frm, "to": to, "vuln_type": vuln_type})
+
+    # 目标哈希：策略与候选可以各自给出，但必须一致；规则要求时必须有。
+    target: Optional[str] = None
+    pol_target = pol.get("target_sha256")
+    if pol_target is not None:
+        if not _is_sha256(pol_target):
+            return _result(False, "TARGET_HASH_INVALID",
+                           "策略 target_sha256 必须是 64 位十六进制 sha256",
+                           **{"from": frm, "to": to, "vuln_type": vuln_type})
+        target = pol_target.lower()
+    cand_target = candidate.get("target_sha256")
+    if cand_target is not None:
+        if not _is_sha256(cand_target):
+            return _result(False, "TARGET_HASH_INVALID",
+                           "候选 target_sha256 必须是 64 位十六进制 sha256",
+                           **{"from": frm, "to": to, "vuln_type": vuln_type})
+        cand_target = cand_target.lower()
+        if target is not None and target != cand_target:
+            return _result(False, "TARGET_HASH_MISMATCH",
+                           "策略与候选的 target_sha256 不一致",
+                           **{"from": frm, "to": to, "vuln_type": vuln_type})
+        target = target or cand_target
+    target_required = bool(rule.get("requires_target")) or target is not None
+    if target_required and target is None:
+        return _result(False, "TARGET_HASH_REQUIRED",
+                       f"{vuln_type} 的验证必须绑定具体目标的 target_sha256",
+                       **{"from": frm, "to": to, "vuln_type": vuln_type})
+
+    if evidence is None:
+        raw_rows: List[Any] = []
+    elif isinstance(evidence, dict):
+        raw_rows = [evidence]
+    else:
+        try:
+            raw_rows = list(evidence)
+        except TypeError:
+            return _result(False, "EVIDENCE_INVALID",
+                           "evidence 必须是证据对象或证据对象列表",
+                           **{"from": frm, "to": to, "vuln_type": vuln_type})
+    if not raw_rows:
         return _result(False, "EVIDENCE_REQUIRED",
                        f"{to} 至少需要一条绑定 run 与固件的证据",
                        **{"from": frm, "to": to, "vuln_type": vuln_type})
+    if any(not isinstance(e, dict) for e in raw_rows):
+        return _result(False, "EVIDENCE_INVALID",
+                       "证据列表中存在非对象元素",
+                       **{"from": frm, "to": to, "vuln_type": vuln_type})
 
-    want_run = run_id or candidate.get("run_id")
-    want_fw = firmware_sha256 or candidate.get("firmware_sha256")
+    rows: List[Dict[str, Any]] = list(raw_rows)
     type_hits: List[str] = []
     trigger = False
-    target_mismatch: List[str] = []
     structure_errors: List[Dict[str, str]] = []
-
     for i, ev in enumerate(rows):
-        if _validate_evidence is not None:
-            for err in _validate_evidence(ev):
-                structure_errors.append({"path": f"evidence[{i}].{err['path']}",
-                                         "code": err["code"],
-                                         "message": err["message"]})
-        if isinstance(want_run, str) and ev.get("run_id") != want_run:
+        schema = ev.get("schema")
+        if schema != EVIDENCE_SCHEMA:
+            code = "EVIDENCE_SCHEMA_REQUIRED" if schema is None else "EVIDENCE_SCHEMA_UNSUPPORTED"
+            return _result(False, code,
+                           f"证据 {i} 必须是 {EVIDENCE_SCHEMA}；弱格式/旧格式不得用于提升状态",
+                           **{"from": frm, "to": to, "vuln_type": vuln_type,
+                              "evidence_index": i, "schema": schema})
+        try:
+            errs = _validate_evidence(ev)
+        except Exception as exc:  # noqa: BLE001 - 契约校验器异常必须 fail-closed
+            return _result(False, "EVIDENCE_VALIDATOR_ERROR",
+                           f"证据 {i} 契约校验异常：{exc}",
+                           **{"from": frm, "to": to, "vuln_type": vuln_type,
+                              "evidence_index": i})
+        if not isinstance(errs, list):
+            return _result(False, "EVIDENCE_VALIDATOR_ERROR",
+                           f"证据 {i} 契约校验器返回了非列表结果",
+                           **{"from": frm, "to": to, "vuln_type": vuln_type,
+                              "evidence_index": i})
+        for err in errs:
+            if not isinstance(err, dict) or not isinstance(err.get("path"), str):
+                return _result(False, "EVIDENCE_VALIDATOR_ERROR",
+                               f"证据 {i} 契约校验器返回了非法错误项",
+                               **{"from": frm, "to": to, "vuln_type": vuln_type,
+                                  "evidence_index": i})
+            sub = err["path"]
+            if sub == "evidence":
+                sub = ""
+            elif sub.startswith("evidence."):
+                sub = sub[len("evidence."):]
+            structure_errors.append({"path": f"evidence[{i}]" + (f".{sub}" if sub else ""),
+                                     "code": str(err.get("code")),
+                                     "message": str(err.get("message"))})
+
+        ev_run = ev.get("run_id")
+        if not isinstance(ev_run, str) or ev_run != cand_run:
             return _result(False, "EVIDENCE_NOT_BOUND_TO_RUN",
-                           f"证据 {i} 属于 {ev.get('run_id')!r}，候选属于 {want_run!r}",
+                           f"证据 {i} 属于 {ev_run!r}，候选属于 {cand_run!r}",
                            **{"from": frm, "to": to, "vuln_type": vuln_type,
                               "evidence_index": i})
         ev_fw = ev.get("firmware_sha256")
-        if isinstance(want_fw, str) and isinstance(ev_fw, str) \
-                and ev_fw.lower() != want_fw.lower():
+        if not isinstance(ev_fw, str) or not ev_fw:
+            return _result(False, "EVIDENCE_FIRMWARE_MISSING",
+                           f"证据 {i} 缺少 firmware_sha256",
+                           **{"from": frm, "to": to, "vuln_type": vuln_type,
+                              "evidence_index": i})
+        if not _is_sha256(ev_fw):
+            return _result(False, "EVIDENCE_FIRMWARE_INVALID",
+                           f"证据 {i} firmware_sha256 不是 64 位十六进制",
+                           **{"from": frm, "to": to, "vuln_type": vuln_type,
+                              "evidence_index": i})
+        if ev_fw.lower() != cand_fw:
             return _result(False, "FIRMWARE_MISMATCH",
                            f"证据 {i} 绑定的固件与候选不一致",
                            **{"from": frm, "to": to, "vuln_type": vuln_type,
                               "evidence_index": i})
-        if pol.get("target_sha256") and ev.get("target_sha256") \
-                and str(ev["target_sha256"]).lower() != str(pol["target_sha256"]).lower():
-            target_mismatch.append(str(i))
+
+        ev_target = ev.get("target_sha256")
+        if target_required:
+            if ev_target is None:
+                return _result(False, "TARGET_HASH_REQUIRED",
+                               f"证据 {i} 缺少 target_sha256",
+                               **{"from": frm, "to": to, "vuln_type": vuln_type,
+                                  "evidence_index": i})
+            if not _is_sha256(ev_target):
+                return _result(False, "TARGET_HASH_INVALID",
+                               f"证据 {i} target_sha256 不是 64 位十六进制",
+                               **{"from": frm, "to": to, "vuln_type": vuln_type,
+                                  "evidence_index": i})
+            if ev_target.lower() != target:
+                return _result(False, "TARGET_HASH_MISMATCH",
+                               f"证据 {i} 的目标哈希与期望不一致",
+                               **{"from": frm, "to": to, "vuln_type": vuln_type,
+                                  "evidence_index": i})
+        elif ev_target is not None and not _is_sha256(ev_target):
+            return _result(False, "TARGET_HASH_INVALID",
+                           f"证据 {i} target_sha256 不是 64 位十六进制",
+                           **{"from": frm, "to": to, "vuln_type": vuln_type,
+                              "evidence_index": i})
+
         if ev.get("type") in rule["evidence_types"]:
             type_hits.append(str(ev.get("type")))
         event = ev.get("event") if isinstance(ev.get("event"), dict) else {}
@@ -286,13 +488,96 @@ def validate_transition(candidate: Any, to_state: str,
                        "证据不符合 evidence/1.1 契约",
                        **{"from": frm, "to": to, "vuln_type": vuln_type,
                           "errors": structure_errors[:8]})
+
+    # 同一 evidence_id 只能指向同一份内容；重复 ID 且内容不同视为冲突。
+    id_signatures: Dict[str, str] = {}
+    for i, ev in enumerate(rows):
+        eid = ev.get("evidence_id")
+        if not isinstance(eid, str) or not eid:
+            return _result(False, "EVIDENCE_INVALID",
+                           f"证据 {i} 缺少 evidence_id",
+                           **{"from": frm, "to": to, "vuln_type": vuln_type,
+                              "evidence_index": i})
+        sig = _evidence_signature(ev)
+        if eid in id_signatures and id_signatures[eid] != sig:
+            return _result(False, "EVIDENCE_ID_CONFLICT",
+                           f"evidence_id {eid!r} 对应了不同内容",
+                           **{"from": frm, "to": to, "vuln_type": vuln_type,
+                              "evidence_id": eid})
+        id_signatures[eid] = sig
+
+    if now is not None:
+        now_dt = _parse_ts(now)
+        if now_dt is None:
+            return _result(False, "NOW_INVALID",
+                           "now 必须是带时区的 ISO-8601 时间",
+                           **{"from": frm, "to": to, "vuln_type": vuln_type})
+    else:
+        now_dt = datetime.now(timezone.utc)
+
+    selected_ids = set(id_signatures)
+    for i, ev in enumerate(rows):
+        eid = ev.get("evidence_id")
+        if ev.get("revoked") is True:
+            return _result(False, "EVIDENCE_REVOKED",
+                           f"证据 {i}（{eid}）已被撤销，不得用于提升状态",
+                           **{"from": frm, "to": to, "vuln_type": vuln_type,
+                              "evidence_index": i})
+        if ev.get("superseded_by") is not None:
+            return _result(False, "EVIDENCE_SUPERSEDED",
+                           f"证据 {i}（{eid}）已被 {ev.get('superseded_by')!r} 取代",
+                           **{"from": frm, "to": to, "vuln_type": vuln_type,
+                              "evidence_index": i})
+        if ev.get("expires_at") is not None:
+            expires = _parse_ts(ev.get("expires_at"))
+            if expires is None:
+                return _result(False, "EVIDENCE_EXPIRY_INVALID",
+                               f"证据 {i}（{eid}）expires_at 不是带时区的 ISO-8601",
+                               **{"from": frm, "to": to, "vuln_type": vuln_type,
+                                  "evidence_index": i})
+            if expires <= now_dt:
+                return _result(False, "EVIDENCE_EXPIRED",
+                               f"证据 {i}（{eid}）已于 {ev.get('expires_at')} 过期",
+                               **{"from": frm, "to": to, "vuln_type": vuln_type,
+                                  "evidence_index": i})
+        if ev.get("status") == "failed":
+            return _result(False, "EVIDENCE_FAILED",
+                           f"证据 {i}（{eid}）状态为 failed，不能证明漏洞成立",
+                           **{"from": frm, "to": to, "vuln_type": vuln_type,
+                              "evidence_index": i})
+        supersedes = ev.get("supersedes")
+        if isinstance(supersedes, list):
+            hit = [x for x in supersedes if isinstance(x, str) and x in selected_ids and x != eid]
+            if hit:
+                return _result(False, "EVIDENCE_SUPERSEDES_CONFLICT",
+                               f"证据 {i}（{eid}）声明取代同时被选中的 {hit[0]!r}",
+                               **{"from": frm, "to": to, "vuln_type": vuln_type,
+                                  "evidence_index": i, "conflict_with": hit[0]})
+        contradicts = ev.get("contradicts")
+        if isinstance(contradicts, list):
+            hit = [x for x in contradicts if isinstance(x, str) and x in selected_ids and x != eid]
+            if hit:
+                return _result(False, "EVIDENCE_CONTRADICTION",
+                               f"证据 {i}（{eid}）与同时被选中的 {hit[0]!r} 矛盾",
+                               **{"from": frm, "to": to, "vuln_type": vuln_type,
+                                  "evidence_index": i, "conflict_with": hit[0]})
+
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for i, ev in enumerate(rows):
+        group = ev.get("conflict_group")
+        if isinstance(group, str) and group:
+            groups.setdefault(group, []).append({"index": i, "signature": _evidence_signature(ev)})
+    for group, items in groups.items():
+        signatures = sorted({item["signature"] for item in items})
+        if len(signatures) > 1:
+            return _result(False, "EVIDENCE_CONFLICT",
+                           f"冲突组 {group!r} 内存在结论不一致的证据",
+                           **{"from": frm, "to": to, "vuln_type": vuln_type,
+                              "conflict_group": group})
+
     if not type_hits:
         return _result(False, "EVIDENCE_TYPE_NOT_ACCEPTED",
                        f"{vuln_type} 需要 {'/'.join(rule['evidence_types'])} 证据",
-                       **{"from": frm, "to": to, "vuln_type": vuln_type})
-    if target_mismatch:
-        return _result(False, "TARGET_HASH_MISMATCH",
-                       "证据指向的目标哈希与策略不一致",
                        **{"from": frm, "to": to, "vuln_type": vuln_type})
 
     criteria = pol.get("criteria") if isinstance(pol.get("criteria"), dict) else {}
@@ -324,6 +609,7 @@ def validate_transition(candidate: Any, to_state: str,
 
     return _result(True, "OK", f"允许 {frm} → {to}（{vuln_type}）",
                    **{"from": frm, "to": to, "vuln_type": vuln_type,
+                      "target_sha256": target,
                       "evidence_types": sorted(set(type_hits)),
                       "criteria": list(rule["required_criteria"])})
 
@@ -384,7 +670,7 @@ def validate_intent_transition(intent: Any, to_status: str,
 def graph() -> Dict[str, Any]:
     """可序列化的状态机描述，供文档/审查与 --json 使用。"""
     return {
-        "schema": "board-transitions/1.0",
+        "schema": "board-transitions/1.1",
         "version": VERSION,
         "candidate": {
             "transitions": {k: list(v) for k, v in TRANSITIONS.items()},
@@ -423,8 +709,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     c.add_argument("--evidence", action="append", default=[],
                    help="证据 JSON 文件，可重复；也接受 {evidence:[...]} 或数组")
     c.add_argument("--policy", help="验证策略 JSON 文件")
-    c.add_argument("--run-id", help="期望的 run_id（默认取候选上的）")
-    c.add_argument("--firmware-sha256", help="期望的固件 sha256（默认取候选上的）")
+    c.add_argument("--run-id", help="交叉校验候选的 run_id（不再用于兜底）")
+    c.add_argument("--firmware-sha256", help="交叉校验候选的固件 sha256（不再用于兜底）")
+    c.add_argument("--target-sha256",
+                   help="被测目标（ELF/共享库/可执行文件）的 sha256；也接受策略文件里的 target_sha256")
     c.add_argument("--json", dest="json_out", help="把结果写成 JSON")
     c.add_argument("--quiet", action="store_true", help="只给退出码")
     r = sub.add_parser("risk", help="校验风险处置记录")
@@ -461,6 +749,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"[error] 读取输入失败：{exc}", file=sys.stderr)
         return 2
 
+    if not isinstance(policy, dict):
+        print("[error] --policy 必须是 JSON 对象", file=sys.stderr)
+        return 2
+    if args.target_sha256:
+        existing = policy.get("target_sha256")
+        if existing is not None and (
+                not isinstance(existing, str)
+                or existing.lower() != args.target_sha256.lower()):
+            print("[error] --target-sha256 与 --policy 中的 target_sha256 不一致",
+                  file=sys.stderr)
+            return 2
+        policy = dict(policy)
+        policy["target_sha256"] = args.target_sha256
     result = validate_transition(candidate, args.to, evidence, policy,
                                  args.run_id, args.firmware_sha256)
     if args.json_out:

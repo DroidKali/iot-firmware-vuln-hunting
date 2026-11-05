@@ -1,6 +1,6 @@
 # 路线图（Roadmap）
 
-> 状态基线：2026-11-03（M1–M3 已落地；M4 QEMU 执行器与真实 rootfs 启动记录已落地；Qiling 适配器、契约、黑板导入、1.4.6 静态受控目标与 1.4.11 动态 busybox 真实执行已落地）。当前仓库已交付 Phase 0–5 确定性流水线、覆盖率/Strict 门禁、
+> 状态基线：2026-11-05（M1–M4 已落地；M6 证据强绑定先行落地；Qiling 适配器、契约、黑板导入、1.4.6 静态受控目标与 1.4.11 动态 busybox 真实执行已落地）。当前仓库已交付 Phase 0–5 确定性流水线、覆盖率/Strict 门禁、
 > 结构化契约、fail-closed 沙箱入口与合成基准；本文件描述在此之上的 **V2 渐进式架构**。
 >
 > 这是实施计划，不代表下列能力已经全部实现或通过测试。每个里程碑落地前都必须
@@ -12,14 +12,13 @@
 |---|---|---|
 | 确定性流水线 | Phase 0–5 已落地；门禁可阻断 | 保持不变，作为控制平面与最终裁决者 |
 | 黑板 / 动态探索 | M1 已落地：事实/候选/意图/提示持久化，事件日志 + 快照 + 去重 + 状态机；Planner / Scheduler 编排未实现 | Fact / Candidate / Intent / Hint 持久化，可回放、可去重、可预算 |
-| 数据契约 | 21 种 schema，含 Fact / Intent / Hint / EmulationPlan / EmulationResult / BoardState / BoardEvent、QilingPlan / QilingEvent / QilingImport、`evidence/1.1` 与 `emba-import/1.0`；状态转换由 `board_transitions.py` 校验 | 随适配器扩展 `EmulationResult` 后端字段，保持向后兼容 |
+| 数据契约 | 21 种 schema，含 Fact / Intent / Hint / EmulationPlan / EmulationResult / BoardState / BoardEvent、QilingPlan / QilingEvent / QilingImport、`evidence/1.1` 与 `emba-import/1.0`；状态转换由 `board_transitions.py` 校验，M6 起强制候选自带 run/固件、证据同 run/同固件/同目标并检查生命周期 | 随适配器扩展 `EmulationResult` 后端字段，保持向后兼容 |
 | 沙箱 | `sandbox_run.py` 已 fail-closed，但尚未证明所有执行路径都经过它 | 所有解包、执行、仿真、外部工具调用统一入口；隔离失败不回落宿主机 |
 | EMBA / Qiling / QEMU | M3 的 EMBA 适配仅用于导入既有日志；M4 的 `emu_plan.py` / `emu_run.py` 已落地并经沙箱执行 QEMU；Qiling 适配器已落地，静态受控目标已在 Qiling 1.4.6 下执行、动态 `busybox` 已在 Qiling 1.4.11 下执行并产出 Evidence | 适配器只消费既有产物；整机仿真按架构/内核/init/网络判据执行，输出统一 `EmulationResult` |
 | 检测质量评估 | 合成基准 + 回归门禁 | 增加合法来源、可追溯、人工复核的真实固件基准 |
 | EALB | 校准工具已就绪，样本不足时标 `heuristic` | 用真实工时样本校准，并在报告中限定适用范围 |
 
-**近期优先级**：M1（契约与黑板）、M2（资源与沙箱统一）、M3（EMBA 适配器）已落地；
-M4 的 QEMU 执行器、真实 rootfs 启动记录、Qiling 适配器、1.4.6 静态受控目标与 1.4.11 动态 `busybox` 真实执行均已落地。下一步进入 M5（真实固件基准）；网络/服务、多 applet 与厂商内核仍未验证。M0 的盘点动作持续进行，不单独占一个版本。
+**近期优先级**：M1（契约与黑板）、M2（资源与沙箱统一）、M3（EMBA 适配器）、M4（整机/定向仿真）已落地；2026-11-05 复查把 **M6 证据强绑定**提到 M5 之前并已落地，先堵住「证据与候选不同 run/固件/目标也能升级」的缺口。下一步进入 M5（真实固件基准）；网络/服务、多 applet 与厂商内核仍未验证。M0 的盘点动作持续进行，不单独占一个版本。
 
 ## 1. 设计原则
 
@@ -203,7 +202,7 @@ G1–G7 必须是代码校验器，而不是 Prompt、README 或报告模板。�
 记录命令、版本、退出码与结果。重点确认 Strict、Coverage、沙箱和结构化证据的真实调用路径。
 
 **现状**：2026-10 已完成一轮门禁、契约、沙箱入口与合成基准整改；M3/M4 落地后
-selftest 覆盖 25 组 / 295 条断言，`exec_paths.py` 已给出 20 个脚本 / 11 条子进程调用的
+selftest 覆盖 25 组 / 311 条断言，`exec_paths.py` 已给出 20 个脚本 / 11 条子进程调用的
 分类清单。沙箱已在无运行时、Python 桩运行时与 **Ubuntu 24.04.5 + Docker 29.9.2** 下验证
 fail-closed、资源准入、超时清理与容器内权限；`sink_scan.py` 的 ast-grep / semgrep
 仍属宿主机静态解析。
@@ -339,6 +338,44 @@ Docker 29.9.2）让一个真实 rootfs 在 30 秒预算内启动到 `/bin/sh`；
 中经真实 `sandbox_run.py` 运行 `qiling_runner.py`，均在受控输入下产生可复核 Evidence（过滤规则版本化、原始日志可追溯、
 `BLOCKED` 与 `FAILED` 可区分）；但只覆盖单目标/单 applet，未覆盖网络、服务、多 applet 与厂商内核，
 不能声明完整固件仿真通过。
+
+### M6：证据与状态转换强绑定（先行，2026-11-05 已落地）
+
+**为什么先行**：2026-11-05 复查确认，旧 `validate_transition` 对 contracts 采用可选导入，
+导入失败就跳过结构校验；run / 固件只在候选或参数「有值」时才比较；目标哈希只在
+policy 与 evidence 同时给出时才检查；无 schema 的历史弱证据仍可用于升级。结果是
+「证据来自别的 run / 别的固件 / 根本没有结构」也可能把候选推到 `validated`。这类
+缺口会污染后续所有基准与报告，因此先于 M5 修复。
+
+**已落地规则**
+
+- 候选必须**自带**合法 `run_id`（非空、≤128、无空白/控制字符）与 `firmware_sha256`（64 hex）；
+  命令行参数只做一致性交叉校验，不再为缺失字段兜底。
+- 进入 `validated` / `confirmed` 的证据必须是 `evidence/1.1`；无 schema、其他 schema、
+  validator 异常或返回非数组一律 fail-closed。
+- 所有参与判定的证据必须同 run、同固件；命令注入/缓冲区溢出/路径穿越/认证绕过/SSRF/
+  反序列化还必须带 `target_sha256` 且彼此一致。
+- 证据生命周期参与判定：`revoked`、`superseded_by`、`expires_at` 过期、`status=failed`、
+  同 `conflict_group` 结论不一致、同 `evidence_id` 不同内容、`supersedes` / `contradicts`
+  命中本次选中证据，均拒绝升级。
+- `board_events.py` 不再静默过滤找不到的 `evidence_refs`；validator 缺失时返回
+  `CONTRACT_UNAVAILABLE`，不返回成功。`board_store.py transition` 在追加事件前先显式
+  校验证据引用并跑状态机，失败不落日志。
+- `board_transitions.py` 升到 `board-transitions/1.1`，`check` 新增 `--target-sha256`；
+  `contracts.py` 的 `evidence/1.1` 增加 `target_sha256` / `content_sha256` / `revoked` /
+  `revoked_at` / `expires_at` / `superseded_by` / `conflict_group` / `supersedes` /
+  `contradicts` 与 `source.tool_version` / `source.reliability` 可选字段。
+
+**测试**：selftest 第 21 组新增 EV-01..EV-11 负例，分别覆盖候选缺 run、缺固件、证据跨
+run、固件不一致、缺目标哈希、缺 schema、contracts 不可导入、多条证据中混入异 run、
+证据撤销、证据过期、同冲突组结论不一致、证据声明取代同时选中的证据；另测
+`board_store.py transition` 引用不存在证据时返回 `EVIDENCE_REF_NOT_FOUND`。全量
+selftest 为 25 组 / 311 条断言。
+
+**边界**：历史 `evidence/1.0` 仍可由 `contracts.py` 读取以兼容旧产物，但**不能**用于
+`validated` / `confirmed`；黑板导入阶段仍允许先落盘弱证据，升级时统一拒绝。M6 只解决
+「证据与状态绑定」，不解决 BoardStore 多进程并发一致性、Evidence 撤销后的黑板级联失效、
+真实固件基准或 EALB 校准——这些仍归 M5 与后续工程化项。
 
 ### M5：真实固件基准
 

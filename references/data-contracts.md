@@ -133,10 +133,17 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 | `schema` | string | ✅ | `evidence/1.1` |
 | `evidence_id` | string | ✅ | 证据 ID |
 | `run_id` / `firmware_sha256` | string | ✅ | 运行与固件绑定；跨 run 证据不得用于当前候选的验证 |
+| `target_sha256` | string | 条件 | 64 hex；命令注入/缓冲区溢出/路径穿越/认证绕过/SSRF/反序列化升级时必需，且必须与候选/policy 一致 |
+| `content_sha256` | string | — | 64 hex；冲突与同 ID 不同内容的签名优先使用它 |
+| `revoked` / `revoked_at` | bool / string | — | `revoked=true` 必须有 `revoked_at`；已撤销证据不得用于升级 |
+| `expires_at` | string | — | ISO 8601；已过期证据不得用于升级 |
+| `superseded_by` | string | — | 已被哪条证据取代；非空时不得用于升级 |
+| `supersedes` / `contradicts` | array | — | 证据 ID 数组；命中本次同时选中的证据时拒绝 |
+| `conflict_group` | string | — | 同组证据的签名必须一致，否则 `EVIDENCE_CONFLICT` |
 | `type` | enum | ✅ | `static` / `dynamic` / `emulation` / `fuzzing` / `manual` |
 | `observed_at` | string | ✅ | ISO 8601 带时区 |
 | `status` | enum | ✅ | `parsed` / `partial` / `failed`；非 `parsed` 必须在 `limitations` 说明缺什么 |
-| `source` | object | ✅ | `{type, tool, path?, line?}`；`type` 为 `static`/`dynamic`/`emulation`/`tool-report`/`manual`，`tool` 必填 |
+| `source` | object | ✅ | `{type, tool, path?, line?, tool_version?, reliability?}`；`type` 为 `static`/`dynamic`/`emulation`/`tool-report`/`manual`，`tool` 必填；`reliability` ∈ `high`/`medium`/`low`/`unknown` |
 | `artifact` | object | — | `{path, sha256, size?}`，原始产物 |
 | `raw_log` | object | — | `{path, sha256}`，原始日志 |
 | `hook` | object | — | `{mechanism: syscall|api|libc|other, name}`；`system()` 是 libc/api Hook，`execve` 才是 syscall Hook |
@@ -145,6 +152,8 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 | `limitations` | array | 非 `parsed` 必需 | 字符串数组 |
 
 约束：`dynamic` / `emulation` 证据必须带 `event`；`static` 证据必须带 `source.path` 或 `artifact`。这些约束由 `contracts.py --kind evidence` 直接执行，避免「只写一句我跑过了」当证据。
+
+**升级时的额外要求（M6）**：`contracts.py` 仍接受无 schema 的 `evidence/1.0` 历史轻量形态以兼容旧产物，但 `board_transitions.validate_transition` 只接受 `evidence/1.1`；无 schema → `EVIDENCE_SCHEMA_REQUIRED`，其他 schema → `EVIDENCE_SCHEMA_UNSUPPORTED`。因此「能导入黑板」不等于「能用于升级候选」。
 
 ## 7. GateResult（`gate-config/1.1`）
 
@@ -402,7 +411,7 @@ BoardState 是快照文件的结构，所有条目都必须绑定同一个 `run_
 
 **BACKTRACK** 记录：`{from_phase, to_phase, reason, evidence_refs, approved_by?}`。`from_phase` 必须等于黑板当前 `phase`，且 `to_phase` 必须是更早的阶段，否则 `PHASE_MISMATCH` / `NOT_A_BACKTRACK`。
 
-候选状态转换白名单（`board-transitions/1.0`）：
+候选状态转换白名单（`board-transitions/1.1`）：
 
 | 当前状态 | 允许转到 |
 |---|---|
@@ -414,9 +423,14 @@ BoardState 是快照文件的结构，所有条目都必须绑定同一个 `run_
 
 终态：`confirmed` / `not_found` / `not_reproduced` / `not_applicable`。`VERIFIED` 是 `confirmed` 的别名（持久化只写小写状态）；同状态转换报 `SAME_STATE`，终态再转报 `TERMINAL_STATE`。
 
-进入 `validated` 或 `confirmed` 时，`validate_transition` 按候选的漏洞类型（`policy.vuln_type`）检查证据绑定与判据：
+进入 `validated` 或 `confirmed` 时，`validate_transition` 按候选的漏洞类型（`policy.vuln_type`）检查证据绑定与判据。M6 起，以下规则是**硬前置**，任一不满足即拒绝升级：
 
-- 证据必须来自同一 `run_id` 与同一固件；跨 run → `EVIDENCE_NOT_BOUND_TO_RUN`，固件不一致 → `FIRMWARE_MISMATCH`，目标哈希不一致 → `TARGET_HASH_MISMATCH`。
+- 候选必须自带合法 `run_id` 与 `firmware_sha256`；缺 run → `CANDIDATE_RUN_ID_MISSING`，run 非法 → `CANDIDATE_RUN_ID_INVALID`，缺固件 → `CANDIDATE_FIRMWARE_MISSING`，固件非法 → `CANDIDATE_FIRMWARE_INVALID`。命令行 `--run-id` / `--firmware-sha256` 只做交叉校验，不一致 → `RUN_ID_MISMATCH` / `FIRMWARE_MISMATCH`。
+- `contracts.validate_evidence` 必须可导入；导入失败、抛异常或返回非数组 → `CONTRACT_UNAVAILABLE` / `EVIDENCE_VALIDATOR_ERROR`（fail-closed，不得跳过）。
+- 每条证据必须声明 `evidence/1.1`；缺 schema → `EVIDENCE_SCHEMA_REQUIRED`，其他 schema → `EVIDENCE_SCHEMA_UNSUPPORTED`，结构不合法 → `EVIDENCE_INVALID`。
+- 所有证据必须同 run、同固件；跨 run → `EVIDENCE_NOT_BOUND_TO_RUN`，固件缺失/非法/不一致 → `EVIDENCE_FIRMWARE_MISSING` / `EVIDENCE_FIRMWARE_INVALID` / `FIRMWARE_MISMATCH`。
+- 漏洞类型要求目标绑定时，候选/policy 必须给出 `target_sha256`，且每条证据都必须带目标哈希并一致；缺失 → `TARGET_HASH_REQUIRED`，非法 → `TARGET_HASH_INVALID`，冲突 → `TARGET_HASH_MISMATCH`。
+- 证据生命周期：`revoked=true` → `EVIDENCE_REVOKED`；`superseded_by` 非空 → `EVIDENCE_SUPERSEDED`；`expires_at` 非法/已过期 → `EVIDENCE_EXPIRY_INVALID` / `EVIDENCE_EXPIRED`；`status=failed` → `EVIDENCE_FAILED`；同 `evidence_id` 不同内容 → `EVIDENCE_ID_CONFLICT`；`supersedes` / `contradicts` 命中本次选中证据 → `EVIDENCE_SUPERSEDES_CONFLICT` / `EVIDENCE_CONTRADICTION`；同 `conflict_group` 签名不一致 → `EVIDENCE_CONFLICT`。
 - 至少一条证据的 `type` 属于该漏洞类型允许的来源；否则 `EVIDENCE_TYPE_NOT_ACCEPTED`。
 - `policy.criteria` 必须覆盖该类型的 `required_criteria` 且全为 true；缺失 → `VALIDATION_CRITERIA_NOT_MET`。
 - 需要触发上下文的类型（命令注入、缓冲区溢出、路径穿越、认证绕过、SSRF、反序列化）必须有 `event.trigger=true`、匹配的触发事件，或候选自带 `trigger` / `poc`；否则 `MISSING_TRIGGER_CONTEXT`。

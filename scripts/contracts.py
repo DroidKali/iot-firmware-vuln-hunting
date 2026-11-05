@@ -205,6 +205,25 @@ def _opt_int(out, obj, path: str, key: str, *, minimum: int = 0) -> None:
         _err(out, f"{path}.{key}", "BAD_VALUE", f"必须是不小于 {minimum} 的整数")
 
 
+def _opt_str(out, obj, path: str, key: str) -> None:
+    if key not in obj or obj[key] is None:
+        return
+    if not isinstance(obj[key], str) or not obj[key].strip():
+        _err(out, f"{path}.{key}", "BAD_TYPE", "必须是非空字符串")
+
+
+def _opt_bool(out, obj, path: str, key: str) -> None:
+    if key not in obj or obj[key] is None:
+        return
+    if not isinstance(obj[key], bool):
+        _err(out, f"{path}.{key}", "BAD_TYPE", "必须是布尔值")
+
+
+def _opt_hex(out, obj, path: str, key: str) -> None:
+    if key in obj and obj[key] is not None:
+        _hex(out, obj, path, key)
+
+
 def _bind(out, obj: Dict[str, Any], path: str, run_id: Any, firmware_sha256: Any) -> None:
     """黑板对象必须绑定同一个 run 与固件：跨 run 的引用不能混进快照。"""
     if not isinstance(obj, dict):
@@ -408,6 +427,20 @@ def validate_evidence_record(obj: Any, path: str = "evidence") -> List[Dict[str,
             _err(out, f"{path}.source.path", "BAD_TYPE", "path 必须是字符串")
         if "line" in src and (not isinstance(src["line"], int) or src["line"] < 0):
             _err(out, f"{path}.source.line", "BAD_VALUE", "line 必须是非负整数")
+        _opt_str(out, src, f"{path}.source", "tool_version")
+        _enum(out, src, f"{path}.source", "reliability",
+              ("high", "medium", "low", "unknown"), required=False)
+    _opt_hex(out, obj, path, "target_sha256")
+    _opt_hex(out, obj, path, "content_sha256")
+    _opt_bool(out, obj, path, "revoked")
+    _opt_str(out, obj, path, "revoked_at")
+    if obj.get("revoked") is True and not isinstance(obj.get("revoked_at"), str):
+        _err(out, f"{path}.revoked_at", "MISSING", "revoked=true 时必须记录 revoked_at")
+    _opt_str(out, obj, path, "expires_at")
+    _opt_str(out, obj, path, "superseded_by")
+    _opt_str(out, obj, path, "conflict_group")
+    _str_list(out, obj, path, "supersedes", required=False, allow_empty=True)
+    _str_list(out, obj, path, "contradicts", required=False, allow_empty=True)
     art = obj.get("artifact")
     if art is not None:
         if not isinstance(art, dict):

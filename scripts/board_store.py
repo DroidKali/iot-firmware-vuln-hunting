@@ -46,8 +46,10 @@ try:
                               canonical_json, make_dedupe_key, make_event,
                               new_state, read_events, replay, utc_now,
                               verify_events)
-    from board_transitions import (normalize_state, normalize_risk_disposition,
-                                   validate_risk_disposition)
+    from board_transitions import (_valid_run_id, normalize_state,
+                                   normalize_risk_disposition,
+                                   validate_risk_disposition,
+                                   validate_transition)
     from contracts import summarize as _contract_summary
     from contracts import validate_board_state as _validate_board_state
     from contracts import validate_emba_import as _validate_emba_import
@@ -124,8 +126,9 @@ class BoardStore:
     def init(cls, workspace: str, run_id: str, firmware_sha256: str,
              manifest_id: Optional[str] = None, force: bool = False,
              ts: Optional[str] = None, phase: str = "P0") -> "BoardStore":
-        if not isinstance(run_id, str) or not run_id.strip():
-            raise StoreError("BAD_RUN_ID", "run_id 必须是非空字符串")
+        if not _valid_run_id(run_id):
+            raise StoreError("BAD_RUN_ID",
+                             "run_id 必须非空、无空白/控制字符且不超过 128 字符")
         if not isinstance(firmware_sha256, str) or not HEX64.match(firmware_sha256.lower()):
             raise StoreError("BAD_FIRMWARE_HASH", "firmware_sha256 必须是 64 位十六进制")
         if phase not in ("P0", "P1", "P2", "P3", "P4", "P5"):
@@ -261,12 +264,27 @@ class BoardStore:
                    policy: Optional[Dict[str, Any]] = None,
                    ts: Optional[str] = None) -> Dict[str, Any]:
         cand = self._find("candidates", "id", candidate_id)
+        refs = list(evidence_refs or [])
+        if any(not isinstance(r, str) or not r for r in refs):
+            raise StoreError("EVIDENCE_REF_INVALID",
+                             "evidence_refs 必须是证据 ID 字符串数组")
+        missing = [r for r in refs
+                   if not any(e.get("evidence_id") == r
+                              for e in self.state.get("evidence") or [])]
+        if missing:
+            raise StoreError("EVIDENCE_REF_NOT_FOUND",
+                             f"证据引用不存在：{missing}（不得静默过滤）")
+        evidence_rows = [self._find("evidence", "evidence_id", r) for r in refs]
+        check = validate_transition(cand, to_state, evidence_rows, policy or {})
+        if not check.get("ok"):
+            raise StoreError(check.get("code", "ILLEGAL_TRANSITION"),
+                             check.get("message", "状态转换被拒绝"))
         payload = {
             "candidate_id": candidate_id,
             "from_state": cand.get("status"),
             "to_state": to_state,
             "reason": reason,
-            "evidence_refs": list(evidence_refs or []),
+            "evidence_refs": refs,
             "policy": policy or {},
         }
         return self.append("CANDIDATE_TRANSITIONED", payload, ts=ts)

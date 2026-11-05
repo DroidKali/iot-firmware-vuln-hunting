@@ -254,17 +254,32 @@ def apply_event(state: Optional[Dict[str, Any]], event: Dict[str, Any],
     elif typ == "CANDIDATE_TRANSITIONED":
         cid = payload.get("candidate_id")
         cand = _find(state, "candidates", "id", cid)
+        if normalize_state is None or validate_transition is None:
+            raise BoardEventError("CONTRACT_UNAVAILABLE",
+                                  "状态机未加载，拒绝提升候选状态", "candidate.status")
         if normalize_state(cand.get("status")) != normalize_state(payload.get("from_state")):
             raise BoardEventError("STATE_MISMATCH",
                                   f"候选当前状态 {cand.get('status')!r} 与事件 from_state "
                                   f"{payload.get('from_state')!r} 不一致", "candidate.status")
-        evidence_rows = [e for e in state.get("evidence") or []
-                         if e.get("evidence_id") in (payload.get("evidence_refs") or [])]
+        refs = payload.get("evidence_refs")
+        if refs is None:
+            refs = []
+        if not isinstance(refs, list) or any(
+                not isinstance(r, str) or not r for r in refs):
+            raise BoardEventError("EVIDENCE_REF_INVALID",
+                                  "evidence_refs 必须是证据 ID 字符串数组",
+                                  "evidence_refs")
+        by_id = {e.get("evidence_id"): e for e in state.get("evidence") or []}
+        missing = [r for r in refs if r not in by_id]
+        if missing:
+            raise BoardEventError("EVIDENCE_REF_NOT_FOUND",
+                                  f"证据引用不存在：{missing}（不得静默过滤）",
+                                  "evidence_refs")
+        evidence_rows = [by_id[r] for r in refs]
         policy = payload.get("policy") or {}
         result = validate_transition(cand, payload.get("to_state"), evidence_rows,
                                      policy, state["run_id"],
-                                     state["firmware_sha256"]) if validate_transition else {
-            "ok": True, "code": "OK", "message": "未加载状态机"}
+                                     state["firmware_sha256"])
         if not result.get("ok"):
             raise BoardEventError(result.get("code", "ILLEGAL_TRANSITION"),
                                   result.get("message", "状态转换被拒绝"), "candidate.status")
@@ -279,9 +294,11 @@ def apply_event(state: Optional[Dict[str, Any]], event: Dict[str, Any],
         if intent.get("status") != payload.get("from_status"):
             raise BoardEventError("STATE_MISMATCH", "Intent 当前状态与事件不一致",
                                   "intent.status")
+        if validate_intent_transition is None:
+            raise BoardEventError("CONTRACT_UNAVAILABLE",
+                                  "Intent 状态机未加载，拒绝变更状态", "intent.status")
         result = validate_intent_transition(intent, payload.get("to_status"),
-                                            payload.get("worker")) \
-            if validate_intent_transition else {"ok": True, "code": "OK"}
+                                            payload.get("worker"))
         if not result.get("ok"):
             raise BoardEventError(result.get("code", "ILLEGAL_TRANSITION"),
                                   result.get("message", "Intent 状态转换被拒绝"),

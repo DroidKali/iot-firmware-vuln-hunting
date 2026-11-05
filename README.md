@@ -4,8 +4,8 @@
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">  
   <img alt="python" src="https://img.shields.io/badge/python-3.8%2B%20stdlib%20only-3776AB.svg?logo=python\&logoColor=white">  
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg">  
-  <img alt="files" src="https://img.shields.io/badge/package-117%20files%20%C2%B7%2035504%20lines-informational.svg">
-  <img alt="selftest" src="https://img.shields.io/badge/selftest-295%20assertions%20passing-brightgreen.svg">
+  <img alt="files" src="https://img.shields.io/badge/package-117%20files%20%C2%B7%2036061%20lines-informational.svg">
+  <img alt="selftest" src="https://img.shields.io/badge/selftest-311%20assertions%20passing-brightgreen.svg">
   <img alt="agent" src="https://img.shields.io/badge/type-Agent%20Skill-7B42BC.svg">  
 </p>
 
@@ -194,7 +194,7 @@ npx skills add https://github.com/DroidKali/iot-firmware-vuln-hunting --agent '*
 uv run scripts/selftest.py
 ```
 
-脚本会用纯 Python 手工构造合法 ELF64 与合成 rootfs，端到端跑通其余十九个脚本，覆盖 **25 组 / 295 条断言**，其中包含「门禁必须拦下坏报告」的负向用例。断言总数由脚本自己在结尾打印，不需要去数日志。看到全绿即安装成功。
+脚本会用纯 Python 手工构造合法 ELF64 与合成 rootfs，端到端跑通其余十九个脚本，覆盖 **25 组 / 311 条断言**，其中包含「门禁必须拦下坏报告」的负向用例。断言总数由脚本自己在结尾打印，不需要去数日志。看到全绿即安装成功。
 
 `[14/25]` 把**文档当被测对象**：抓出 `README.md` / `SKILL.md` / `references/` / `assets/` 里每条 `scripts/*.py` 示例命令，逐个核对命令里出现的 `--flag` 是否真存在于脚本 `--help`（有子命令的会逐个进去问），并检查布尔开关后面没跟取值。这条守卫来自一次真实事故——文档把 `store_true` 的 `--tier` 写成 `--tier <rootfs>`，照抄必然报错，而所有单元测试都是绿的。
 
@@ -202,7 +202,7 @@ uv run scripts/selftest.py
 
 `[16/25]`–`[20/25]` 覆盖本轮整改新增的契约与边界：候选清单里**非法 JSON 行必须逐行上报**、strict 只接受带 schema 的 envelope；扫描完整性/阶段状态降级必须可见且可阻断；`contracts.py` 校验 FirmwareManifest / AuditTask 并核对镜像哈希；`sandbox_run.py` 在无隔离运行时 **fail-closed**（退出 3），绝不静默回退宿主机；`bench_eval.py` 用合成基准复算 precision/recall，并验证相对基线的召回暴跌会以退出码 3 阻断。
 
-`[21/25]` 覆盖 M1 黑板：Fact / Intent / EmulationResult / BoardState / BoardEvent 契约，事件日志去重与 `seq` 连续性，快照删除后从日志恢复，非法状态转换（`hypothesis → validated`）被拒绝，`validated → confirmed` 的类型化证据校验，以及 `BACKTRACK` 的当前阶段一致性。
+`[21/25]` 覆盖 M1 黑板：Fact / Intent / EmulationResult / BoardState / BoardEvent 契约，事件日志去重与 `seq` 连续性，快照删除后从日志恢复，非法状态转换（`hypothesis → validated`）被拒绝，`validated → confirmed` 的类型化证据校验，以及 `BACKTRACK` 的当前阶段一致性。M6 起，`validated` / `confirmed` 必须由候选自带合法 `run_id` 与 `firmware_sha256`，所有参与判定的证据必须是 `evidence/1.1`、同 run / 同固件 / 同目标哈希；撤销、过期、取代、冲突与 contracts 不可导入都 fail-closed（EV-01..EV-11 负例）。
 
 `[22/25]` 覆盖 M2 资源准入：策略字段与未知字段拒绝、超时/内存/CPU/PID/镜像越界必须在启动前拒绝（退出 4）、并发槽位排队与排队超时（退出 5，`command=[]`）、预算耗尽不启动、fake runtime 下的成功/超时/`rm -f` 清理/临时输出目录删除、输出目录对容器 uid 65534 的可写位，以及 `exec_paths.py` 对执行路径清单与未分类调用的阻断。
 
@@ -278,6 +278,7 @@ Phase 0–5 的**结构化产物仍是门禁的唯一真相源**；黑板是新�
 - `audit-events.jsonl`：append-only 事件日志，是**真相源**；`seq` 连续、`dedupe_key` 去重（时间戳不参与），空行可容忍，非法 JSON 行必须报 `PARSE_ERROR`。
 - `audit-board.json`：由事件日志重放得到的**快照**，仅作加速；删除或损坏后可从日志恢复，并标记 `recovered=true`。
 - 候选状态机：`validated` 表示静态 / 仿真链路闭合，`confirmed` 是动态复现后的最终态；进入两者都要过类型化证据校验。`ACCEPTED_WITH_RISK` 是风险处置，不是候选状态。
+- **证据强绑定（M6）**：`validated` / `confirmed` 不再接受「候选没写 run/固件、靠命令行兜底」的输入；候选必须自带合法 `run_id` 与 `firmware_sha256`，所有参与判定的证据必须声明 `evidence/1.1`，同 run、同固件，并按漏洞类型带 `target_sha256`。撤销、过期、被取代、互相矛盾或同 ID 不同内容的证据一律拒绝；`contracts.py` 不可导入或校验异常时 fail-closed，不降级放行。
 - `BACKTRACK` 的 `from_phase` 必须等于黑板当前阶段，且只能向回退，否则报 `PHASE_MISMATCH` / `NOT_A_BACKTRACK`。
 
 ```bash
@@ -296,7 +297,17 @@ uv run scripts/board_store.py verify --workspace fw-audit/$TARGET/board
 uv run scripts/board_store.py show --workspace fw-audit/$TARGET/board
 ```
 
-事件结构、去重与状态机的完整字段见 [references/data-contracts.md](references/data-contracts.md) §12–§16。
+事件结构、去重与状态机的完整字段见 [references/data-contracts.md](references/data-contracts.md) §12–§16；证据生命周期字段与 M6 失败码见 §6.1 与 §16。
+
+```bash
+# 候选升级：候选自带 run/固件/目标哈希；证据必须同 run、同固件、同目标
+uv run scripts/board_transitions.py check \
+    --candidate fw-audit/$TARGET/candidate-C-001.json \
+    --to validated \
+    --evidence fw-audit/$TARGET/evidence-E-001.json \
+    --policy fw-audit/$TARGET/verify-policy.json \
+    --target-sha256 <64-hex> --json fw-audit/$TARGET/transition.json
+```
 
 ---
 
@@ -490,10 +501,10 @@ uv run scripts/board_store.py import --workspace fw-audit/$TARGET/board \
 | `scripts/taint_graph.py`   | 800  | Phase 3 / 5：跨请求污点图（BDG/ADG 最小实现）——`recover` 恢复动态拼接的键（literal / local-const / fill-composed），`build` 构图并校验「写请求 ≠ 触发读的请求、键一致、两端有证据、跨进程读带 via_control」，产出 `taint-graph.json` |
 | `scripts/coverage_gate.py` | 2759 | Phase 5：覆盖率门禁 + CVE 纪律检查（`--report`，V0–V4）+ 审阅清单三方对齐（`--review-list`）+ G4 入口级覆盖 + G5 绕过矩阵 + **G6 跨请求污点溯源** + **G7 跨请求污点图** + 类型→Base + 自动修复计划 + **扫描完整性/结构引擎/阶段状态/清单/审计任务契约** + **`--profile strict` 档位** + **`gate-config.json` 执行台账** |
 | `scripts/entrypoints_init.py` | 139 | Phase 3 / 5：从 `02-tiering.json` 生成 `entrypoints.json` 骨架（`--merge` 保留已手填数据） |
-| `scripts/contracts.py`     | 1868 | Phase 0–5：跨阶段数据契约校验（21 种 schema：FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / EmbaImport / EmulationPlan / QilingPlan / QilingEvent / QilingImport / Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent），`--list` 列版本、`--json` 出机器可读结果 |
-| `scripts/board_transitions.py` | 476 | Phase 3–5 / M1：Candidate 状态机与类型化验证——`graph` 输出合法转换，`check` 校验证据绑定/类型/判据/触发上下文，拒绝 `ACCEPTED_WITH_RISK` 充当候选状态 |
-| `scripts/board_events.py` | 479 | M1：append-only 黑板事件日志——`verify` 校验结构与 `seq` 连续性，`replay` 从日志重建 `audit-board.json`；非法 JSON 行报 `PARSE_ERROR`，不静默跳过 |
-| `scripts/board_store.py` | 776 | M1：黑板存储——`init` 建日志与快照，`import` 导入 Phase 0–5 / EMBA / Qiling 产物，`transition` 走状态机，`backtrack` 记录回退，`verify` 对账 |
+| `scripts/contracts.py`     | 1901 | Phase 0–5：跨阶段数据契约校验（21 种 schema：FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / EmbaImport / EmulationPlan / QilingPlan / QilingEvent / QilingImport / Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent），`--list` 列版本、`--json` 出机器可读结果 |
+| `scripts/board_transitions.py` | 777 | Phase 3–5 / M1 / M6：Candidate 状态机与类型化验证——`graph` 输出合法转换，`check` 强制候选自带 run/固件、证据 `evidence/1.1`、同 run / 同固件 / 目标哈希、证据生命周期与冲突检查，再校验类型/判据/触发上下文；contracts 不可导入时 fail-closed，拒绝 `ACCEPTED_WITH_RISK` 充当候选状态 |
+| `scripts/board_events.py` | 496 | M1：append-only 黑板事件日志——`verify` 校验结构与 `seq` 连续性，`replay` 从日志重建 `audit-board.json`；非法 JSON 行报 `PARSE_ERROR`，不静默跳过 |
+| `scripts/board_store.py` | 794 | M1：黑板存储——`init` 建日志与快照，`import` 导入 Phase 0–5 / EMBA / Qiling 产物，`transition` 走状态机，`backtrack` 记录回退，`verify` 对账 |
 | `scripts/ealb_calib.py`    | 319  | Phase 2：用实测工时样本校准 EALB——未达样本量时只报 `heuristic`，达标才允许标 `calibrated` |
 | `scripts/sandbox_run.py`   | 1413 | Phase 4：不可信固件的一次性隔离执行（无运行时 **fail-closed**，退出 3；宿主机执行必须显式 `--mode host --i-understand-host-risk`）；`sandbox-run/1.1` 记录资源准入（退出 5 = 排队超时/预算耗尽） |
 | `scripts/resource_manager.py` | 503 | M2：沙箱策略、跨进程槽位与预算——`validate` 校验 `sandbox-policy/1.0`，`defaults` 打印内置策略；超限排队而不是先启动 |
@@ -504,7 +515,7 @@ uv run scripts/board_store.py import --workspace fw-audit/$TARGET/board \
 | `scripts/emu_run.py`     | 762  | M4：校验计划、镜像与内核哈希，固定经 `sandbox_run.py --mode sandbox` 执行 QEMU，采串口/退出码并输出 `emulation-result/1.0`；无宿主机回退 |
 | `scripts/adapter_qiling.py` | 1388 | M4：Qiling 定向仿真——只读生成 `qiling-plan/1.0`，经 `sandbox_run.py` 执行，按 trigger marker / sink hook 重算事件并输出 `qiling-import/1.0`；无宿主机回退 |
 | `scripts/qiling_runner.py` | 489 | M4：容器内 Qiling runner——按计划安装 syscall / API / libc Hook，写事件 JSONL 与运行报告；不判定漏洞，无宿主模式 |
-| `scripts/selftest.py`      | 2918 | 安装自检：合成固件与 rootfs，端到端验证其余十九个脚本的判据 + **文档与 CLI 一致性** + 基准回归 + 黑板事件/快照/状态机 + 资源准入 + EMBA 适配 + 整机仿真计划/结果分类 + Qiling 定向仿真（25 组 / 295 条断言，结尾自报总数）                 |
+| `scripts/selftest.py`      | 3044 | 安装自检：合成固件与 rootfs，端到端验证其余十九个脚本的判据 + **文档与 CLI 一致性** + 基准回归 + 黑板事件/快照/状态机 + 资源准入 + EMBA 适配 + 整机仿真计划/结果分类 + Qiling 定向仿真（25 组 / 311 条断言，结尾自报总数）                 |
 
 ### 覆盖率门禁判据
 

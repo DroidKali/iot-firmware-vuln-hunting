@@ -591,7 +591,7 @@ strings -a -t x usr/sbin/httpd | rg -i 'referer|cmd|ping|traceroute'
 
 静态链路完整 ≠ 可利用。固件场景还必须过三关：**能不能跑到这段代码**、**环境依赖（NVRAM/ioctl/硬件）能不能满足**、**有没有运行时防护**。
 
-黑板上对应 `pending_dynamic_validation → validated → confirmed`：`validated` 是静态/仿真链路闭合，`confirmed` 是动态复现后的最终态；两步都要过 `board_transitions.py check` 的类型化证据校验（证据绑定同一 run/固件、漏洞类型对应的证据类型与判据、触发上下文）。状态与事件日志是审计留痕，不替代 `coverage_gate.py` 的门禁判定。
+黑板上对应 `pending_dynamic_validation → validated → confirmed`：`validated` 是静态/仿真链路闭合，`confirmed` 是动态复现后的最终态；两步都要过 `board_transitions.py check` 的类型化证据校验。M6 起，候选必须自带合法 `run_id` 与 `firmware_sha256`，所有参与判定的证据必须是 `evidence/1.1`、同 run / 同固件，并按漏洞类型带 `target_sha256`；撤销、过期、被取代、冲突证据一律拒绝，`contracts.py` 不可导入时 fail-closed。状态与事件日志是审计留痕，不替代 `coverage_gate.py` 的门禁判定。
 
 #### 前置：执行边界（在选路之前）
 
@@ -1033,7 +1033,7 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 | `scripts/taint_graph.py` | Phase 3/5：跨请求污点图（BDG/ADG 最小实现）——`recover` 从反编译产物恢复常量键（literal / local-const / fill-composed），`build` 构图并校验「写请求 ≠ 触发读的请求、键一致、两端有证据、跨进程读带 via_control」；产出 `taint-graph.json` 供 G7 消费 |
 | `scripts/entrypoints_init.py` | Phase 3/5：从 `02-tiering.json` 生成入口枚举骨架 `entrypoints.json`（G4 的输入） |
 | `scripts/contracts.py` | Phase 0–5：数据契约校验（21 种 schema：FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / AuditStages / ScanWaiver / SandboxRun / BenchManifest / EmbaImport / EmulationPlan / QilingPlan / QilingEvent / QilingImport / Fact / Intent / Hint / EmulationResult / BoardState / BoardEvent）；`--list` 列受支持版本，`--json` 出机器可读结果 |
-| `scripts/board_transitions.py` | M1 / Phase 3–5：候选状态机——`graph` 列合法转换，`check` 做类型化证据校验（run/固件绑定、证据类型、判据、触发上下文），`risk` 校验风险处置而非候选状态 |
+| `scripts/board_transitions.py` | M1 / M6 / Phase 3–5：候选状态机——`graph` 列合法转换，`check` 做类型化证据校验（候选自带 run/固件、`evidence/1.1`、同 run/固件/目标哈希、生命周期与冲突、证据类型、判据、触发上下文），contracts 不可导入时 fail-closed；`risk` 校验风险处置而非候选状态 |
 | `scripts/board_events.py` | M1：append-only 事件日志——`verify` 校验结构与 `seq` 连续性，`replay` 从日志重建快照；重复 `dedupe_key` 跳过，非法 JSON 行报错 |
 | `scripts/board_store.py` | M1：黑板存储与导入——`init` / `import` / `add` / `transition` / `intent` / `backtrack` / `replay` / `verify` / `show`；`import --emba` 导入 M3 适配结果、`import --qiling` 导入 M4 Qiling 结果；事件日志是真相源，快照可重建 |
 | `scripts/adapter_emba.py` | M3：EMBA 产物离线解析——F50/P99/S09/L15/L10/S115 → `emba-import/1.0`；三类观察分型（`service` / `runtime-process` / `port-response`）、PE32/ELF 区分、`--require` 显式产物、结构化失败、重复解析字节稳定 |
@@ -1046,7 +1046,7 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 | `scripts/emu_run.py` | M4：复核计划、镜像与内核哈希，固定经 `sandbox_run.py --mode sandbox` 执行 QEMU，采串口/退出码并输出 `emulation-result/1.0`；无宿主机回退 |
 | `scripts/adapter_qiling.py` | M4：Qiling 定向仿真——只读计划、经 sandbox 执行、按 trigger marker / sink hook 重算事件并输出 `qiling-import/1.0`；无宿主机回退 |
 | `scripts/qiling_runner.py` | M4：容器内 Qiling runner——安装 syscall / API / libc Hook，写事件 JSONL 与运行报告；不判定漏洞，无宿主模式 |
-| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证其余十九个脚本的判据，并把**文档示例命令与 CLI 参数表对拍**；覆盖黑板事件/快照/状态机、资源准入、EMBA 适配、整机仿真计划/结果分类与 Qiling 定向仿真（25 组 / 295 条断言，结尾自报总数） |
+| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证其余十九个脚本的判据，并把**文档示例命令与 CLI 参数表对拍**；覆盖黑板事件/快照/状态机、资源准入、EMBA 适配、整机仿真计划/结果分类与 Qiling 定向仿真（25 组 / 311 条断言，结尾自报总数） |
 
 除 `qiling_runner.py`（只在 Qiling 容器镜像内运行）外，脚本都只用 Python 标准库，无第三方依赖，Windows / Linux / macOS 均可运行。用 `uv` 管理环境（`uv run` 自动建临时环境；无 `uv` 时直接 `python scripts/xxx.py` 亦可）。安装后建议先跑一次自检：
 
