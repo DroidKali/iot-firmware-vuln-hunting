@@ -291,11 +291,32 @@ class BoardStore:
 
     def set_intent_status(self, intent_id: str, to_status: str,
                           worker: Optional[str] = None,
+                          attempts: Optional[int] = None,
+                          outcome: Optional[str] = None,
+                          result_refs: Optional[Sequence[str]] = None,
+                          last_failure: Optional[Dict[str, Any]] = None,
+                          reason: Optional[str] = None,
                           ts: Optional[str] = None) -> Dict[str, Any]:
         intent = self._find("intents", "intent_id", intent_id)
         payload = {"intent_id": intent_id, "from_status": intent.get("status"),
                    "to_status": to_status, "worker": worker}
+        for key, value in (("attempts", attempts), ("outcome", outcome),
+                           ("result_refs", list(result_refs) if result_refs is not None else None),
+                           ("last_failure", last_failure), ("reason", reason)):
+            if value is not None:
+                payload[key] = value
         return self.append("INTENT_STATUS_CHANGED", payload, ts=ts)
+
+    def advance_phase(self, to_phase: str, reason: str,
+                      evidence_refs: Optional[Sequence[str]] = None,
+                      advanced_by: Optional[str] = None,
+                      ts: Optional[str] = None) -> Dict[str, Any]:
+        frm = self.state.get("phase")
+        payload = {"from_phase": frm, "to_phase": to_phase,
+                   "reason": reason,
+                   "evidence_refs": list(evidence_refs or []),
+                   "advanced_by": advanced_by}
+        return self.append("PHASE_ADVANCED", payload, ts=ts)
 
     def backtrack(self, from_phase: str, to_phase: str, reason: str,
                   evidence_refs: Sequence[str],
@@ -687,6 +708,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--intent")
     p.add_argument("--to-status")
     p.add_argument("--worker")
+    p.add_argument("--attempts", type=int)
+    p.add_argument("--outcome")
+    p.add_argument("--result-ref", action="append", default=None)
+    p.add_argument("--last-failure", help="失败分类 JSON 对象")
+    p.add_argument("--reason")
+
+    p = sub.add_parser("advance", help="记录阶段前进")
+    p.add_argument("--workspace", required=True)
+    p.add_argument("--to-phase", required=True)
+    p.add_argument("--reason", required=True)
+    p.add_argument("--evidence", action="append", default=[])
+    p.add_argument("--advanced-by")
 
     p = sub.add_parser("backtrack", help="记录阶段回退")
     p.add_argument("--workspace", required=True)
@@ -749,12 +782,35 @@ def main(argv: Optional[List[str]] = None) -> int:
             if args.file:
                 res = store.record_intent(_load(args.file))
             elif args.intent and args.to_status:
-                res = store.set_intent_status(args.intent, args.to_status, args.worker)
+                failure = None
+                if args.last_failure:
+                    try:
+                        failure = json.loads(args.last_failure)
+                    except json.JSONDecodeError as exc:
+                        print(f"[board] --last-failure 不是合法 JSON：{exc}",
+                              file=sys.stderr)
+                        return 2
+                    if not isinstance(failure, dict):
+                        print("[board] --last-failure 必须是 JSON 对象", file=sys.stderr)
+                        return 2
+                res = store.set_intent_status(
+                    args.intent, args.to_status, args.worker,
+                    attempts=args.attempts, outcome=args.outcome,
+                    result_refs=args.result_ref,
+                    last_failure=failure, reason=args.reason)
             else:
                 print("[error] intent 需要 --file，或 --intent 与 --to-status", file=sys.stderr)
                 return 2
             print(json.dumps({"ok": True, "duplicate": res["duplicate"],
                               "event_id": res["event"]["event_id"]},
+                             ensure_ascii=False, indent=2))
+            return 0
+        if args.cmd == "advance":
+            res = store.advance_phase(args.to_phase, args.reason,
+                                      args.evidence, args.advanced_by)
+            print(json.dumps({"ok": True, "duplicate": res["duplicate"],
+                              "event_id": res["event"]["event_id"],
+                              "phase": store.state["phase"]},
                              ensure_ascii=False, indent=2))
             return 0
         if args.cmd == "backtrack":

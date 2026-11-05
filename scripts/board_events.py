@@ -161,6 +161,26 @@ def _add(state: Dict[str, Any], key: str, id_key: str,
                                   f"{id_key}={rid!r} 已存在且内容不同", path)
     state.setdefault(key, []).append(row)
 
+def _merge_result_refs(state: Dict[str, Any], intent: Dict[str, Any],
+                       refs: Any) -> None:
+    """把本次尝试的 Evidence/Fact 追加到 Intent；重试不能覆盖上一轮引用。"""
+    if refs is None:
+        return
+    if not isinstance(refs, list) or any(
+            not isinstance(r, str) or not r for r in refs):
+        raise BoardEventError("RESULT_REF_INVALID",
+                              "result_refs 必须是字符串数组",
+                              "intent.result_refs")
+    known = {x.get("evidence_id") for x in state.get("evidence") or []}
+    known |= {x.get("fact_id") for x in state.get("facts") or []}
+    missing = [r for r in refs if r not in known]
+    if missing:
+        raise BoardEventError(
+            "RESULT_REF_NOT_FOUND",
+            f"结果引用的对象不存在：{missing}", "intent.result_refs")
+    prev = intent.get("result_refs")
+    previous = prev if isinstance(prev, list) else []
+    intent["result_refs"] = list(dict.fromkeys(previous + refs))
 
 def _find(state: Dict[str, Any], key: str, id_key: str, rid: str) -> Dict[str, Any]:
     for row in state.get(key) or []:
@@ -303,14 +323,89 @@ def apply_event(state: Optional[Dict[str, Any]], event: Dict[str, Any],
             raise BoardEventError(result.get("code", "ILLEGAL_TRANSITION"),
                                   result.get("message", "Intent 状态转换被拒绝"),
                                   "intent.status")
-        intent["status"] = payload.get("to_status")
-        if intent["status"] == "claimed":
+        versioned = intent.get("schema") == "intent/1.1"
+        target = payload.get("to_status")
+        if target == "claimed":
+            previous = intent.get("attempts")
+            expected = (previous if isinstance(previous, int) else 0) + 1
+            given = payload.get("attempts")
+            if given is None:
+                given = expected
+            if given != expected:
+                raise BoardEventError(
+                    "ATTEMPT_MISMATCH",
+                    f"第几次尝试必须是 {expected}（上次 {previous!r}），不得跳号或重放",
+                    "intent.attempts")
+            intent["attempts"] = given
             intent["worker"] = payload.get("worker")
             intent["claimed_at"] = event.get("ts")
-        elif intent["status"] in ("done", "failed", "cancelled"):
+        elif target in ("done", "failed", "cancelled"):
+            if versioned:
+                outcome = payload.get("outcome")
+                if target == "done" and outcome not in (
+                        "success", "partial", "not_applicable"):
+                    raise BoardEventError(
+                        "OUTCOME_REQUIRED",
+                        "done 必须记录 outcome=success|partial|not_applicable",
+                        "intent.outcome")
+                if target == "failed" and outcome not in (
+                        "failed", "blocked", "timed_out"):
+                    raise BoardEventError(
+                        "OUTCOME_REQUIRED",
+                        "failed 必须记录 outcome=failed|blocked|timed_out",
+                        "intent.outcome")
+                if target == "failed" and not isinstance(
+                        payload.get("last_failure"), dict):
+                    raise BoardEventError(
+                        "FAILURE_REQUIRED",
+                        "失败必须记录 last_failure，不能只写状态",
+                        "intent.last_failure")
+                intent["outcome"] = outcome
+                if isinstance(payload.get("last_failure"), dict):
+                    intent["last_failure"] = dict(payload["last_failure"])
+                    intent["last_failure"].setdefault("at", event.get("ts"))
+            # 失败尝试的产出也要绑定到 Intent；重试时追加而不是覆盖。
+            _merge_result_refs(state, intent, payload.get("result_refs"))
             intent["concluded_at"] = event.get("ts")
-        elif intent["status"] == "open":
+        elif target == "open":
             intent["worker"] = None
+            _merge_result_refs(state, intent, payload.get("result_refs"))
+            if versioned and isinstance(payload.get("last_failure"), dict):
+                intent["last_failure"] = dict(payload["last_failure"])
+                intent["last_failure"].setdefault("at", event.get("ts"))
+        # 状态必须在所有字段校验通过后才落盘；否则事件声称切换了状态，
+        # 重放出来的 Intent 却还停在旧状态。
+        intent["status"] = target
+    elif typ == "PHASE_ADVANCED":
+        frm, to = payload.get("from_phase"), payload.get("to_phase")
+        if frm not in PHASES or to not in PHASES:
+            raise BoardEventError("BAD_PHASE", "PHASE_ADVANCED 的 from/to 必须是 P0..P5")
+        if frm != state.get("phase"):
+            raise BoardEventError("PHASE_MISMATCH",
+                                  f"PHASE_ADVANCED 的 from_phase {frm} 与黑板当前阶段 "
+                                  f"{state.get('phase')} 不一致", "phase")
+        if PHASES.index(to) != PHASES.index(frm) + 1:
+            raise BoardEventError(
+                "NOT_AN_ADVANCE",
+                f"{frm} → {to} 不是下一阶段；阶段必须逐个前进，回退请用 BACKTRACK",
+                "phase")
+        reason = payload.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise BoardEventError("REASON_REQUIRED",
+                                  "阶段前进必须记录原因，不能只写目标阶段", "reason")
+        refs = payload.get("evidence_refs") or []
+        if not isinstance(refs, list) or any(
+                not isinstance(r, str) or not r for r in refs):
+            raise BoardEventError("EVIDENCE_REF_INVALID",
+                                  "evidence_refs 必须是证据 ID 字符串数组",
+                                  "evidence_refs")
+        known = {x.get("evidence_id") for x in state.get("evidence") or []}
+        missing = [r for r in refs if r not in known]
+        if missing:
+            raise BoardEventError("EVIDENCE_REF_NOT_FOUND",
+                                  f"阶段前进引用的证据不存在：{missing}",
+                                  "evidence_refs")
+        state["phase"] = to
     elif typ == "BACKTRACK":
         frm, to = payload.get("from_phase"), payload.get("to_phase")
         if frm not in PHASES or to not in PHASES:

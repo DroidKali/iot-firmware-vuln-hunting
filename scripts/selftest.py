@@ -32,7 +32,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 FAILS: list = []
 TOTAL = 0          # 实际执行的断言数：由脚本自己报，避免文档里的数字靠数日志漂移
-NGROUPS = 25       # 组数：与各处 [N/24] 表头一致，末尾会自校验，防止「13 组」再次漂移
+NGROUPS = 26       # 组数：与各处 [N/26] 表头一致，末尾会自校验，防止数字漂移
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -301,7 +301,7 @@ def main() -> int:
         with open(p, "w", encoding="utf-8", newline="\n") as f:
             f.write(txt)
 
-    print("\n[1/25] fw_triage.py — 度量 / 加固画像 / 分层")
+    print("\n[1/26] fw_triage.py — 度量 / 加固画像 / 分层")
     r = run([os.path.join(HERE, "fw_triage.py"), img, "--rootfs", root, "--tier",
              "--budget", "800", "--out", metrics, "--plan", plan, "--pretty"])
     check("fw_triage 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
@@ -329,7 +329,7 @@ def main() -> int:
     check("T3 含 www/index.html", "www/index.html" in set(t["t3_list"]))
     check("EALB > 0", t["ealoc_total"] > 0, str(t["ealoc_total"]))
 
-    print("\n[2/25] sink_scan.py — Layer 1 危险模式扫描")
+    print("\n[2/26] sink_scan.py — Layer 1 危险模式扫描")
     r = run([os.path.join(HERE, "sink_scan.py"), root, "--json", sinks])
     check("sink_scan 退出码 0", r.returncode == 0, r.stderr.strip()[:200])
     if r.returncode != 0:
@@ -343,19 +343,19 @@ def main() -> int:
     check("etc/passwd 不再误报 P1-S-020", ("P1-S-020", "etc/passwd") not in key)
     check("文档目录被跳过", not any(f["file"].startswith("usr/share/doc") for f in sd["findings"]))
 
-    print("\n[3/25] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
+    print("\n[3/26] coverage_gate.py — 覆盖率门禁（不完整应拒绝）")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vpart, "--tiering", tiering])
     check("不完整输入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
 
-    print("\n[4/25] coverage_gate.py — 覆盖率门禁（完整应通过）")
+    print("\n[4/26] coverage_gate.py — 覆盖率门禁（完整应通过）")
     out = os.path.join(base, "40-coverage.md")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vfull, "--tiering", tiering, "--out", out])
     check("完整输入 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("门禁报告已生成", os.path.isfile(out))
 
-    print("\n[5/25] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
+    print("\n[5/26] coverage_gate.py — CVE 纪律检查（版本命中 ≠ 可利用漏洞）")
     bad_rep = os.path.join(base, "report-bad.md")
     with open(bad_rep, "w", encoding="utf-8") as fh:
         fh.write(
@@ -443,7 +443,7 @@ def main() -> int:
     check("⑥ 保留指针行（移动语义）→ 退出码 0", r.returncode == 0,
           r.stdout.strip()[-200:])
 
-    print("\n[6/25] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
+    print("\n[6/26] coverage_gate.py — 审阅清单三方对齐（计划 ↔ 声明 ↔ 结论）")
     review_bad = os.path.join(base, "25-review-list.md")
     with open(review_bad, "w", encoding="utf-8") as fh:
         fh.write("- [x] `www/cgi-bin/ping.cgi`\n"     # 有结论 → OK
@@ -475,7 +475,7 @@ def main() -> int:
     check("审阅清单一致 → 退出码 0", r.returncode == 0,
           r.stdout.strip()[-160:])
 
-    print("\n[7/25] coverage_gate.py — 报告 9 必填字段校验")
+    print("\n[7/26] coverage_gate.py — 报告 9 必填字段校验")
     f_bad = os.path.join(base, "report-fields-bad.md")
     with open(f_bad, "w", encoding="utf-8") as fh:
         fh.write(
@@ -511,7 +511,7 @@ def main() -> int:
     check("9 字段齐全 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
     check("报告模板字段不误报", _template_fields_clean())
 
-    print("\n[8/25] coverage_gate.py — G4 入口级覆盖（文件级 100% ≠ 入口级 100%）")
+    print("\n[8/26] coverage_gate.py — G4 入口级覆盖（文件级 100% ≠ 入口级 100%）")
     tj_g4 = os.path.join(base, "02-tiering-g4.json")
     with open(tj_g4, "w", encoding="utf-8") as fh:
         json.dump({"rootfs_analysis": {"tiering": {"shards": [{"items": [
@@ -553,7 +553,7 @@ def main() -> int:
              "--entrypoints", ep_ok, "--out", os.path.join(base, "40-g4c.md")])
     check("入口枚举 + 全部处置 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
 
-    print("\n[9/25] coverage_gate.py — G5 绕过矩阵（「有防护」≠「防护有效」）")
+    print("\n[9/26] coverage_gate.py — G5 绕过矩阵（「有防护」≠「防护有效」）")
     vp_bad = os.path.join(base, "30-claim-bad.md")
     with open(vp_bad, "w", encoding="utf-8") as fh:
         fh.write("# 结论\n\n## F-001 · x\n\n- 影响: 已鉴权，不可利用\n")
@@ -583,7 +583,7 @@ def main() -> int:
     check("G5 端到端接入 → 退出码 1", r.returncode == 1, f"rc={r.returncode}")
     check("检出绕过矩阵缺失", "绕过矩阵完备（G5）" in open(out_g5, encoding="utf-8").read())
 
-    print("\n[10/25] coverage_gate.py — G6 跨请求污点溯源（持久化来源须声明写入面）")
+    print("\n[10/26] coverage_gate.py — G6 跨请求污点溯源（持久化来源须声明写入面）")
     _F = ("- **类型**：命令注入\n- **位置**：`usr/sbin/httpd:0x1`\n- **优先级**：P1\n"
           "- **置信度**：CONFIRMED\n- **CVSS 3.1**：`AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H` = 9.8\n"
           "{src}- **Sink**：system()\n- **完整调用链**：1. a @0x1\n- **证据**：`[E1]` disasm\n")
@@ -618,7 +618,7 @@ def main() -> int:
              os.path.join(base, "40-g6b.md")])
     check("声明写入面端到端 → 退出码 0", r.returncode == 0, r.stdout.strip()[-160:])
 
-    print("\n[11/25] coverage_gate.py — G1/G2/G3 自动修复 + 类型→Base 命中")
+    print("\n[11/26] coverage_gate.py — G1/G2/G3 自动修复 + 类型→Base 命中")
     out_rec = os.path.join(base, "40-recover.md")
     r = run([os.path.join(HERE, "coverage_gate.py"), "--plan", plan,
              "--verified", vpart, "--tiering", tiering,
@@ -652,7 +652,7 @@ def main() -> int:
     check("可映射类型 → 不报",
           not _cg.check_type_base(rep_mapped, base_md)["unmapped"])
 
-    print("\n[12/25] sink_scan.py — 结构级二次过滤（正则初筛 → 结构确认 / 否定 / 回退）")
+    print("\n[12/26] sink_scan.py — 结构级二次过滤（正则初筛 → 结构确认 / 否定 / 回退）")
     if HERE not in sys.path:
         sys.path.insert(0, HERE)
     import sink_scan as _ss  # noqa
@@ -731,7 +731,7 @@ def main() -> int:
         _ss.structural_match = _orig_sm
 
     # ── 13. 扫描完整性 + 门禁严格性（改进计划 §3 / §4 / §6 的回归）──────────
-    print("\n[13/25] 扫描完整性与门禁严格性")
+    print("\n[13/26] 扫描完整性与门禁严格性")
 
     sz = os.path.join(base, "scanint")
     os.makedirs(sz, exist_ok=True)
@@ -893,7 +893,7 @@ def main() -> int:
     check("组数常量与表头数量一致", n_hdr == NGROUPS, f"表头 {n_hdr} / 常量 {NGROUPS}")
 
     # ── 15. 高阶污点图：写面/读面必须分属不同 action ──────────────────────────
-    print("\n[15/25] taint_graph.py — 跨请求污点图（BDG/ADG）与 G7 门禁")
+    print("\n[15/26] taint_graph.py — 跨请求污点图（BDG/ADG）与 G7 门禁")
     tg = os.path.join(base, "tg")
     os.makedirs(tg, exist_ok=True)
     TG = os.path.join(HERE, "taint_graph.py")
@@ -1074,7 +1074,7 @@ def main() -> int:
           and r.returncode != 0, f"{row.get('status')}/{row.get('required')}")
 
     # ── 16. 候选输入契约：解析失败必须可见，strict 只吃版本化输入 ─────────────
-    print("\n[16/25] 候选输入契约：解析失败可见 / strict 只接受版本化输入")
+    print("\n[16/26] 候选输入契约：解析失败可见 / strict 只接受版本化输入")
     cd16 = os.path.join(base, "cand")
     os.makedirs(cd16, exist_ok=True)
 
@@ -1174,7 +1174,7 @@ def main() -> int:
           f"rc={rr.returncode}")
 
     # ── 17. 扫描完整性 / 阶段状态 / 结构引擎：降级可见，且 strict 能阻断 ─────
-    print("\n[17/25] 扫描完整性与阶段状态：降级可见、可阻断")
+    print("\n[17/26] 扫描完整性与阶段状态：降级可见、可阻断")
     sd17 = os.path.join(base, "scangate")
     os.makedirs(sd17, exist_ok=True)
     layer1_partial = os.path.join(sz, "out2.json")
@@ -1285,7 +1285,7 @@ def main() -> int:
           f"{row.get('status')}/{row.get('required')} rc={rr.returncode}")
 
     # ── 18. 结构化契约 / 固件清单 / EALB 校准 ────────────────────────────────
-    print("\n[18/25] 契约校验（contracts.py）、FirmwareManifest、EALB 校准")
+    print("\n[18/26] 契约校验（contracts.py）、FirmwareManifest、EALB 校准")
     cd18 = os.path.join(base, "contracts")
     os.makedirs(cd18, exist_ok=True)
     CONTRACTS = os.path.join(HERE, "contracts.py")
@@ -1410,7 +1410,7 @@ def main() -> int:
           json.dumps((ee.get("targets") or {}).get("minutes") or {},
                      ensure_ascii=False))
 
-    print("\n[19/25] sandbox_run.py — 不可信固件的隔离边界（fail-closed）")
+    print("\n[19/26] sandbox_run.py — 不可信固件的隔离边界（fail-closed）")
     SANDBOX = os.path.join(HERE, "sandbox_run.py")
     sb_dir = os.path.join(base, "sandbox")
     os.makedirs(sb_dir, exist_ok=True)
@@ -1476,7 +1476,7 @@ def main() -> int:
           rr.returncode == 4, f"rc={rr.returncode}")
 
     # ── 20. 基准评估：指标可复算、严格模式不吞未复核标签、回归可阻断 ──────────
-    print("\n[20/25] bench_eval.py — 基准评估（precision/recall/回归阻断）")
+    print("\n[20/26] bench_eval.py — 基准评估（precision/recall/回归阻断）")
     BENCH = os.path.join(HERE, "bench_eval.py")
     bench_manifest = os.path.join(os.path.dirname(HERE), "assets", "bench", "manifest.json")
     bd = os.path.join(base, "bench")
@@ -1558,7 +1558,7 @@ def main() -> int:
               f"rc={rr.returncode} reasons={db.get('regression_reasons')}")
 
     # ── 21. 黑板：契约 / 事件日志 / 快照恢复 / 状态机 ────────────────────────
-    print("\n[21/25] board_* — 黑板契约、事件日志、快照恢复与状态转换")
+    print("\n[21/26] board_* — 黑板契约、事件日志、快照恢复与状态转换")
     BOARD = os.path.join(HERE, "board_store.py")
     BEV = os.path.join(HERE, "board_events.py")
     BTR = os.path.join(HERE, "board_transitions.py")
@@ -2010,7 +2010,7 @@ def main() -> int:
               for e in st21.get("emulation_results") or [])
           and run([BOARD, "verify", "--workspace", ws21]).returncode == 0)
 
-    print("\n[22/25] resource_manager.py — 资源准入、并发排队与执行路径清单")
+    print("\n[22/26] resource_manager.py — 资源准入、并发排队与执行路径清单")
     RM = os.path.join(HERE, "resource_manager.py")
     EXECP = os.path.join(HERE, "exec_paths.py")
     q22 = os.path.join(base, "resource22")
@@ -2230,7 +2230,7 @@ def main() -> int:
           rr.returncode == 1 and _r22(bad_out).get("ok") is False,
           f"rc={rr.returncode}")
 
-    print("\n[23/25] adapter_emba.py — 离线解析 EMBA 产物、三类观察与黑板导入")
+    print("\n[23/26] adapter_emba.py — 离线解析 EMBA 产物、三类观察与黑板导入")
     ADAPTER = os.path.join(HERE, "adapter_emba.py")
     q23 = os.path.join(base, "emba23")
     src23 = os.path.join(os.path.dirname(HERE), "assets", "emba-sample")
@@ -2516,7 +2516,7 @@ def main() -> int:
           and "REQUIREMENTS_INCONSISTENT" in rr_br.stdout,
           f"rc={rr_br.returncode}")
 
-    print("\n[24/25] emu_plan.py / emu_run.py — M4 计划、沙箱执行与结果分类")
+    print("\n[24/26] emu_plan.py / emu_run.py — M4 计划、沙箱执行与结果分类")
     EMUPLAN = os.path.join(HERE, "emu_plan.py")
     EMURUN = os.path.join(HERE, "emu_run.py")
     q24 = os.path.join(base, "m4")
@@ -2751,7 +2751,7 @@ sys.exit(0)
           and (res_panic.get("emulation_id") != res_part.get("emulation_id")),
           f"{res_ok.get('emulation_id')} / {res_panic.get('emulation_id')}")
 
-    print("\n[25/25] adapter_qiling.py — 计划、事件过滤、证据归一化与黑板导入")
+    print("\n[25/26] adapter_qiling.py — 计划、事件过滤、证据归一化与黑板导入")
     ADAPTERQ = os.path.join(HERE, "adapter_qiling.py")
     q25 = os.path.join(base, "qiling25")
     fw25 = os.path.join(q25, "fw")
@@ -3028,6 +3028,282 @@ sys.exit(0)
     check("contracts.py：qiling-import 禁止 host_fallback=true",
           rr_bh.returncode == 1 and "宿主机" in rr_bh.stdout,
           f"rc={rr_bh.returncode}")
+    print("\n[26/26] board_scheduler.py — Fact→Intent、准入、重试、回写与阶段回退")
+    SCHED = os.path.join(HERE, "board_scheduler.py")
+    s26 = os.path.join(base, "scheduler26")
+    os.makedirs(s26, exist_ok=True)
+    RUN26 = "RUN-M7-26"
+    FW26 = "e" * 64
+    TGT26 = "f" * 64
+
+    def _w26(name: str, obj) -> str:
+        path = os.path.join(s26, name)
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(obj, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+        return path
+
+    def _r26(path: str):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return {}
+
+    def _s26(*extra):
+        rr = run([SCHED] + list(extra))
+        return rr, _pj(rr.stdout)
+
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+    from board_scheduler import readiness as _readiness26
+    check("scheduler：依赖 Intent 被取消 → BLOCKED，不永久 WAITING",
+          _readiness26({"depends_on": ["I-DEP"]},
+                       {"I-DEP": {"status": "cancelled"}})
+          == ("BLOCKED", "DEPENDENCY_CANCELLED:I-DEP"))
+
+    rules26 = _w26("rules.json", {
+        "schema": "scheduler-rules/1.0", "version": "selftest",
+        "rules": [{
+            "id": "R-TEST-SERVICE", "version": "1",
+            "when": {"fact_type": "service", "value_present": ["port"]},
+            "intent": {"type": "dynamic-validation",
+                       "description": "验证 {value.name}:{value.port}",
+                       "target": "{target}", "priority": 50,
+                       "params": {"port": "{value.port}"},
+                       "timeout_seconds": 120, "max_retries": 1},
+        }],
+    })
+    check("contracts.py：scheduler-rules 合法样本通过",
+          run([CONTRACTS, "--kind", "scheduler-rules", "--file", rules26]).returncode == 0)
+    bad_rules = _w26("rules-bad.json", {
+        "schema": "scheduler-rules/1.0",
+        "rules": [{"id": "R-BAD", "version": "1",
+                   "when": {"fact_type": "service", "bogus": True},
+                   "intent": {"type": "dynamic-validation",
+                              "description": "x", "target": "{target}"}}],
+    })
+    rr_br = run([CONTRACTS, "--kind", "scheduler-rules", "--file", bad_rules])
+    check("contracts.py：规则 when 含未知键 → 拒绝",
+          rr_br.returncode == 1 and "UNKNOWN_FIELD" in rr_br.stdout,
+          f"rc={rr_br.returncode}")
+
+    result26 = {
+        "schema": "scheduler-result/1.0", "intent_id": "I-26",
+        "run_id": RUN26, "firmware_sha256": FW26, "status": "SUCCESS",
+        "finished_at": "2026-11-05T00:01:00Z",
+        "evidence": [{"schema": "evidence/1.1", "evidence_id": "E-26",
+                      "run_id": RUN26, "firmware_sha256": FW26,
+                      "type": "dynamic", "observed_at": "2026-11-05T00:00:30Z",
+                      "status": "parsed",
+                      "source": {"type": "dynamic", "tool": "sandbox"},
+                      "event": {"type": "execve", "trigger": True}}],
+        "facts": [{"schema": "fact/1.0", "fact_id": "F-26", "run_id": RUN26,
+                   "firmware_sha256": FW26, "type": "syscall",
+                   "value": {"name": "execve"}, "evidence_refs": ["E-26"],
+                   "source": {"type": "dynamic", "tool": "sandbox"},
+                   "observed_at": "2026-11-05T00:00:30Z"}],
+    }
+    result26_path = _w26("result.json", result26)
+    check("contracts.py：scheduler-result 合法样本通过",
+          run([CONTRACTS, "--kind", "scheduler-result",
+               "--file", result26_path]).returncode == 0)
+    empty_result = json.loads(json.dumps(result26))
+    empty_result["evidence"] = []
+    empty_result["facts"] = []
+    empty_result_path = _w26("result-empty.json", empty_result)
+    rr_er = run([CONTRACTS, "--kind", "scheduler-result",
+                 "--file", empty_result_path])
+    check("contracts.py：SUCCESS 无 Evidence/Fact → RESULT_NO_OUTPUT",
+          rr_er.returncode == 1 and "RESULT_NO_OUTPUT" in rr_er.stdout,
+          f"rc={rr_er.returncode}")
+
+    ws26 = os.path.join(s26, "board")
+    run([BOARD, "init", "--workspace", ws26, "--run-id", RUN26,
+         "--firmware-sha256", FW26])
+    ev_svc = _w26("svc-evidence.json", {
+        "schema": "evidence/1.1", "evidence_id": "E-SVC-26", "run_id": RUN26,
+        "firmware_sha256": FW26, "type": "static",
+        "observed_at": "2026-11-05T00:00:00Z", "status": "parsed",
+        "source": {"type": "static", "tool": "selftest", "path": "etc/init.d/httpd"},
+    })
+    fact_svc_doc = {
+        "schema": "fact/1.0", "fact_id": "F-SVC-26", "run_id": RUN26,
+        "firmware_sha256": FW26, "type": "service",
+        "value": {"name": "httpd", "port": 8080}, "evidence_refs": ["E-SVC-26"],
+        "source": {"type": "static", "tool": "selftest"},
+        "observed_at": "2026-11-05T00:00:00Z",
+    }
+    fact_svc = _w26("svc-fact.json", fact_svc_doc)
+    run([BOARD, "add", "--workspace", ws26, "--kind", "evidence", "--file", ev_svc])
+    run([BOARD, "add", "--workspace", ws26, "--kind", "fact", "--file", fact_svc])
+
+    rr_p26, plan26 = _s26("plan", "--workspace", ws26, "--rules", rules26, "--write")
+    created26 = plan26.get("created") or []
+    check("scheduler：一个 Fact 生成可追溯 Intent（from/creator/provenance）",
+          rr_p26.returncode == 0 and len(created26) == 1
+          and created26[0].get("from") == ["F-SVC-26"]
+          and str(created26[0].get("creator")) == "rule:R-TEST-SERVICE@1"
+          and (created26[0].get("provenance") or {}).get("fact_ids") == ["F-SVC-26"],
+          f"rc={rr_p26.returncode} created={len(created26)}")
+    iid26 = created26[0].get("intent_id")
+    st26 = _r26(os.path.join(ws26, "audit-board.json"))
+    check("scheduler：Intent 经事件写入黑板且通过 intent 契约",
+          any(i.get("intent_id") == iid26 for i in st26.get("intents") or [])
+          and run([CONTRACTS, "--kind", "intent",
+                   "--file", _w26("intent-board.json",
+                                  next(i for i in st26["intents"]
+                                       if i.get("intent_id") == iid26))]).returncode == 0)
+
+    rev_before = st26.get("revision")
+    rr_p26b, plan26b = _s26("plan", "--workspace", ws26, "--rules", rules26, "--write")
+    st26b = _r26(os.path.join(ws26, "audit-board.json"))
+    check("scheduler：重复评估只去重，不重复建任务、不增长 revision",
+          rr_p26b.returncode == 0
+          and (plan26b.get("counts") or {}).get("created") == 0
+          and (plan26b.get("counts") or {}).get("deduped") == 1
+          and st26b.get("revision") == rev_before,
+          f"counts={plan26b.get('counts')} rev={rev_before}->{st26b.get('revision')}")
+
+    rr_n26, next26 = _s26("next", "--workspace", ws26)
+    check("scheduler：next 只列 READY，且带上依赖/优先级字段",
+          rr_n26.returncode == 0 and next26.get("ready") == 1
+          and (next26.get("intents") or [{}])[0].get("state") == "READY"
+          and (next26.get("intents") or [{}])[0].get("intent_id") == iid26,
+          f"rc={rr_n26.returncode} next={next26}")
+
+    policy_tight = _w26("policy-tight.json", {
+        "schema": "sandbox-policy/1.0", "max_timeout_s": 10})
+    rr_deny, deny26 = _s26("claim", "--workspace", ws26, "--intent", iid26,
+                           "--worker", "agent-26", "--policy", policy_tight)
+    st_deny = _r26(os.path.join(ws26, "audit-board.json"))
+    denied_state = next(i for i in st_deny["intents"] if i.get("intent_id") == iid26)
+    check("scheduler：资源准入拒绝 → exit 5，Intent 仍为 open（不绕过限制）",
+          rr_deny.returncode == 5 and deny26.get("code") == "RESOURCE_DENIED"
+          and denied_state.get("status") == "open",
+          f"rc={rr_deny.returncode} code={deny26.get('code')}")
+
+    rr_c26, claim26 = _s26("claim", "--workspace", ws26, "--intent", iid26,
+                           "--worker", "agent-26")
+    check("scheduler：准入通过后领取，attempts=1 且状态为 claimed",
+          rr_c26.returncode == 0 and claim26.get("attempts") == 1,
+          f"rc={rr_c26.returncode} {claim26}")
+
+    fail26 = {"schema": "scheduler-result/1.0", "intent_id": iid26,
+              "run_id": RUN26, "firmware_sha256": FW26, "status": "TIMED_OUT",
+              "worker": "agent-26", "attempt": 1,
+              "finished_at": "2026-11-05T00:02:00Z",
+              "failure": {"code": "TIMEOUT", "message": "超时",
+                          "category": "timeout", "retryable": True},
+              "evidence": [{"schema": "evidence/1.1", "evidence_id": "E-FAIL-26",
+                            "run_id": RUN26, "firmware_sha256": FW26,
+                            "type": "dynamic", "observed_at": "2026-11-05T00:01:30Z",
+                            "status": "failed", "limitations": ["执行超时"],
+                            "source": {"type": "dynamic", "tool": "sandbox"},
+                            "event": {"type": "execve", "trigger": False}}],
+              "facts": [{"schema": "fact/1.0", "fact_id": "F-FAIL-26",
+                         "run_id": RUN26, "firmware_sha256": FW26,
+                         "type": "syscall", "value": {"name": "execve"},
+                         "evidence_refs": ["E-FAIL-26"],
+                         "source": {"type": "dynamic", "tool": "sandbox"},
+                         "observed_at": "2026-11-05T00:01:30Z"}]}
+    fail26_path = _w26("fail1.json", fail26)
+    rr_f26, retry26 = _s26("complete", "--workspace", ws26, "--intent", iid26,
+                           "--result", fail26_path)
+    st_retry = _r26(os.path.join(ws26, "audit-board.json"))
+    retry_row = next(i for i in st_retry["intents"] if i.get("intent_id") == iid26)
+    check("scheduler：可重试失败 → 回到 open，保留 last_failure 并累积本轮 result_refs",
+          rr_f26.returncode == 0 and retry26.get("retry") is True
+          and retry26.get("status") == "open"
+          and set(retry_row.get("result_refs") or []) == {"E-FAIL-26", "F-FAIL-26"},
+          f"rc={rr_f26.returncode} {retry26} refs={retry_row.get('result_refs')}")
+    rr_c26b, claim26b = _s26("claim", "--workspace", ws26, "--intent", iid26,
+                             "--worker", "agent-26b")
+    check("scheduler：重试领取 attempts 递增到 2",
+          rr_c26b.returncode == 0 and claim26b.get("attempts") == 2,
+          f"rc={rr_c26b.returncode} {claim26b}")
+
+    fail26["attempt"] = 2
+    fail26["worker"] = "agent-26b"
+    fail26_path2 = _w26("fail2.json", fail26)
+    rr_f26b, failed26 = _s26("complete", "--workspace", ws26, "--intent", iid26,
+                             "--result", fail26_path2)
+    st_fail = _r26(os.path.join(ws26, "audit-board.json"))
+    failed_row = next(i for i in st_fail["intents"] if i.get("intent_id") == iid26)
+    check("scheduler：超过 max_retries → failed + outcome=timed_out，不能折叠为无发现",
+          rr_f26b.returncode == 0 and failed26.get("status") == "failed"
+          and failed_row.get("outcome") == "timed_out"
+          and isinstance(failed_row.get("last_failure"), dict),
+          f"rc={rr_f26b.returncode} row={failed_row.get('status')}/{failed_row.get('outcome')}")
+
+    fact_svc2 = json.loads(json.dumps(fact_svc_doc))
+    fact_svc2["fact_id"] = "F-SVC-27"
+    fact_svc2["value"] = {"name": "upnpd", "port": 1900}
+    fact_svc2_path = _w26("svc2-fact.json", fact_svc2)
+    run([BOARD, "add", "--workspace", ws26, "--kind", "fact", "--file", fact_svc2_path])
+    rr_p27, plan27 = _s26("plan", "--workspace", ws26, "--rules", rules26, "--write")
+    created27 = plan27.get("created") or []
+    check("scheduler：新 Fact 生成新 Intent，旧 Intent 不被重复创建",
+          rr_p27.returncode == 0 and len(created27) == 1
+          and created27[0].get("from") == ["F-SVC-27"],
+          f"rc={rr_p27.returncode} created={len(created27)}")
+    iid27 = created27[0]["intent_id"]
+    rr_c27, _ = _s26("claim", "--workspace", ws26, "--intent", iid27,
+                     "--worker", "agent-27")
+    ok26 = {"schema": "scheduler-result/1.0", "intent_id": iid27,
+            "run_id": RUN26, "firmware_sha256": FW26, "status": "SUCCESS",
+            "worker": "agent-27", "attempt": 1,
+            "finished_at": "2026-11-05T00:03:00Z",
+            "evidence": [{"schema": "evidence/1.1", "evidence_id": "E-OK-26",
+                          "run_id": RUN26, "firmware_sha256": FW26,
+                          "type": "dynamic", "observed_at": "2026-11-05T00:02:30Z",
+                          "status": "parsed",
+                          "source": {"type": "dynamic", "tool": "sandbox"},
+                          "event": {"type": "execve", "trigger": True}}],
+            "facts": [{"schema": "fact/1.0", "fact_id": "F-OK-26",
+                       "run_id": RUN26, "firmware_sha256": FW26,
+                       "type": "syscall", "value": {"name": "execve"},
+                       "evidence_refs": ["E-OK-26"],
+                       "source": {"type": "dynamic", "tool": "sandbox"},
+                       "observed_at": "2026-11-05T00:02:30Z"}]}
+    ok26_path = _w26("ok.json", ok26)
+    rr_ok26, done26 = _s26("complete", "--workspace", ws26, "--intent", iid27,
+                           "--result", ok26_path)
+    st_ok = _r26(os.path.join(ws26, "audit-board.json"))
+    done_row = next(i for i in st_ok["intents"] if i.get("intent_id") == iid27)
+    check("scheduler：SUCCESS 回写 Evidence/Fact，Intent=done 且 result_refs 可追溯",
+          rr_ok26.returncode == 0 and done26.get("status") == "done"
+          and set(done_row.get("result_refs") or []) == {"E-OK-26", "F-OK-26"}
+          and any(e.get("evidence_id") == "E-OK-26" for e in st_ok.get("evidence") or []),
+          f"rc={rr_ok26.returncode} refs={done_row.get('result_refs')}")
+
+    rr_adv = run([BOARD, "advance", "--workspace", ws26, "--to-phase", "P1",
+                  "--reason", "进入静态分析", "--evidence", "E-SVC-26"])
+    st_adv = _r26(os.path.join(ws26, "audit-board.json"))
+    check("黑板：PHASE_ADVANCED 记录阶段前进并携带触发证据",
+          rr_adv.returncode == 0 and st_adv.get("phase") == "P1",
+          f"rc={rr_adv.returncode} phase={st_adv.get('phase')}")
+    rr_bt26 = run([BOARD, "backtrack", "--workspace", ws26,
+                   "--from-phase", "P1", "--to-phase", "P0",
+                   "--reason", "服务清单不完整", "--evidence", "E-SVC-26"])
+    st_bt = _r26(os.path.join(ws26, "audit-board.json"))
+    check("黑板：BACKTRACK 从当前阶段显式回退，不接受错误的 from_phase",
+          rr_bt26.returncode == 0 and st_bt.get("phase") == "P0"
+          and len(st_bt.get("backtracks") or []) == 1,
+          f"rc={rr_bt26.returncode} phase={st_bt.get('phase')}")
+
+    rr_skip26 = run([BOARD, "advance", "--workspace", ws26, "--to-phase", "P2",
+                     "--reason", "试图跳过 P1"])
+    st_skip26 = _r26(os.path.join(ws26, "audit-board.json"))
+    check("黑板：PHASE_ADVANCED 不允许跳阶段（P0→P2 被拒，阶段停在 P0）",
+          rr_skip26.returncode == 1 and "NOT_AN_ADVANCE" in rr_skip26.stderr
+          and st_skip26.get("phase") == "P0",
+          f"rc={rr_skip26.returncode} phase={st_skip26.get('phase')}")
+
+    rr_v26 = run([BOARD, "verify", "--workspace", ws26])
+    check("黑板：M7 全流程后 verify 通过（事件链与快照一致）",
+          rr_v26.returncode == 0, rr_v26.stdout.strip()[:200])
+
     print()
     if FAILS:
         print(f"[selftest] 失败 {len(FAILS)}/{TOTAL} 项: {FAILS}")

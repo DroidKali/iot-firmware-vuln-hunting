@@ -4,10 +4,11 @@
 
 为什么需要它
 ------------
-本 skill 的判定链路里有 21 种 schema：FirmwareManifest / AuditTask / Candidate /
+本 skill 的判定链路里有 23 种 schema：FirmwareManifest / AuditTask / Candidate /
 Finding / Evidence / GateResult / AuditStages / ScanWaiver / SandboxRun /
-BenchManifest / EmbaImport / EmulationPlan，以及黑板层的 Fact / Intent / Hint /
-EmulationResult / BoardState / BoardEvent。它们此前散落在各自的脚本输出里，字段名、必填项、枚举值、
+BenchManifest / EmbaImport / EmulationPlan / QilingPlan / QilingEvent /
+QilingImport，黑板层的 Fact / Intent / Hint / EmulationResult / BoardState /
+BoardEvent，以及 M7 调度层的 SchedulerRules / SchedulerResult。它们此前散落在各自的脚本输出里，字段名、必填项、枚举值、
 schema 版本各写各的，Markdown 文案一变就可能影响判定。
 本模块把这些契约收敛到一处：
 
@@ -51,7 +52,7 @@ SUPPORTED: Dict[str, List[str]] = {
     "emulation-plan": ["emulation-plan/1.0"],
     # ── 黑板（M1）：事实、意图、提示、仿真结果、快照与事件 ──────────────────
     "fact": ["fact/1.0"],
-    "intent": ["intent/1.0"],
+    "intent": ["intent/1.1", "intent/1.0"],
     "hint": ["hint/1.0"],
     "emulation-result": ["emulation-result/1.0"],
     "board-state": ["board-state/1.0"],
@@ -60,6 +61,9 @@ SUPPORTED: Dict[str, List[str]] = {
     "qiling-plan": ["qiling-plan/1.0"],
     "qiling-event": ["qiling-event/1.0"],
     "qiling-import": ["qiling-import/1.0"],
+    # ── M7 动态调度：确定性规则与执行结果 ────────────────────────────────
+    "scheduler-rules": ["scheduler-rules/1.0"],
+    "scheduler-result": ["scheduler-result/1.0"],
 }
 
 CAND_STATUSES = (
@@ -91,10 +95,17 @@ INTENT_TYPES = (
     "verification", "manual-review", "other",
 )
 INTENT_STATUSES = ("open", "claimed", "done", "failed", "cancelled")
+# Intent 结果保留 SUCCESS/PARTIAL/... 的区分；PARTIAL 不能被折叠成 success。
+INTENT_OUTCOMES = (
+    "success", "partial", "failed", "blocked", "not_applicable",
+    "timed_out", "cancelled",
+)
+INTENT_PRIORITY_RANGE = (0, 100)
 BOARD_EVENT_TYPES = (
     "BOARD_INITIALIZED", "FACT_RECORDED", "CANDIDATE_RECORDED",
     "EVIDENCE_RECORDED", "INTENT_CREATED", "INTENT_STATUS_CHANGED",
     "HINT_RECORDED", "EMULATION_RECORDED", "CANDIDATE_TRANSITIONED", "BACKTRACK",
+    "PHASE_ADVANCED",
 )
 BOARD_PHASES = ("P0", "P1", "P2", "P3", "P4", "P5")
 
@@ -963,6 +974,34 @@ def validate_intent(obj: Any) -> List[Dict[str, str]]:
                     _opt_int(out, budget, "intent.budget", key)
     _opt_int(out, obj, "intent", "timeout_seconds", minimum=1)
     _opt_int(out, obj, "intent", "max_retries")
+    # ── intent/1.1：调度所需的优先级、依赖、尝试次数与结果 ──────────────
+    if "priority" in obj and obj["priority"] is not None:
+        prio = obj["priority"]
+        if not isinstance(prio, int) or isinstance(prio, bool) \
+                or not (INTENT_PRIORITY_RANGE[0] <= prio <= INTENT_PRIORITY_RANGE[1]):
+            _err(out, "intent.priority", "OUT_OF_RANGE",
+                 "priority 必须是 0..100 的整数")
+    if "depends_on" in obj and obj["depends_on"] is not None:
+        _str_list(out, obj, "intent", "depends_on", required=False, allow_empty=True)
+    _opt_int(out, obj, "intent", "attempts")
+    if "outcome" in obj and obj["outcome"] is not None:
+        _enum(out, obj, "intent", "outcome", INTENT_OUTCOMES)
+    if "result_refs" in obj and obj["result_refs"] is not None:
+        _str_list(out, obj, "intent", "result_refs", required=False, allow_empty=True)
+    failure = obj.get("last_failure")
+    if failure is not None:
+        if not isinstance(failure, dict):
+            _err(out, "intent.last_failure", "BAD_TYPE", "last_failure 必须是对象")
+        else:
+            _req(out, failure, "intent.last_failure", "code", str)
+            _req(out, failure, "intent.last_failure", "message", str)
+            if "retryable" in failure and not isinstance(failure["retryable"], bool):
+                _err(out, "intent.last_failure.retryable", "BAD_TYPE",
+                     "retryable 必须是布尔值")
+            for key in ("category", "at"):
+                if key in failure and not isinstance(failure[key], str):
+                    _err(out, f"intent.last_failure.{key}", "BAD_TYPE",
+                         f"{key} 必须是字符串")
     for key in ("preconditions", "stop_conditions", "expected_outputs"):
         if key in obj and obj[key] is not None:
             _str_list(out, obj, "intent", key, required=False, allow_empty=True)
@@ -974,10 +1013,240 @@ def validate_intent(obj: Any) -> List[Dict[str, str]]:
             _err(out, "intent.worker", "MISSING", "claimed 状态必须记录 worker")
         if not isinstance(obj.get("claimed_at"), str) or not obj.get("claimed_at"):
             _err(out, "intent.claimed_at", "MISSING", "claimed 状态必须记录 claimed_at")
+        attempts = obj.get("attempts")
+        if obj.get("schema") == "intent/1.1" and (
+                not isinstance(attempts, int) or isinstance(attempts, bool)
+                or attempts < 1):
+            _err(out, "intent.attempts", "MISSING",
+                 "intent/1.1 的 claimed 状态必须记录第几次尝试 attempts")
     if obj.get("status") in ("done", "failed", "cancelled"):
         if not isinstance(obj.get("concluded_at"), str) or not obj.get("concluded_at"):
             _err(out, "intent.concluded_at", "MISSING",
                  "结束状态必须记录 concluded_at")
+    if obj.get("schema") == "intent/1.1" and obj.get("status") == "failed":
+        if not failure:
+            _err(out, "intent.last_failure", "MISSING",
+                 "intent/1.1 失败必须记录 last_failure，不能只写 failed")
+        if obj.get("outcome") not in ("failed", "blocked", "timed_out"):
+            _err(out, "intent.outcome", "MISSING",
+                 "失败必须记录 outcome=failed|blocked|timed_out")
+    if obj.get("schema") == "intent/1.1" and obj.get("status") == "done":
+        if obj.get("outcome") not in ("success", "partial", "not_applicable"):
+            _err(out, "intent.outcome", "MISSING",
+                 "完成必须记录 outcome=success|partial|not_applicable")
+    return out
+
+
+def _rule_template(value: Any, path: str, out: List[Dict[str, str]]) -> None:
+    """模板只允许 {fact_id}/{fact_type}/{target}/{value.KEY} 这类占位符。
+
+    不在这里做渲染（渲染需要具体 Fact）；只拒绝空占位与未闭合花括号，
+    避免规则文件里出现 {value.foo 这种到运行时才炸的拼写错误。
+    """
+    if not isinstance(value, str):
+        _err(out, path, "BAD_TYPE", "模板必须是字符串")
+        return
+    if not value.strip():
+        _err(out, path, "EMPTY", "模板不得为空")
+        return
+    depth = 0
+    for ch in value:
+        if ch == "{":
+            depth += 1
+            if depth > 1:
+                _err(out, path, "BAD_TEMPLATE", "模板占位符不得嵌套")
+                return
+        elif ch == "}":
+            depth -= 1
+            if depth < 0:
+                _err(out, path, "BAD_TEMPLATE", "模板出现未配对的 }")
+                return
+    if depth != 0:
+        _err(out, path, "BAD_TEMPLATE", "模板出现未配对的 {")
+
+
+def validate_scheduler_rules(obj: Any) -> List[Dict[str, str]]:
+    """SchedulerRules：Fact→Intent 的确定性规则；规则是配置，不是脚本。"""
+    out: List[Dict[str, str]] = []
+    if not _schema(out, obj, "rules", "scheduler-rules"):
+        return out
+    if "version" in obj and obj["version"] is not None \
+            and not isinstance(obj["version"], str):
+        _err(out, "rules.version", "BAD_TYPE", "version 必须是字符串")
+    rows = _list_of_dicts(out, obj, "rules", "rules")
+    if not rows:
+        _err(out, "rules.rules", "EMPTY", "规则集至少要有一条规则")
+    seen = set()
+    for i, rule in enumerate(rows):
+        path = f"rules.rules[{i}]"
+        rid = rule.get("id")
+        _req(out, rule, path, "id", str)
+        if isinstance(rid, str) and rid:
+            if rid in seen:
+                _err(out, f"{path}.id", "DUPLICATE_ID", f"规则 ID 重复：{rid}")
+            seen.add(rid)
+            if not re.match(r"^R-[A-Za-z0-9][A-Za-z0-9._-]*$", rid):
+                _err(out, f"{path}.id", "BAD_VALUE",
+                     "规则 ID 必须形如 R-<字母数字>，只含字母/数字/._-")
+        _req(out, rule, path, "version", str)
+        if "enabled" in rule and not isinstance(rule["enabled"], bool):
+            _err(out, f"{path}.enabled", "BAD_TYPE", "enabled 必须是布尔值")
+        when = rule.get("when")
+        if not isinstance(when, dict):
+            _err(out, f"{path}.when", "MISSING", "缺少 when 条件对象")
+        else:
+            ft = when.get("fact_type")
+            if isinstance(ft, str):
+                types = [ft]
+            elif isinstance(ft, list) and ft:
+                types = ft
+            else:
+                _err(out, f"{path}.when.fact_type", "MISSING",
+                     "when.fact_type 必须是非空字符串或非空数组")
+                types = []
+            for j, t in enumerate(types):
+                if not isinstance(t, str) or t not in FACT_TYPES:
+                    _err(out, f"{path}.when.fact_type[{j}]", "BAD_ENUM",
+                         f"{t!r} 不是已知 Fact 类型")
+            for key in ("value_present", "value_truthy"):
+                if key in when and when[key] is not None:
+                    _str_list(out, when, f"{path}.when", key,
+                              required=False, allow_empty=True)
+            if "value_equals" in when and when["value_equals"] is not None:
+                ve = when["value_equals"]
+                if not isinstance(ve, dict) or not ve:
+                    _err(out, f"{path}.when.value_equals", "BAD_TYPE",
+                         "value_equals 必须是非空对象")
+                else:
+                    for k, v in ve.items():
+                        if not isinstance(k, str) or not k:
+                            _err(out, f"{path}.when.value_equals", "BAD_KEY",
+                                 "value_equals 的键必须是非空字符串")
+                        if not isinstance(v, (str, int, float, bool)) and v is not None:
+                            _err(out, f"{path}.when.value_equals.{k}", "BAD_TYPE",
+                                 "value_equals 只接受标量")
+            known = {"fact_type", "value_present", "value_truthy", "value_equals"}
+            for key in when:
+                if key not in known:
+                    _err(out, f"{path}.when.{key}", "UNKNOWN_FIELD",
+                         "未知条件字段（拼错的谓词不会被静默忽略）")
+        want = rule.get("intent")
+        if not isinstance(want, dict):
+            _err(out, f"{path}.intent", "MISSING", "缺少 intent 模板对象")
+        else:
+            _enum(out, want, f"{path}.intent", "type", INTENT_TYPES)
+            _req(out, want, f"{path}.intent", "description", str)
+            _rule_template(want.get("description"), f"{path}.intent.description", out)
+            _req(out, want, f"{path}.intent", "target", str)
+            _rule_template(want.get("target"), f"{path}.intent.target", out)
+            if "priority" in want and want["priority"] is not None:
+                prio = want["priority"]
+                if not isinstance(prio, int) or isinstance(prio, bool) \
+                        or not (INTENT_PRIORITY_RANGE[0] <= prio <= INTENT_PRIORITY_RANGE[1]):
+                    _err(out, f"{path}.intent.priority", "OUT_OF_RANGE",
+                         "priority 必须是 0..100 的整数")
+            if "params" in want and want["params"] is not None \
+                    and not isinstance(want["params"], dict):
+                _err(out, f"{path}.intent.params", "BAD_TYPE", "params 必须是对象")
+            _opt_int(out, want, f"{path}.intent", "timeout_seconds", minimum=1)
+            _opt_int(out, want, f"{path}.intent", "max_retries")
+            if isinstance(want.get("max_retries"), int) \
+                    and want["max_retries"] > 10:
+                _err(out, f"{path}.intent.max_retries", "OUT_OF_RANGE",
+                     "max_retries 不得超过 10")
+            for key in ("stop_conditions", "expected_outputs"):
+                if key in want and want[key] is not None:
+                    _str_list(out, want, f"{path}.intent", key,
+                              required=False, allow_empty=True)
+        if "depends_on" in rule and rule["depends_on"] is not None:
+            deps = _str_list(out, rule, path, "depends_on",
+                             required=False, allow_empty=True)
+            for j, dep in enumerate(deps):
+                if dep == rid:
+                    _err(out, f"{path}.depends_on[{j}]", "SELF_DEPENDENCY",
+                         "规则不得依赖自身")
+    # 依赖必须指向同一规则集里的规则；跨文件引用会让调度结果依赖加载顺序。
+    for i, rule in enumerate(rows):
+        for j, dep in enumerate(rule.get("depends_on") or []):
+            if isinstance(dep, str) and dep and dep not in seen:
+                _err(out, f"rules.rules[{i}].depends_on[{j}]", "DEPENDENCY_MISSING",
+                     f"依赖的规则不存在：{dep}")
+    return out
+
+
+def validate_scheduler_result(obj: Any) -> List[Dict[str, str]]:
+    """SchedulerResult：调度执行结果；必须把失败与「没有发现」分开记录。"""
+    out: List[Dict[str, str]] = []
+    if not _schema(out, obj, "result", "scheduler-result"):
+        return out
+    _req(out, obj, "result", "intent_id", str)
+    _req(out, obj, "result", "run_id", str)
+    _hex(out, obj, "result", "firmware_sha256")
+    _enum(out, obj, "result", "status", EMULATION_STATUSES)
+    if "worker" in obj and obj["worker"] is not None:
+        _opt_str(out, obj, "result", "worker")
+    if "attempt" in obj and obj["attempt"] is not None:
+        _opt_int(out, obj, "result", "attempt", minimum=1)
+    evidence = _list_of_dicts(out, obj, "result", "evidence", required=False)
+    facts = _list_of_dicts(out, obj, "result", "facts", required=False)
+    ev_ids, fact_ids = set(), set()
+    for i, ev in enumerate(evidence):
+        sub = f"result.evidence[{i}]"
+        _bind(out, ev, sub, obj.get("run_id"), obj.get("firmware_sha256"))
+        for err in validate_evidence_record(ev):
+            out.append({"path": f"{sub}.{err['path']}", "code": err["code"],
+                        "message": err["message"]})
+        eid = ev.get("evidence_id")
+        if isinstance(eid, str):
+            if eid in ev_ids:
+                _err(out, f"{sub}.evidence_id", "DUPLICATE_ID", "证据 ID 重复")
+            ev_ids.add(eid)
+    for i, fact in enumerate(facts):
+        sub = f"result.facts[{i}]"
+        _bind(out, fact, sub, obj.get("run_id"), obj.get("firmware_sha256"))
+        for err in validate_fact(fact):
+            out.append({"path": f"{sub}.{err['path']}", "code": err["code"],
+                        "message": err["message"]})
+        fid = fact.get("fact_id")
+        if isinstance(fid, str):
+            if fid in fact_ids:
+                _err(out, f"{sub}.fact_id", "DUPLICATE_ID", "事实 ID 重复")
+            fact_ids.add(fid)
+        for ref in fact.get("evidence_refs") or []:
+            if isinstance(ref, str) and ref not in ev_ids:
+                _err(out, f"{sub}.evidence_refs", "DANGLING_EVIDENCE",
+                     f"事实引用的证据不在结果里：{ref!r}")
+    _artifact_list(out, obj, "result", "artifacts")
+    if "resource_usage" in obj and obj["resource_usage"] is not None \
+            and not isinstance(obj["resource_usage"], dict):
+        _err(out, "result.resource_usage", "BAD_TYPE", "resource_usage 必须是对象")
+    _req(out, obj, "result", "finished_at", str)
+    if "started_at" in obj and obj["started_at"] is not None:
+        _opt_str(out, obj, "result", "started_at")
+    if "limitations" in obj and obj["limitations"] is not None:
+        _str_list(out, obj, "result", "limitations", required=False, allow_empty=True)
+    status = obj.get("status")
+    failure = obj.get("failure")
+    if status in ("FAILED", "BLOCKED", "TIMED_OUT"):
+        if not isinstance(failure, dict):
+            _err(out, "result.failure", "MISSING",
+                 "失败/阻断/超时必须给出 failure{code,message,category,retryable}")
+        else:
+            for key in ("code", "message", "category"):
+                _req(out, failure, "result.failure", key, str)
+            if not isinstance(failure.get("retryable"), bool):
+                _err(out, "result.failure.retryable", "BAD_TYPE",
+                     "retryable 必须是布尔值")
+    elif failure is not None and not isinstance(failure, dict):
+        _err(out, "result.failure", "BAD_TYPE", "failure 必须是对象")
+    if status == "PARTIAL":
+        lim = obj.get("limitations")
+        if not isinstance(lim, list) or not lim:
+            _err(out, "result.limitations", "MISSING",
+                 "PARTIAL 必须列出未覆盖内容，不能静默折叠为成功")
+    if status in ("SUCCESS", "PARTIAL") and not evidence and not facts:
+        _err(out, "result", "RESULT_NO_OUTPUT",
+             "成功/部分成功的结果必须至少产生一条 Evidence 或 Fact")
     return out
 
 
@@ -1362,6 +1631,26 @@ def validate_board_event(obj: Any) -> List[Dict[str, str]]:
         if "worker" in payload and payload["worker"] is not None \
                 and not isinstance(payload["worker"], str):
             _err(out, "event.payload.worker", "BAD_TYPE", "worker 必须是字符串")
+        _opt_int(out, payload, "event.payload", "attempts", minimum=1)
+        if "outcome" in payload and payload["outcome"] is not None:
+            _enum(out, payload, "event.payload", "outcome", INTENT_OUTCOMES)
+        if "result_refs" in payload and payload["result_refs"] is not None:
+            _str_list(out, payload, "event.payload", "result_refs",
+                      required=False, allow_empty=True)
+        if "reason" in payload and payload["reason"] is not None \
+                and not isinstance(payload["reason"], str):
+            _err(out, "event.payload.reason", "BAD_TYPE", "reason 必须是字符串")
+        lf = payload.get("last_failure")
+        if lf is not None:
+            if not isinstance(lf, dict):
+                _err(out, "event.payload.last_failure", "BAD_TYPE",
+                     "last_failure 必须是对象")
+            else:
+                _req(out, lf, "event.payload.last_failure", "code", str)
+                _req(out, lf, "event.payload.last_failure", "message", str)
+                if "retryable" in lf and not isinstance(lf["retryable"], bool):
+                    _err(out, "event.payload.last_failure.retryable", "BAD_TYPE",
+                         "retryable 必须是布尔值")
     elif typ == "BACKTRACK":
         _validate_backtrack(out, payload, "event.payload")
     return out
@@ -1810,6 +2099,8 @@ VALIDATORS = {
     "qiling-plan": validate_qiling_plan,
     "qiling-event": validate_qiling_event,
     "qiling-import": validate_qiling_import,
+    "scheduler-rules": validate_scheduler_rules,
+    "scheduler-result": validate_scheduler_result,
 }
 
 

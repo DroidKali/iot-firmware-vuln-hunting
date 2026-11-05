@@ -1,8 +1,8 @@
-# 数据契约（FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / SandboxRun / BenchManifest / EmbaImport / EmulationPlan / QilingPlan / QilingEvent / QilingImport / 黑板对象 / 执行路径）
+# 数据契约（FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / SandboxRun / BenchManifest / EmbaImport / EmulationPlan / QilingPlan / QilingEvent / QilingImport / SchedulerRules / SchedulerResult / 黑板对象 / 执行路径）
 
 本文件定义跨阶段传递的结构化数据，以及**校验入口、版本规则、兼容模式边界**。目标是消除「同一事实在 plan、报告、gate-config 里三种写法」的漂移：任何下游脚本要消费上游产物时，先看 schema 版本，再按本文件取字段。
 
-配套校验器：`scripts/contracts.py`（纯标准库）。`--list` 当前列出 21 种 schema；候选的整文件 envelope 由 `candidates` 文档校验器单独处理。
+配套校验器：`scripts/contracts.py`（纯标准库）。`--list` 当前列出 23 种 schema；候选的整文件 envelope 由 `candidates` 文档校验器单独处理。
 
 ```bash
 # 列出支持的所有 schema
@@ -197,7 +197,7 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 
 ### 8.1 SandboxPolicy（`sandbox-policy/1.0`）
 
-由 `scripts/resource_manager.py` 校验，**不在 `contracts.py` 的 21 种 schema 内**。策略是运维配置，不是每次运行的产物；其规范化 JSON 的 sha256 写入 `admission.policy_sha256`，用于证明「这次执行用的是哪份策略」。
+由 `scripts/resource_manager.py` 校验，**不在 `contracts.py` 的 23 种 schema 内**。策略是运维配置，不是每次运行的产物；其规范化 JSON 的 sha256 写入 `admission.policy_sha256`，用于证明「这次执行用的是哪份策略」。
 
 | 字段 | 默认 | 约束 | 说明 |
 |---|---|---|---|
@@ -296,11 +296,12 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 | `FACT_RECORDED` | `fact`（完整 `fact/1.0` 对象） |
 | `CANDIDATE_RECORDED` | `candidate`（完整候选对象） |
 | `EVIDENCE_RECORDED` | `evidence`（完整 `evidence/1.1` 对象） |
-| `INTENT_CREATED` | `intent`（完整 `intent/1.0` 对象） |
+| `INTENT_CREATED` | `intent`（完整 `intent/1.1` 对象；兼容 `intent/1.0`） |
 | `HINT_RECORDED` | `hint`（完整 `hint/1.0` 对象） |
 | `EMULATION_RECORDED` | `result`（完整 `emulation-result/1.0` 对象） |
 | `CANDIDATE_TRANSITIONED` | `candidate_id` / `from_state` / `to_state` / `reason` / `evidence_refs`；`policy` 可选 |
-| `INTENT_STATUS_CHANGED` | `intent_id` / `from_status` / `to_status`；`worker` 可选 |
+| `INTENT_STATUS_CHANGED` | `intent_id` / `from_status` / `to_status`；`worker` / `attempts` / `outcome` / `result_refs` / `last_failure` / `reason` 可选 |
+| `PHASE_ADVANCED` | `from_phase` / `to_phase` / `reason` / `evidence_refs`；`advanced_by` 可选 |
 | `BACKTRACK` | `from_phase` / `to_phase` / `reason` / `evidence_refs`；`approved_by` 可选 |
 
 语义与失败模式：
@@ -310,6 +311,8 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 - 空行可以容忍（计入 `blank`），但**非法 JSON 行必须报 `PARSE_ERROR` 并非零退出**，不得静默跳过。
 - 快照的 `revision` / `event_count` / `last_event_id` 与日志不一致时，`load` 会重建并标记 `recovered=true`；快照缺失也能从日志恢复。
 - 重复初始化报 `ALREADY_INITIALIZED`（除非显式 `--force`）；`BACKTRACK` 的 `from_phase` 不是当前阶段报 `PHASE_MISMATCH`，方向不是回退报 `NOT_A_BACKTRACK`。
+- `INTENT_STATUS_CHANGED` 的 `worker` / `attempts` / `outcome` / `result_refs` / `last_failure` 全部校验通过后才写入 `intent.status`；否则事件声称切换了状态，重放却停在旧状态。`claimed` 的 `attempts` 必须等于旧值加一，跳号或重放报 `ATTEMPT_MISMATCH`；`done` 必须带成功类 `outcome`，`failed` 必须带失败类 `outcome` 与 `last_failure`（`OUTCOME_REQUIRED` / `FAILURE_REQUIRED`）；`result_refs` 指向的对象必须已在黑板，否则 `RESULT_REF_NOT_FOUND`；重试回到 `open` 时本轮结果引用**追加**到 `result_refs`，不能覆盖上一轮，否则失败尝试的 Evidence/Fact 会脱离 Intent、审计链断裂。
+- `PHASE_ADVANCED` 的 `from_phase` 必须等于当前阶段（`PHASE_MISMATCH`），`to_phase` 必须是下一阶段（`NOT_AN_ADVANCE`），`reason` 非空（`REASON_REQUIRED`），`evidence_refs` 必须存在（`EVIDENCE_REF_INVALID` / `EVIDENCE_REF_NOT_FOUND`）。前进用 `PHASE_ADVANCED`，回退只能用 `BACKTRACK`，不能用前进事件倒着写。
 - 事件载荷内的对象若 `run_id` 与事件不一致，报 `RUN_MISMATCH`；引用不存在的证据 / 来源 / Intent，报 `DANGLING_EVIDENCE` / `DANGLING_REF`。
 - 回放遇到状态的 `from_state` 与快照当前状态不一致，报 `STATE_MISMATCH`；未知事件类型报 `UNKNOWN_EVENT`。
 
@@ -333,13 +336,13 @@ Fact 是**有来源、绑定了运行与固件的客观观察**，不是判断�
 
 约束：`value` 不得为空对象；`evidence_refs` 不得为空；`evidence_refs` 指向的证据必须存在于黑板，否则 `DANGLING_REF`。导入 manifest / layer1 / stages 各产生一条 Fact 和一条证据，ID 由文件哈希派生，重复导入保持幂等。
 
-## 14. Intent（`intent/1.0`）与 Hint（`hint/1.0`）
+## 14. Intent（`intent/1.1`，兼容 `intent/1.0`）与 Hint（`hint/1.0`）
 
 Intent 是**尚未执行的方向**：必须由已有事实/候选/证据/Intent 触发，带唯一去重键与预算。
 
 | 字段 | 类型 | 必需 | 说明 |
 |---|---|---|---|
-| `schema` | string | ✅ | `intent/1.0` |
+| `schema` | string | ✅ | `intent/1.1`；`intent/1.0` 仅作历史兼容，不参与 M7 调度
 | `intent_id` | string | ✅ | 建议 `INT-*` |
 | `run_id` / `firmware_sha256` | string | ✅ | 运行与固件绑定 |
 | `type` | enum | ✅ | `triage` / `static-analysis` / `dynamic-validation` / `emulation` / `verification` / `manual-review` / `other` |
@@ -351,12 +354,20 @@ Intent 是**尚未执行的方向**：必须由已有事实/候选/证据/Intent
 | `target` | string/object | ✅ | 非空；目标文件、服务、函数或对象 |
 | `params` | object | — | 执行参数 |
 | `budget` | object | — | `{seconds, max_attempts, tokens}`，均为非负整数 |
-| `timeout_seconds` / `max_retries` | int | — | 分别 ≥1 / ≥0 |
-| `preconditions` / `stop_conditions` / `expected_outputs` | array | — | 字符串数组 |
+| `timeout_seconds` / `max_retries` | int | — | 分别 ≥1 / ≥0（规则模板里 `max_retries` ≤10） |
+| `priority` | int | — | 0..100；调度按数值降序，Hint 最多加 15 分，不能绕过门禁 |
+| `depends_on` | array | — | 依赖的 Intent ID；依赖失败/取消/缺失时本 Intent 不得 READY |
+| `attempts` | int | 条件 | 第几次尝试；`claimed` 的 `intent/1.1` 必须 ≥1 |
+| `outcome` | enum | 条件 | `success` / `partial` / `failed` / `blocked` / `not_applicable` / `timed_out` / `cancelled` |
+| `result_refs` | array | — | 所有尝试累积的 Evidence / Fact ID（重试追加，不覆盖）；必须已存在于黑板 |
+| `last_failure` | object | 条件 | `{code, message, category?, retryable?, at?}`；`failed` 必填 |
+| `preconditions` / `stop_conditions` / `expected_outputs` | array | — | 字符串数组；`stop_conditions` 是执行者必须遵守的停止判据，不是装饰 |
 | `worker` | string/null | — | 认领者 |
 | `claimed_at` / `concluded_at` | string | 条件 | `claimed` 必须有 `worker`+`claimed_at`；`done`/`failed`/`cancelled` 必须有 `concluded_at` |
 
 Intent 状态机：`open → claimed | cancelled`；`claimed → done | failed | cancelled | open`（释放）；`done` / `failed` / `cancelled` 为终态。认领必须带 `worker`，否则 `MISSING_WORKER`；非法转换报 `ILLEGAL_TRANSITION`。
+
+`intent/1.1` 额外约束：`claimed` 必须带 `attempts>=1`；`failed` 必须带 `last_failure` 且 `outcome∈{failed,blocked,timed_out}`；`done` 必须带 `outcome∈{success,partial,not_applicable}`。`partial` 不能被折叠成 `success`，`timed_out` / `blocked` 也不能被写成「没有发现」。失败重试由 `max_retries` 与 `attempts` 共同决定，超出上限即 `failed`，不得无限重试。
 
 Hint 是人工判断或提示，**不是证据**，不得用来替代 Fact / Evidence。
 
@@ -402,14 +413,16 @@ BoardState 是快照文件的结构，所有条目都必须绑定同一个 `run_
 | `run_id` / `firmware_sha256` | string | ✅ | 快照级绑定 |
 | `revision` / `event_count` | int | — | 非负；与事件日志对账 |
 | `updated_at` | string | ✅ | ISO 8601 |
-| `phase` | enum | — | `P0`…`P5`；默认 `P0` |
+| `phase` | enum | — | `P0`…`P5`；默认 `P0`，只能由 `PHASE_ADVANCED` / `BACKTRACK` 改变 |
 | `manifest_id` / `last_event_id` | string | — | 清单与最后事件 |
 | `evidence` / `facts` / `candidates` / `intents` / `hints` / `emulation_results` / `backtracks` | array | ✅ | 七类数组；每项走对应 validator |
 | `counters` | object | — | 若提供，必须与各数组实际长度一致 |
 
 交叉引用（悬空即 `DANGLING_REF`）：`fact.evidence_refs` 必须指向 `evidence`；`intent.from` 必须指向 facts / candidates / evidence / intents；`emulation_result.intent_id` 必须指向 `intents`；`emulation_result.evidence_refs` 与 `backtrack.evidence_refs` 必须指向 `evidence`。每类 ID 在各自数组内唯一。
 
-**BACKTRACK** 记录：`{from_phase, to_phase, reason, evidence_refs, approved_by?}`。`from_phase` 必须等于黑板当前 `phase`，且 `to_phase` 必须是更早的阶段，否则 `PHASE_MISMATCH` / `NOT_A_BACKTRACK`。
+**PHASE_ADVANCED** 记录：`{from_phase, to_phase, reason, evidence_refs, advanced_by?}`。`from_phase` 必须等于黑板当前 `phase`；`to_phase` 必须是下一阶段，否则 `NOT_AN_ADVANCE`；`reason` 非空；`evidence_refs` 必须指向已存在的证据。阶段前进事件不能代替 `BACKTRACK`，也不能用来跳过门禁：它只记录流程状态，不放宽任何检查。
+
+**BACKTRACK** 记录：`{from_phase, to_phase, reason, evidence_refs, approved_by?}`。`from_phase` 必须等于黑板当前 `phase`，且 `to_phase` 必须是更早的阶段，否则 `PHASE_MISMATCH` / `NOT_A_BACKTRACK`。回退必须带触发证据；没有证据的「感觉不对」不能改阶段。
 
 候选状态转换白名单（`board-transitions/1.1`）：
 
@@ -610,4 +623,142 @@ Qiling 分支用于「目标二进制明确、依赖可构建、可用受控输�
 - **原始日志可追溯**：`events[].source.path` 指向 runner 的原始 JSONL；`filter.version/rule_id` 固定过滤规则版本。事件被截断时导入状态必须是 `partial`。
 - **退出码**：`0` 正常、`1` 解析失败/FAILED、`2` 用法、`3` 计划阻断或 BLOCKED、`4` 策略拒绝、`5` 资源准入拒绝、`124` 超时。
 
+
 **当前验证边界（不得省略）**：2026-11-02 / 2026-11-03 已在 Ubuntu 24.04.5 + Docker 29.9.2 上真实执行 `qiling_runner.py`。Qiling 1.4.6 的静态 MIPS 受控目标 `qltest-static` 产出 1 条 sink-hit、`SUCCESS` 结果、3 条 evidence / 3 条 fact，并导入黑板（evidence 4 / facts 4 / intents 1 / emulation_results 1，`verify` 通过），记录见 `assets/qiling/real-run-static/README.md`。Qiling 1.4.11 的固件动态 MIPS/musl `busybox cat /etc/QLTEST` 成功，guest 退出码 0，4 条事件中 `open("/etc/QLTEST")` 命中 sink，产出 1 条 sink-hit、`SUCCESS`、3 条 evidence / 3 条 fact，黑板计数相同，记录见 `assets/qiling/real-run-busybox-sink/README.md`；`qiling_runner.py` 已兼容 1.4.11 把 `INTEGER` 改名为 `INT`。Qiling 1.4.6 对动态 musl `busybox` 的 `FAILED / memory-error / UC_ERR_WRITE_UNMAPPED` 只能说明该版本/该镜像的加载问题，不能概括为 Qiling 不支持 musl；旧动态失败产物已删除。动态记录只覆盖 `cat /etc/QLTEST` 一个 applet，不覆盖网络、服务、多 applet 或厂商内核，`SUCCESS` / `sink-hit` 都不是漏洞结论。第 25 组仍使用合成 MIPS ELF 与假 sandbox，只证明计划、过滤、归一化、状态分类、Hook 安装边界与黑板导入，不替代真实执行。另有一个已知边界：blocked 计划若缺 `firmware_sha256`，`qiling-import` 仍要求 64 位哈希，会把该计划判为契约失败。
+
+## 20. SchedulerRules / SchedulerResult（`scheduler-rules/1.0` / `scheduler-result/1.0`）
+
+调度层只做确定性编排：规则把已存在的 Fact 映射成 Intent，`claim` 做统一资源准入，`complete` 把执行结果写回黑板。规则不执行命令，不调用 Qiling/QEMU，也不产生漏洞结论；真正的执行仍由 `sandbox_run.py` 与适配器完成，且必须再次经过资源准入。
+
+### 20.1 SchedulerRules
+
+```json
+{
+  "schema": "scheduler-rules/1.0",
+  "version": "2026-11-05",
+  "rules": [
+    {
+      "id": "R-SERVICE-DYNAMIC",
+      "version": "1",
+      "when": {
+        "fact_type": "service",
+        "value_present": ["port"],
+        "value_truthy": ["open"]
+      },
+      "intent": {
+        "type": "dynamic-validation",
+        "description": "验证 {value.name} 的端口 {value.port}",
+        "target": "{target}",
+        "priority": 60,
+        "params": {"port": "{value.port}"},
+        "timeout_seconds": 120,
+        "max_retries": 1,
+        "stop_conditions": ["目标端口无响应"],
+        "expected_outputs": ["evidence", "fact"]
+      }
+    }
+  ]
+}
+```
+
+| 字段 | 类型 | 必需 | 说明 |
+|---|---|---|---|
+| `schema` | string | ✅ | `scheduler-rules/1.0` |
+| `version` | string | — | 规则集版本，写入 Intent 的 provenance |
+| `rules` | array | ✅ | 非空；每条规则一个对象 |
+| `rules[].id` | string | ✅ | `^R-[A-Za-z0-9][A-Za-z0-9._-]*$`；文件内唯一 |
+| `rules[].version` | string | ✅ | 规则版本；与 `id` 一起进入去重键 |
+| `rules[].enabled` | bool | — | 省略视为启用；为 false 时 `plan` 跳过 |
+| `rules[].when` | object | ✅ | 匹配条件，见下 |
+| `rules[].intent` | object | ✅ | Intent 模板；`type` / `description` / `target` 必填 |
+| `rules[].depends_on` | array | — | 依赖的规则 ID；必须指向同一文件，不允许自依赖 |
+
+`when` 只接受四个键，未知键报 `UNKNOWN_FIELD`（拼错的谓词不会被静默忽略）：
+
+| 键 | 语义 |
+|---|---|
+| `fact_type` | Fact 类型字符串或非空数组；必须是已知 `FACT_TYPES` |
+| `value_present` | 字符串数组；`fact.value` 中这些键必须存在 |
+| `value_truthy` | 字符串数组；这些键的值必须为真（非空、非 0、非 false） |
+| `value_equals` | 非空标量对象；逐键严格相等 |
+
+模板占位符写作 `{value.path}`、`{target}`、`{fact_id}`，只支持点路径，不支持嵌套花括号或表达式。渲染采用 Fact 的字段；`target` 依次取 `value.target` / `value.path` / `value.binary` / `value.service` / `value.name` / `value.port`，都没有时回落到 `fact_id`。
+
+规则模板的 `priority` 必须在 0..100；`timeout_seconds` ≥1；`max_retries` 0..10；`params` 必须是对象；`stop_conditions` / `expected_outputs` 必须是字符串数组。规则 ID 重复报 `DUPLICATE_ID`，依赖不存在报 `DEPENDENCY_MISSING`，依赖成环报 `DEPENDENCY_CYCLE`。
+
+### 20.2 从规则到 Intent
+
+- 每个命中的 Fact 生成一条 `intent/1.1`：`from=[fact_id]`、`creator=rule:<id>@<version>`、`provenance={rule_id, rule_version, fact_ids, hint_boost, hints}`。Fact 与规则的对应关系必须能反查，不能只留下「系统自动生成」。
+- `dedupe_key = "sched:" + sha256(canonical_json({rule, version, type, target, params}))`。同一规则对同一目标只建一次；重复 `plan` 返回 `deduped`，不追加事件、不增长 `revision`。
+- `intent_id = "I-" + sha256(dedupe_key)[:12]`；同一输入稳定复现，不依赖当前时间或随机数。
+- 优先级取模板 `priority`，Hint 命中时每条 +5、封顶 +15。Hint 只影响排序，不能把 Intent 变成 `claimed`，也不能绕过 Gate。
+- `depends_on` 在规则层声明；`readiness` 返回 `READY` / `WAITING` / `BLOCKED`。依赖 Intent 失败、取消或缺失时分别报 `DEPENDENCY_FAILED` / `DEPENDENCY_CANCELLED` / `DEPENDENCY_MISSING`，不得让任务永久停在 `WAITING`。
+
+### 20.3 SchedulerResult
+
+```json
+{
+  "schema": "scheduler-result/1.0",
+  "intent_id": "I-7f2416177e61",
+  "run_id": "RUN-2026-11-05",
+  "firmware_sha256": "aaaaaaaa...",
+  "status": "SUCCESS",
+  "worker": "agent-1",
+  "attempt": 1,
+  "started_at": "2026-11-05T10:44:46Z",
+  "finished_at": "2026-11-05T10:45:12Z",
+  "summary": "端口可达并复现 execve",
+  "evidence": [{"schema": "evidence/1.1", "evidence_id": "E-RES", "run_id": "RUN-2026-11-05", "firmware_sha256": "aaaaaaaa...", "type": "dynamic", "observed_at": "2026-11-05T10:45:00Z", "status": "parsed", "source": {"type": "dynamic", "tool": "sandbox"}, "event": {"type": "execve", "trigger": true}}],
+  "facts": [{"schema": "fact/1.0", "fact_id": "F-RES", "run_id": "RUN-2026-11-05", "firmware_sha256": "aaaaaaaa...", "type": "syscall", "value": {"name": "execve"}, "evidence_refs": ["E-RES"], "source": {"type": "dynamic", "tool": "sandbox"}, "observed_at": "2026-11-05T10:45:00Z"}]
+}
+```
+
+| 字段 | 类型 | 必需 | 说明 |
+|---|---|---|---|
+| `schema` | string | ✅ | `scheduler-result/1.0` |
+| `intent_id` / `run_id` / `firmware_sha256` | string | ✅ | 必须与目标 Intent 及黑板绑定一致 |
+| `status` | enum | ✅ | `SUCCESS` / `PARTIAL` / `FAILED` / `BLOCKED` / `NOT_APPLICABLE` / `TIMED_OUT` |
+| `worker` / `attempt` | string / int | — | 与 `claim` 时一致；`attempt` ≥1 |
+| `started_at` / `finished_at` | string | 条件 | `finished_at` 必填；ISO 8601 带时区 |
+| `summary` | string | — | 人类可读摘要，不替代结构化证据 |
+| `evidence` | array | 条件 | 每条完整 `evidence/1.1`；必须自带 `run_id` 与 `firmware_sha256` |
+| `facts` | array | 条件 | 每条完整 `fact/1.0`；必须自带 `run_id` 与 `firmware_sha256` |
+| `failure` | object | 条件 | `FAILED` / `BLOCKED` / `TIMED_OUT` 必填 `{code,message,category,retryable}` |
+| `limitations` | array | 条件 | `PARTIAL` 必须非空；说明没覆盖什么 |
+| `artifacts` / `resource_usage` | array / object | — | 原始产物与资源用量；产物逐项校验 `path`+`sha256` |
+
+约束：
+
+- `evidence` / `facts` 的 `run_id` 与 `firmware_sha256` 是**必填**字段。校验器只做交叉校验，不会替你补字段；缺字段就是契约失败。
+- 同一结果内 `evidence_id` / `fact_id` 不得重复（`DUPLICATE_ID`）；`fact.evidence_refs` 只能引用本结果里的证据，悬挂报 `DANGLING_EVIDENCE`。
+- `SUCCESS` / `PARTIAL` 必须至少产生一条 Evidence 或 Fact，否则 `RESULT_NO_OUTPUT`。执行「成功」但什么都没留下，不是成功，只是没有输出。
+- 失败状态必须说明可重试性：`retryable=true` 才允许回到 `open`；`false` 直接 `failed`。`TIMED_OUT` / `BLOCKED` 不得折叠成「没有发现」。
+
+### 20.4 调度语义与审计
+
+| 动作 | 行为 | 失败码 |
+|---|---|---|
+| `plan` | 按规则拓扑顺序评估 Fact；只对 `--write` 落盘；重复评估由 `dedupe_key` 去重 | `DEPENDENCY_MISSING` / `DEPENDENCY_CYCLE` / `RULE_INVALID` |
+| `next` | 只列 `READY` 的 Intent，按 `-priority`、`created_at`、`intent_id` 排序 | — |
+| `claim` | 校验 READY、`open`、`worker`；用 `check_request` 对拍策略，拒绝时 exit 5 且 Intent 保持 `open` | `RESOURCE_DENIED` / `INTENT_NOT_READY` / `INTENT_NOT_OPEN` |
+| `complete` | 校验 result 与 Intent/worker/attempt；先写 Evidence/Fact，再改 Intent 状态 | `RESULT_INVALID` / `INTENT_NOT_CLAIMED` / `WORKER_MISMATCH` / `ATTEMPT_MISMATCH` |
+| `backtrack` | 从当前阶段显式回退，证据必须存在 | `PHASE_MISMATCH` / `NOT_A_BACKTRACK` / `REASON_REQUIRED` |
+
+`claim` 只做准入检查，不长期占用并发槽位；真正的槽位、预算与超时由 `sandbox_run.py` 在启动时获取。这样不会出现「调度器领了任务但不执行，槽位被空占」的情况。`complete` 先写结果再改状态，保证不会出现 Intent 已 `done` 却查不到对应证据的窗口；状态事件失败时证据仍在，可按 `result_refs` 审计并人工修复。
+
+`stop_conditions` 由规则写入 Intent，执行器在满足时必须返回 `NOT_APPLICABLE` 或 `FAILED` 并说明原因，不能继续重试。调度器负责重试上限（`attempts <= max_retries` 时才回 `open`），不负责解释业务停止条件。
+
+阶段前进与回退都写入事件日志：`PHASE_ADVANCED` 只能逐阶段前进，`BACKTRACK` 只能从当前阶段回退；两者都必须带原因，`BACKTRACK` 还必须带触发证据。事件日志是唯一真相源，快照丢失可从日志重放。
+
+命令行示例：
+
+```bash
+python scripts/board_scheduler.py plan --workspace runs/audit --rules scheduler-rules.json --write
+python scripts/board_scheduler.py next --workspace runs/audit --limit 10
+python scripts/board_scheduler.py claim --workspace runs/audit --intent I-7f2416177e61 --worker agent-1 --policy sandbox-policy.json
+python scripts/board_scheduler.py complete --workspace runs/audit --intent I-7f2416177e61 --result result.json
+python scripts/board_store.py advance --workspace runs/audit --to-phase P2 --reason "进入动态验证" --evidence E-SVC
+python scripts/board_scheduler.py backtrack --workspace runs/audit --from-phase P2 --to-phase P1 --reason "端口证据不足" --evidence E-SVC
+```
+
+退出码：`0` 正常；`1` 契约/状态失败；`2` 用法错误；`5` 资源准入拒绝。
