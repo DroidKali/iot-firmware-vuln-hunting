@@ -3337,6 +3337,66 @@ sys.exit(0)
           and (doc_py.get("tools") or [{}])[0].get("status") == "available",
           f"rc={rr_py.returncode} total={doc_py.get('summary', {}).get('total')}")
 
+    reg27 = doc_py.get("registry") or {}
+    check("tool_index：默认注册表来源、版本与 sha256 写入索引，不写死脚本路径",
+          reg27.get("schema") == "tool-registry/1.0"
+          and str(reg27.get("source", "")).replace("\\", "/").endswith("assets/tool-registry.json")
+          and re.fullmatch(r"[0-9a-f]{64}", str(reg27.get("sha256", ""))) is not None
+          and reg27.get("tools") == 41,
+          f"source={reg27.get('source')} tools={reg27.get('tools')}")
+
+    custom27 = {
+        "schema": "tool-registry/1.0",
+        "version": "2026-11-06",
+        "p0_tools": ["python"],
+        "capabilities": [{"id": "R4", "name": "运行环境", "phases": ["P0"],
+                          "tools": ["python"], "manual": "系统 Python"}],
+        "tools": [{"id": "python", "kind": "python-runtime"}],
+    }
+    custom_path = os.path.join(t27, "custom-registry.json")
+    with open(custom_path, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(custom27, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    rr_custom = run([TOOL_INDEX, "--registry", custom_path, "--only", "python", "--json"])
+    doc_custom = _pj(rr_custom.stdout)
+    check("tool_index：--registry 切换到自定义注册表，只出现自定义工具",
+          rr_custom.returncode == 0
+          and doc_custom.get("summary", {}).get("total") == 1
+          and (doc_custom.get("registry") or {}).get("tools") == 1
+          and str((doc_custom.get("registry") or {}).get("source", "")).replace("\\", "/").endswith("custom-registry.json"),
+          f"rc={rr_custom.returncode} source={(doc_custom.get('registry') or {}).get('source')}")
+
+    broken_path = os.path.join(t27, "broken-registry.json")
+    with open(broken_path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write('{"schema": "tool-registry/1.0",\n')
+    unknown_path = os.path.join(t27, "unknown-field-registry.json")
+    with open(unknown_path, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(dict(custom27, unexpected_field=True), fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    dangling_path = os.path.join(t27, "dangling-registry.json")
+    dangling27 = json.loads(json.dumps(custom27))
+    dangling27["capabilities"][0]["tools"] = ["no-such-tool"]
+    with open(dangling_path, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(dangling27, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    bad_regs = [broken_path, unknown_path, dangling_path,
+                os.path.join(t27, "missing-registry.json")]
+    bad_results = [run([TOOL_INDEX, "--registry", p, "--quiet"]) for p in bad_regs]
+    check("tool_index：注册表损坏/未知字段/悬空能力/缺文件 → 退出 2 且不 traceback",
+          all(r.returncode == 2 and "工具注册表不可用" in r.stderr
+              and "Traceback" not in (r.stdout + r.stderr) for r in bad_results),
+          "rc=" + ",".join(str(r.returncode) for r in bad_results))
+
+    reg_doc27 = json.loads(open(os.path.join(HERE, "..", "assets", "tool-registry.json"),
+                                encoding="utf-8").read())
+    ida27 = next((t for t in reg_doc27.get("tools") or [] if t.get("id") == "ida-mcp"), {})
+    check("tool_index：IDA Pro MCP 指向官方 HexRaysSA/ida-mcp，不再引用社区版",
+          ida27.get("docs") == "https://docs.hex-rays.com/add-ons/mcp"
+          and (ida27.get("install") or {}).get("argv") == ["uvx", "ida-hcli", "mcp", "install"]
+          and "mrexodia" not in (str(ida27.get("docs", ""))
+                                 + str((ida27.get("install") or {}).get("docs", ""))),
+          f"docs={ida27.get('docs')}")
+
     out27 = os.path.join(t27, "tool-index.json")
     rr_out = run([TOOL_INDEX, "--out", out27, "--quiet"])
     doc_out = _pj(open(out27, encoding="utf-8").read()) if os.path.exists(out27) else {}

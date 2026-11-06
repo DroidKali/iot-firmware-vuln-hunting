@@ -767,8 +767,11 @@ python scripts/board_scheduler.py backtrack --workspace runs/audit --from-phase 
 
 Phase 0 之前由 `scripts/tool_index.py` 生成，记录本次审计实际能用的工具、版本与能力覆盖。它不是漏洞证据，也不替代 Phase 1 的格式侦察：索引只回答「这台机器上有什么、缺什么、缺了走哪条替代路径」，不回答「固件里有什么」。产物固定写入 `00-tool-index.json`，随审计交付物保存。
 
+工具与能力清单不在 Python 里，而在 `assets/tool-registry.json`（`tool-registry/1.0`，当前 41 个 tools / 54 个 capabilities）。新增或调整工具只改该 JSON；`tool_index.py` 只负责加载、校验、探测与渲染。注册表缺失、JSON 损坏、未知字段、重复 ID、悬空的能力/工具引用都会以退出 2 fail-closed，不会带着半份清单继续探测。`--registry <file>` 可以切换到另一份注册表，索引会把实际来源与 sha256 写进 `registry` 字段，便于复算。
+
 ```bash
 python scripts/tool_index.py --profile all --out fw-audit/<target>/00-tool-index.json
+python scripts/tool_index.py --registry assets/tool-registry.json --only qiling --json
 python scripts/tool_index.py --require moria --require ast-grep
 python scripts/tool_index.py --install binwalk --yes
 ```
@@ -781,7 +784,7 @@ python scripts/tool_index.py --install binwalk --yes
 | `tool_version` | string | 生成器版本，当前 `1.0` |
 | `generated_at` | string | UTC ISO 8601，探测完成时间 |
 | `host` | object | `os` / `release` / `machine` / `python` / `is_windows`；用于解释平台相关缺口 |
-| `registry` | object | `version`（注册表日期）、`tools`（注册表总数，当前 41）、`source`（`scripts/tool_index.py`） |
+| `registry` | object | `schema`（`tool-registry/1.0`）、`version`（注册表日期）、`tools`（注册表总数，当前 41）、`source`（`assets/tool-registry.json` 或 `--registry` 指定的路径）、`sha256`（注册表原始字节的哈希） |
 | `profile` | string | 请求的 `all` / `phase0` / `extract` / `static` / `dynamic` |
 | `summary` | object | 本次**实际探测**的工具计数：`total` / `available` / `degraded` / `missing`，四者满足 `total = available + degraded + missing` |
 | `tools` | array | 探测结果，按注册表顺序；`--only` 时只含所选工具 |

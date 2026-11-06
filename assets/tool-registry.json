@@ -1,0 +1,2077 @@
+{
+  "schema": "tool-registry/1.0",
+  "version": "2026-11-06",
+  "description": "Phase 0 工具注册表。新增/调整工具只改本文件；scripts/tool_index.py 只负责加载、探测与渲染。省略字段的默认值见 scripts/tool_index.py 的 _norm_tool。",
+  "p0_tools": [
+    "python",
+    "file",
+    "uv"
+  ],
+  "capabilities": [
+    {
+      "id": "R1",
+      "name": "固件格式识别",
+      "phases": [
+        "P1"
+      ],
+      "primary": "file",
+      "tools": [
+        "file",
+        "binwalk",
+        "moria"
+      ],
+      "fallback": "magic bytes 手工核对"
+    },
+    {
+      "id": "R2",
+      "name": "熵分布扫描",
+      "phases": [
+        "P1"
+      ],
+      "primary": "moria",
+      "tools": [
+        "moria",
+        "binwalk"
+      ],
+      "fallback": "binwalk -E"
+    },
+    {
+      "id": "R3",
+      "name": "头部与分区解析",
+      "phases": [
+        "P1"
+      ],
+      "primary": "binwalk",
+      "tools": [
+        "binwalk",
+        "moria"
+      ],
+      "fallback": "按偏移 dd，手工解析"
+    },
+    {
+      "id": "R4",
+      "name": "版本与型号提取",
+      "phases": [
+        "P1"
+      ],
+      "primary": "rg",
+      "tools": [
+        "rg",
+        "strings"
+      ],
+      "fallback": "grep -r / strings"
+    },
+    {
+      "id": "E1",
+      "name": "递归解包",
+      "phases": [
+        "P1"
+      ],
+      "primary": "unblob",
+      "tools": [
+        "unblob",
+        "binwalk",
+        "moria"
+      ],
+      "fallback": "binwalk v3 递归 / moria -e"
+    },
+    {
+      "id": "E2",
+      "name": "SquashFS 解包",
+      "phases": [
+        "P1"
+      ],
+      "primary": "unsquashfs",
+      "tools": [
+        "unsquashfs",
+        "moria"
+      ],
+      "fallback": "moria -e"
+    },
+    {
+      "id": "E3",
+      "name": "UBI / UBIFS 解包",
+      "phases": [
+        "P1"
+      ],
+      "primary": "ubireader_extract_images",
+      "tools": [
+        "ubireader_extract_images",
+        "moria"
+      ],
+      "fallback": "moria -e"
+    },
+    {
+      "id": "E4",
+      "name": "JFFS2 解包",
+      "phases": [
+        "P1"
+      ],
+      "primary": "jefferson",
+      "tools": [
+        "jefferson",
+        "moria"
+      ],
+      "fallback": "moria -e"
+    },
+    {
+      "id": "E5",
+      "name": "ext / F2FS / EROFS / cramfs / romfs",
+      "phases": [
+        "P1"
+      ],
+      "primary": "moria",
+      "tools": [
+        "moria",
+        "debugfs",
+        "dump.f2fs",
+        "fsck.erofs",
+        "cramfsck"
+      ],
+      "fallback": "debugfs / dump.f2fs / fsck.erofs / cramfsck"
+    },
+    {
+      "id": "E6",
+      "name": "内核提取",
+      "phases": [
+        "P1"
+      ],
+      "primary": "binwalk",
+      "tools": [
+        "binwalk",
+        "moria"
+      ],
+      "fallback": "按 R3 偏移 dd"
+    },
+    {
+      "id": "E7",
+      "name": "DTB / bootargs 提取",
+      "phases": [
+        "P1"
+      ],
+      "primary": "dtc",
+      "tools": [
+        "dtc"
+      ],
+      "fallback": "strings 找 bootargs / uImage 头解析"
+    },
+    {
+      "id": "E8",
+      "name": "内核符号恢复",
+      "phases": [
+        "P1"
+      ],
+      "primary": "vmlinux-to-elf",
+      "tools": [
+        "vmlinux-to-elf"
+      ],
+      "fallback": "手工符号恢复，成本高"
+    },
+    {
+      "id": "E9",
+      "name": "加密固件判定与解密",
+      "phases": [
+        "P1"
+      ],
+      "primary": "",
+      "tools": [],
+      "manual": "熵 + 魔数 + 头部规律判据（atomic-capabilities.md §3.1 E 分支）",
+      "fallback": "moria -E / binwalk -E 只圈边界，不负责解密"
+    },
+    {
+      "id": "C1",
+      "name": "凭据 / 密钥 / 哈希扫描",
+      "phases": [
+        "P3"
+      ],
+      "primary": "mithril",
+      "tools": [
+        "mithril",
+        "rg",
+        "firmwalker"
+      ],
+      "fallback": "firmwalker + 自写 rg 规则（可信度下降）"
+    },
+    {
+      "id": "C2",
+      "name": "SBOM 生成",
+      "phases": [
+        "P3"
+      ],
+      "primary": "mithril",
+      "tools": [
+        "mithril"
+      ],
+      "fallback": "无等价替代，需人工整理"
+    },
+    {
+      "id": "C3",
+      "name": "组件 CVE 比对",
+      "phases": [
+        "P3"
+      ],
+      "primary": "mithril",
+      "tools": [
+        "mithril"
+      ],
+      "fallback": "在线 CVE 查询（注意断网与可信度）"
+    },
+    {
+      "id": "C4",
+      "name": "启动与信任姿态",
+      "phases": [
+        "P3"
+      ],
+      "primary": "mithril",
+      "tools": [
+        "mithril"
+      ],
+      "fallback": "读 U-Boot env / 手工检查密钥"
+    },
+    {
+      "id": "C5",
+      "name": "许可证与文件来源",
+      "phases": [
+        "P3"
+      ],
+      "primary": "mithril",
+      "tools": [
+        "mithril"
+      ],
+      "fallback": "手工抽样，覆盖不完整"
+    },
+    {
+      "id": "C6",
+      "name": "源码 / 脚本结构级扫描",
+      "phases": [
+        "P3"
+      ],
+      "primary": "ast-grep",
+      "tools": [
+        "ast-grep",
+        "semgrep"
+      ],
+      "fallback": "rg -U 多行正则（可能漏检/误报）"
+    },
+    {
+      "id": "F1",
+      "name": "文件类型清单",
+      "phases": [
+        "P1"
+      ],
+      "primary": "fd",
+      "tools": [
+        "fd",
+        "file"
+      ],
+      "fallback": "find + file"
+    },
+    {
+      "id": "F2",
+      "name": "SUID / SGID 与权限异常",
+      "phases": [
+        "P1"
+      ],
+      "primary": "fd",
+      "tools": [
+        "fd"
+      ],
+      "manual": "Windows 上权限位不可靠时用 fw_triage.py",
+      "fallback": "find -perm -4000"
+    },
+    {
+      "id": "F3",
+      "name": "启动链读取",
+      "phases": [
+        "P1"
+      ],
+      "primary": "",
+      "tools": [],
+      "manual": "直接读 etc/init.d、rcS、inittab、rc.local",
+      "fallback": "rg / less 人工读取"
+    },
+    {
+      "id": "F4",
+      "name": "动作关键字枚举",
+      "phases": [
+        "P3"
+      ],
+      "primary": "rg",
+      "tools": [
+        "rg"
+      ],
+      "fallback": "grep -r"
+    },
+    {
+      "id": "F5",
+      "name": "硬编码凭据与 URL 面",
+      "phases": [
+        "P3"
+      ],
+      "primary": "mithril",
+      "tools": [
+        "mithril",
+        "rg"
+      ],
+      "fallback": "rg 规则集 + 人工复核"
+    },
+    {
+      "id": "F6",
+      "name": "NVRAM / 配置键面",
+      "phases": [
+        "P3"
+      ],
+      "primary": "strings",
+      "tools": [
+        "strings"
+      ],
+      "fallback": "rg -a"
+    },
+    {
+      "id": "B1",
+      "name": "架构与 ABI 识别",
+      "phases": [
+        "P3"
+      ],
+      "primary": "readelf",
+      "tools": [
+        "readelf",
+        "file"
+      ],
+      "fallback": "file / Python ELF 解析"
+    },
+    {
+      "id": "B2",
+      "name": "符号与导入表",
+      "phases": [
+        "P3"
+      ],
+      "primary": "readelf",
+      "tools": [
+        "readelf",
+        "nm",
+        "strings"
+      ],
+      "fallback": "objdump -T"
+    },
+    {
+      "id": "B3",
+      "name": "危险符号与调用点定位",
+      "phases": [
+        "P3"
+      ],
+      "primary": "radare2",
+      "tools": [
+        "radare2",
+        "objdump"
+      ],
+      "fallback": "objdump + nm + strings"
+    },
+    {
+      "id": "B4",
+      "name": "反编译与 xref 追链",
+      "phases": [
+        "P3"
+      ],
+      "primary": "ida-mcp",
+      "tools": [
+        "ida-mcp",
+        "pyghidra-mcp",
+        "ghidra",
+        "radare2",
+        "objdump"
+      ],
+      "fallback": "Ghidra 无头 → radare2 手工 → objdump + strings"
+    },
+    {
+      "id": "B5",
+      "name": "分发入口表枚举",
+      "phases": [
+        "P3"
+      ],
+      "primary": "",
+      "tools": [],
+      "manual": "找 .cgi/.asp 名表与函数指针数组（fat handler-table / 自写脚本）",
+      "fallback": "人工枚举，覆盖不完整"
+    },
+    {
+      "id": "B6",
+      "name": "数据流 / 污点追踪",
+      "phases": [
+        "P3"
+      ],
+      "primary": "",
+      "tools": [],
+      "manual": "人工三跳追链 + IDA MCP / fat taint",
+      "fallback": "人工追链，耗时但结论强度不变"
+    },
+    {
+      "id": "B7",
+      "name": "跨请求污点配对",
+      "phases": [
+        "P3"
+      ],
+      "primary": "",
+      "tools": [],
+      "manual": "写面枚举 → 读端枚举 → 反向溯源（SKILL.md Track C）",
+      "fallback": "人工，覆盖有限"
+    },
+    {
+      "id": "B8",
+      "name": "二进制比对定位补丁",
+      "phases": [
+        "P3"
+      ],
+      "primary": "",
+      "tools": [],
+      "manual": "BinDiff / Diaphora / Ghidriff / fat inspect update",
+      "fallback": "人工 diff / 函数哈希"
+    },
+    {
+      "id": "B9",
+      "name": "FLIRT / 库函数识别",
+      "phases": [
+        "P3"
+      ],
+      "primary": "ghidra",
+      "tools": [
+        "ghidra",
+        "ida-mcp"
+      ],
+      "fallback": "手工识别库函数"
+    },
+    {
+      "id": "D1",
+      "name": "整机启动",
+      "phases": [
+        "P4"
+      ],
+      "primary": "qemu-system",
+      "tools": [
+        "qemu-system"
+      ],
+      "fallback": "QEMU user + chroot"
+    },
+    {
+      "id": "D2",
+      "name": "启动失败诊断",
+      "phases": [
+        "P4"
+      ],
+      "primary": "",
+      "tools": [],
+      "manual": "读串口输出 / dmesg，按 §3.2 分支定位",
+      "fallback": "人工诊断"
+    },
+    {
+      "id": "D3",
+      "name": "rootfs 可挂载性修补",
+      "phases": [
+        "P4"
+      ],
+      "primary": "",
+      "tools": [],
+      "manual": "改 init、补 /dev、stub 硬件依赖、换 root=/mtdparts",
+      "fallback": "人工修补"
+    },
+    {
+      "id": "D4",
+      "name": "服务可达性探测",
+      "phases": [
+        "P4"
+      ],
+      "primary": "nmap",
+      "tools": [
+        "nmap",
+        "nc"
+      ],
+      "fallback": "curl / nc 手工探测"
+    },
+    {
+      "id": "D5",
+      "name": "单二进制运行",
+      "phases": [
+        "P4"
+      ],
+      "primary": "qiling-image",
+      "tools": [
+        "qiling-image",
+        "qiling",
+        "qemu-user"
+      ],
+      "fallback": "QEMU user + chroot / Unicorn 手写 harness"
+    },
+    {
+      "id": "D6",
+      "name": "依赖打桩",
+      "phases": [
+        "P4"
+      ],
+      "primary": "qiling",
+      "tools": [
+        "qiling",
+        "qiling-image"
+      ],
+      "fallback": "Unicorn 手写 harness"
+    },
+    {
+      "id": "D7",
+      "name": "sink 参数真值观测",
+      "phases": [
+        "P4"
+      ],
+      "primary": "qiling",
+      "tools": [
+        "qiling",
+        "qiling-image"
+      ],
+      "fallback": "gdb-multiarch 手工断点"
+    },
+    {
+      "id": "D8",
+      "name": "系统调用 / 文件访问追踪",
+      "phases": [
+        "P4"
+      ],
+      "primary": "qemu-user",
+      "tools": [
+        "qemu-user",
+        "gdb-multiarch"
+      ],
+      "fallback": "strace / ltrace"
+    },
+    {
+      "id": "D9",
+      "name": "覆盖率采集",
+      "phases": [
+        "P4"
+      ],
+      "primary": "qiling",
+      "tools": [
+        "qiling",
+        "qiling-image"
+      ],
+      "fallback": "AFL++ map"
+    },
+    {
+      "id": "D10",
+      "name": "模糊测试",
+      "phases": [
+        "P4"
+      ],
+      "primary": "afl-fuzz",
+      "tools": [
+        "afl-fuzz",
+        "honggfuzz"
+      ],
+      "fallback": "libFuzzer（有源码时）"
+    },
+    {
+      "id": "D11",
+      "name": "崩溃 triage",
+      "phases": [
+        "P4"
+      ],
+      "primary": "gdb-multiarch",
+      "tools": [
+        "gdb-multiarch",
+        "qiling"
+      ],
+      "fallback": "手工复现 / 判 PC"
+    },
+    {
+      "id": "D12",
+      "name": "插桩与动态调试",
+      "phases": [
+        "P4"
+      ],
+      "primary": "gdb-multiarch",
+      "tools": [
+        "gdb-multiarch",
+        "frida",
+        "qiling"
+      ],
+      "fallback": "Qiling --gdb"
+    },
+    {
+      "id": "N1",
+      "name": "端口与协议指纹",
+      "phases": [
+        "P4"
+      ],
+      "primary": "nmap",
+      "tools": [
+        "nmap"
+      ],
+      "fallback": "nc / 协议库手工探测"
+    },
+    {
+      "id": "N2",
+      "name": "协议客户端与重放",
+      "phases": [
+        "P4"
+      ],
+      "primary": "",
+      "tools": [],
+      "manual": "MQTT/CoAP/UPnP 客户端、Scapy、boofuzz 按需",
+      "fallback": "手工构造请求"
+    },
+    {
+      "id": "N3",
+      "name": "流量拦截代理",
+      "phases": [
+        "P4"
+      ],
+      "primary": "",
+      "tools": [],
+      "manual": "mitmproxy / IoXY / Burp（需授权）",
+      "fallback": "抓包 + 手工重放"
+    },
+    {
+      "id": "N4",
+      "name": "主动情报查询",
+      "phases": [
+        "P4"
+      ],
+      "primary": "",
+      "tools": [],
+      "manual": "Shodan / Censys / ZoomEye / FCC ID（需授权）",
+      "fallback": "不做主动查询，仅用被动情报"
+    },
+    {
+      "id": "H1",
+      "name": "UART 控制台",
+      "phases": [
+        "P4"
+      ],
+      "primary": "",
+      "tools": [],
+      "manual": "物理接触：万用表 + screen /dev/ttyUSB0 115200",
+      "fallback": "不适用（需硬件）"
+    },
+    {
+      "id": "H2",
+      "name": "SPI NOR 读取",
+      "phases": [
+        "P4"
+      ],
+      "primary": "",
+      "tools": [],
+      "manual": "物理接触：CH341A + flashrom",
+      "fallback": "不适用（需硬件）"
+    },
+    {
+      "id": "H3",
+      "name": "eMMC / JTAG / SWD",
+      "phases": [
+        "P4"
+      ],
+      "primary": "",
+      "tools": [],
+      "manual": "物理接触：读卡器 / JTAGulator / OpenOCD / pyOCD",
+      "fallback": "不适用（需硬件）"
+    },
+    {
+      "id": "H4",
+      "name": "故障注入",
+      "phases": [
+        "P4"
+      ],
+      "primary": "",
+      "tools": [],
+      "manual": "物理接触：ChipWhisperer（电压/时钟毛刺）",
+      "fallback": "不适用（需硬件）"
+    }
+  ],
+  "tools": [
+    {
+      "id": "python",
+      "kind": "python-runtime",
+      "capabilities": [
+        "R4",
+        "B1",
+        "B2"
+      ],
+      "required": true,
+      "recommended": true,
+      "docs": "https://www.python.org/downloads/",
+      "install": {
+        "kind": "system",
+        "auto": false,
+        "argv": [],
+        "shell": "安装 Python 3.8+ 并确保 python 在 PATH",
+        "docs": "https://www.python.org/downloads/",
+        "requires": [],
+        "notes": "本 skill 的脚本都要求 Python"
+      },
+      "fallback": {
+        "tools": [],
+        "impact": "缺少 Python 时本 skill 无法运行"
+      },
+      "notes": "运行本脚本的解释器；版本取 sys.version"
+    },
+    {
+      "id": "file",
+      "kind": "cli",
+      "capabilities": [
+        "R1",
+        "B1"
+      ],
+      "argv": [
+        "file",
+        "--version"
+      ],
+      "recommended": true,
+      "docs": "https://www.darwinsys.com/file/",
+      "install": {
+        "kind": "apt",
+        "auto": false,
+        "argv": [],
+        "shell": "sudo apt install file  # Debian/Ubuntu；macOS 自带",
+        "docs": "https://www.darwinsys.com/file/",
+        "requires": [
+          "apt"
+        ],
+        "notes": "Windows 可用 w64devkit / Git Bash"
+      },
+      "fallback": {
+        "tools": [
+          "moria",
+          "binwalk"
+        ],
+        "impact": "moria/binwalk 的识别结果可替代 file 的魔数判断"
+      },
+      "notes": "R1 首选；没有时仍可用 Python 魔数猜测"
+    },
+    {
+      "id": "moria",
+      "kind": "cli",
+      "capabilities": [
+        "R1",
+        "R2",
+        "R3",
+        "E1",
+        "E2",
+        "E3",
+        "E4",
+        "E5",
+        "E6"
+      ],
+      "argv": [
+        "moria",
+        "--version"
+      ],
+      "alternates": [
+        [
+          "moria",
+          "version"
+        ]
+      ],
+      "recommended": true,
+      "docs": "https://github.com/nmatt0/moria",
+      "install": {
+        "kind": "build-from-source",
+        "auto": false,
+        "argv": [],
+        "shell": "git clone https://github.com/nmatt0/moria.git && cmake -S moria -B moria/build -DCMAKE_BUILD_TYPE=Release && cmake --build moria/build -j && cmake --install moria/build --prefix ~/.local",
+        "docs": "https://github.com/nmatt0/moria",
+        "requires": [
+          "git",
+          "cmake",
+          "c++"
+        ],
+        "notes": "官方 release 也提供 .deb；先看 release assets 再决定"
+      },
+      "fallback": {
+        "tools": [
+          "binwalk",
+          "unblob",
+          "unsquashfs"
+        ],
+        "impact": "E1-E6 覆盖下降；未知块可能丢失，报告需注明降级"
+      },
+      "notes": "单 C++ 二进制，进程内覆盖最全；Phase 1 首选"
+    },
+    {
+      "id": "binwalk",
+      "kind": "cli",
+      "capabilities": [
+        "R1",
+        "R2",
+        "R3",
+        "E1",
+        "E6"
+      ],
+      "argv": [
+        "binwalk",
+        "--version"
+      ],
+      "recommended": true,
+      "docs": "https://github.com/ReFirmLabs/binwalk",
+      "install": {
+        "kind": "cargo",
+        "auto": true,
+        "argv": [
+          "cargo",
+          "install",
+          "binwalk",
+          "--locked"
+        ],
+        "shell": "",
+        "docs": "https://github.com/ReFirmLabs/binwalk",
+        "requires": [
+          "cargo"
+        ],
+        "notes": "binwalk v3 是 Rust 实现；旧版 Python 包不要混用"
+      },
+      "fallback": {
+        "tools": [
+          "moria",
+          "unblob"
+        ],
+        "impact": "R2/E1 可替代，但递归覆盖较弱"
+      },
+      "notes": "R2 熵扫描和 R3 分区列表仍好用"
+    },
+    {
+      "id": "unblob",
+      "kind": "cli",
+      "capabilities": [
+        "E1"
+      ],
+      "argv": [
+        "unblob",
+        "--version"
+      ],
+      "recommended": true,
+      "docs": "https://github.com/onekey-sec/unblob",
+      "install": {
+        "kind": "uv-tool",
+        "auto": true,
+        "argv": [
+          "uv",
+          "tool",
+          "install",
+          "unblob"
+        ],
+        "shell": "",
+        "docs": "https://github.com/onekey-sec/unblob",
+        "requires": [
+          "uv"
+        ],
+        "notes": "官方镜像 ghcr.io/onekey-sec/unblob 也适合一次性使用"
+      },
+      "fallback": {
+        "tools": [
+          "binwalk",
+          "moria"
+        ],
+        "impact": "78+ 格式覆盖下降，未知块 carve 能力变弱"
+      },
+      "notes": "E1 首选；有官方 Docker 镜像"
+    },
+    {
+      "id": "unsquashfs",
+      "kind": "cli",
+      "capabilities": [
+        "E2"
+      ],
+      "argv": [
+        "unsquashfs",
+        "-version"
+      ],
+      "recommended": true,
+      "docs": "https://github.com/plougher/squashfs-tools",
+      "install": {
+        "kind": "apt",
+        "auto": false,
+        "argv": [],
+        "shell": "sudo apt install squashfs-tools  # 非标压缩需 sasquatch 版",
+        "docs": "https://github.com/plougher/squashfs-tools",
+        "requires": [
+          "apt"
+        ],
+        "notes": "厂商镜像常用非标压缩，必要时换 sasquatch"
+      },
+      "fallback": {
+        "tools": [
+          "moria"
+        ],
+        "impact": "moria -e 支持多压缩后端"
+      },
+      "notes": "标准 SquashFS 首选；非标压缩看 sasquatch",
+      "ok_returncodes": [
+        0,
+        1
+      ]
+    },
+    {
+      "id": "ubireader_extract_images",
+      "kind": "cli",
+      "capabilities": [
+        "E3"
+      ],
+      "argv": [
+        "ubireader_extract_images",
+        "--version"
+      ],
+      "recommended": true,
+      "docs": "https://github.com/jrspruitt/ubi_reader",
+      "install": {
+        "kind": "pip",
+        "auto": false,
+        "argv": [],
+        "shell": "uv tool install ubi_reader  # 或 pip install ubi_reader",
+        "docs": "https://github.com/jrspruitt/ubi_reader",
+        "requires": [
+          "uv"
+        ],
+        "notes": "包名 ubi_reader，命令名带前缀"
+      },
+      "fallback": {
+        "tools": [
+          "moria"
+        ],
+        "impact": "moria -e 可重建 UBI 卷"
+      },
+      "notes": "E3 首选"
+    },
+    {
+      "id": "jefferson",
+      "kind": "cli",
+      "capabilities": [
+        "E4"
+      ],
+      "argv": [
+        "jefferson",
+        "--version"
+      ],
+      "recommended": true,
+      "docs": "https://github.com/onekey-sec/jefferson",
+      "install": {
+        "kind": "uv-tool",
+        "auto": true,
+        "argv": [
+          "uv",
+          "tool",
+          "install",
+          "jefferson"
+        ],
+        "shell": "",
+        "docs": "https://github.com/onekey-sec/jefferson",
+        "requires": [
+          "uv"
+        ],
+        "notes": ""
+      },
+      "fallback": {
+        "tools": [
+          "moria"
+        ],
+        "impact": "moria -e 支持 JFFS2"
+      },
+      "notes": "E4 首选"
+    },
+    {
+      "id": "debugfs",
+      "kind": "cli",
+      "capabilities": [
+        "E5"
+      ],
+      "argv": [
+        "debugfs",
+        "-V"
+      ],
+      "docs": "https://e2fsprogs.sourceforge.net/",
+      "install": {
+        "kind": "apt",
+        "auto": false,
+        "argv": [],
+        "shell": "sudo apt install e2fsprogs",
+        "docs": "https://e2fsprogs.sourceforge.net/",
+        "requires": [
+          "apt"
+        ],
+        "notes": ""
+      },
+      "fallback": {
+        "tools": [
+          "moria"
+        ],
+        "impact": "moria -e 支持 ext2/3/4"
+      },
+      "notes": "ext2/3/4 单文件系统实现"
+    },
+    {
+      "id": "dump.f2fs",
+      "kind": "cli",
+      "capabilities": [
+        "E5"
+      ],
+      "argv": [
+        "dump.f2fs",
+        "-V"
+      ],
+      "docs": "https://git.kernel.org/pub/scm/linux/kernel/git/jaegeuk/f2fs-tools.git",
+      "install": {
+        "kind": "apt",
+        "auto": false,
+        "argv": [],
+        "shell": "sudo apt install f2fs-tools",
+        "docs": "https://git.kernel.org/pub/scm/linux/kernel/git/jaegeuk/f2fs-tools.git",
+        "requires": [
+          "apt"
+        ],
+        "notes": ""
+      },
+      "fallback": {
+        "tools": [
+          "moria"
+        ],
+        "impact": "moria -e 支持 F2FS"
+      },
+      "notes": "F2FS 单文件系统实现"
+    },
+    {
+      "id": "fsck.erofs",
+      "kind": "cli",
+      "capabilities": [
+        "E5"
+      ],
+      "argv": [
+        "fsck.erofs",
+        "-V"
+      ],
+      "docs": "https://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git",
+      "install": {
+        "kind": "apt",
+        "auto": false,
+        "argv": [],
+        "shell": "sudo apt install erofs-utils",
+        "docs": "https://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git",
+        "requires": [
+          "apt"
+        ],
+        "notes": ""
+      },
+      "fallback": {
+        "tools": [
+          "moria"
+        ],
+        "impact": "moria -e 支持 EROFS"
+      },
+      "notes": "EROFS 单文件系统实现"
+    },
+    {
+      "id": "cramfsck",
+      "kind": "cli",
+      "capabilities": [
+        "E5"
+      ],
+      "argv": [
+        "cramfsck",
+        "-V"
+      ],
+      "docs": "https://github.com/npitre/cramfs-tools",
+      "install": {
+        "kind": "apt",
+        "auto": false,
+        "argv": [],
+        "shell": "sudo apt install cramfsprogs",
+        "docs": "https://github.com/npitre/cramfs-tools",
+        "requires": [
+          "apt"
+        ],
+        "notes": ""
+      },
+      "fallback": {
+        "tools": [
+          "moria"
+        ],
+        "impact": "moria -e 支持 cramfs"
+      },
+      "notes": "cramfs 单文件系统实现"
+    },
+    {
+      "id": "dtc",
+      "kind": "cli",
+      "capabilities": [
+        "E7"
+      ],
+      "argv": [
+        "dtc",
+        "--version"
+      ],
+      "docs": "https://git.kernel.org/pub/scm/utils/dtc/dtc.git",
+      "install": {
+        "kind": "apt",
+        "auto": false,
+        "argv": [],
+        "shell": "sudo apt install device-tree-compiler",
+        "docs": "https://git.kernel.org/pub/scm/utils/dtc/dtc.git",
+        "requires": [
+          "apt"
+        ],
+        "notes": ""
+      },
+      "fallback": {
+        "tools": [
+          "strings"
+        ],
+        "impact": "只能找 bootargs，无法反编译 DTB"
+      },
+      "notes": "DTB -> DTS；决定 root= 与 mtdparts"
+    },
+    {
+      "id": "vmlinux-to-elf",
+      "kind": "cli",
+      "capabilities": [
+        "E8"
+      ],
+      "argv": [
+        "vmlinux-to-elf",
+        "--version"
+      ],
+      "docs": "https://github.com/marin-m/vmlinux-to-elf",
+      "install": {
+        "kind": "uv-tool",
+        "auto": true,
+        "argv": [
+          "uv",
+          "tool",
+          "install",
+          "vmlinux-to-elf"
+        ],
+        "shell": "",
+        "docs": "https://github.com/marin-m/vmlinux-to-elf",
+        "requires": [
+          "uv"
+        ],
+        "notes": ""
+      },
+      "fallback": {
+        "tools": [],
+        "impact": "没有等价替代，手工恢复符号成本高"
+      },
+      "notes": "剥离符号内核的符号恢复"
+    },
+    {
+      "id": "mithril",
+      "kind": "cli",
+      "capabilities": [
+        "C1",
+        "C2",
+        "C3",
+        "C4",
+        "C5",
+        "F5"
+      ],
+      "argv": [
+        "mithril",
+        "--version"
+      ],
+      "recommended": true,
+      "docs": "https://github.com/nmatt0/mithril",
+      "install": {
+        "kind": "official-release",
+        "auto": false,
+        "argv": [],
+        "shell": "从 GitHub release 下载对应架构的 mithril 二进制并放到 ~/.local/bin",
+        "docs": "https://github.com/nmatt0/mithril",
+        "requires": [],
+        "notes": "官方 release 提供 Linux amd64/arm64；不要在审计中在线拉 CVE 镜像"
+      },
+      "fallback": {
+        "tools": [
+          "rg",
+          "firmwalker"
+        ],
+        "impact": "C1 可部分替代；C2-C5 的 SBOM/KEV/EPSS 关联丢失，可信度下降"
+      },
+      "notes": "C1-C5 首选；CVE 命中只是线索，不是漏洞"
+    },
+    {
+      "id": "ast-grep",
+      "kind": "cli",
+      "capabilities": [
+        "C6"
+      ],
+      "argv": [
+        "ast-grep",
+        "--version"
+      ],
+      "alternates": [
+        [
+          "sg",
+          "--version"
+        ]
+      ],
+      "recommended": true,
+      "docs": "https://ast-grep.github.io/",
+      "install": {
+        "kind": "uv-tool",
+        "auto": true,
+        "argv": [
+          "uv",
+          "tool",
+          "install",
+          "ast-grep-cli"
+        ],
+        "shell": "",
+        "docs": "https://ast-grep.github.io/guide/quick-start.html",
+        "requires": [
+          "uv"
+        ],
+        "notes": "也可 npm i -g @ast-grep/cli；Linux 上 sg 是 setgroups，优先 ast-grep"
+      },
+      "fallback": {
+        "tools": [
+          "semgrep",
+          "rg"
+        ],
+        "impact": "结构级过滤失效 -> 注释/字符串误报回归；Cross-line 可能漏检"
+      },
+      "notes": "C6 首选；sink_scan.py 的 structural 规则会调用它",
+      "version_must_contain": "ast-grep"
+    },
+    {
+      "id": "semgrep",
+      "kind": "cli",
+      "capabilities": [
+        "C6"
+      ],
+      "argv": [
+        "semgrep",
+        "--version"
+      ],
+      "alternates": [
+        [
+          "semgrep",
+          "--disable-version-check",
+          "--version"
+        ]
+      ],
+      "docs": "https://semgrep.dev/docs/",
+      "install": {
+        "kind": "uv-tool",
+        "auto": true,
+        "argv": [
+          "uv",
+          "tool",
+          "install",
+          "semgrep"
+        ],
+        "shell": "",
+        "docs": "https://semgrep.dev/docs/getting-started/",
+        "requires": [
+          "uv"
+        ],
+        "notes": ""
+      },
+      "fallback": {
+        "tools": [
+          "ast-grep",
+          "rg"
+        ],
+        "impact": "taint 模式不可用；人工三跳追链"
+      },
+      "notes": "源码类目标的跨函数污点；剥离 ELF 不适用"
+    },
+    {
+      "id": "rg",
+      "kind": "cli",
+      "capabilities": [
+        "R4",
+        "F4",
+        "F5",
+        "C1"
+      ],
+      "argv": [
+        "rg",
+        "--version"
+      ],
+      "recommended": true,
+      "docs": "https://github.com/BurntSushi/ripgrep",
+      "install": {
+        "kind": "uv-tool",
+        "auto": true,
+        "argv": [
+          "uv",
+          "tool",
+          "install",
+          "ripgrep"
+        ],
+        "shell": "",
+        "docs": "https://github.com/BurntSushi/ripgrep",
+        "requires": [
+          "uv"
+        ],
+        "notes": "cargo install ripgrep / apt install ripgrep 也可以"
+      },
+      "fallback": {
+        "tools": [
+          "grep"
+        ],
+        "impact": "grep -r -I；噪声变大、变慢，结论不变"
+      },
+      "notes": "R4/F4/F5 首选；-uu 关忽略、-t 限类型"
+    },
+    {
+      "id": "fd",
+      "kind": "cli",
+      "capabilities": [
+        "F1",
+        "F2"
+      ],
+      "argv": [
+        "fd",
+        "--version"
+      ],
+      "docs": "https://github.com/sharkdp/fd",
+      "install": {
+        "kind": "uv-tool",
+        "auto": true,
+        "argv": [
+          "uv",
+          "tool",
+          "install",
+          "fd-find"
+        ],
+        "shell": "",
+        "docs": "https://github.com/sharkdp/fd",
+        "requires": [
+          "uv"
+        ],
+        "notes": "apt install fd-find；命令名可能是 fdfind"
+      },
+      "fallback": {
+        "tools": [
+          "find"
+        ],
+        "impact": "find -perm / 语法更长，结论不变"
+      },
+      "notes": "F1/F2 首选"
+    },
+    {
+      "id": "strings",
+      "kind": "cli",
+      "capabilities": [
+        "R4",
+        "F6",
+        "B2"
+      ],
+      "argv": [
+        "strings",
+        "--version"
+      ],
+      "docs": "https://sourceware.org/binutils/docs/binutils/strings.html",
+      "install": {
+        "kind": "apt",
+        "auto": false,
+        "argv": [],
+        "shell": "sudo apt install binutils",
+        "docs": "https://sourceware.org/binutils/docs/binutils/strings.html",
+        "requires": [
+          "apt"
+        ],
+        "notes": ""
+      },
+      "fallback": {
+        "tools": [
+          "rg"
+        ],
+        "impact": "rg -a 可替代大部分字符串搜索"
+      },
+      "notes": "F6 / B2 的轻量入口"
+    },
+    {
+      "id": "readelf",
+      "kind": "cli",
+      "capabilities": [
+        "B1",
+        "B2"
+      ],
+      "argv": [
+        "readelf",
+        "--version"
+      ],
+      "recommended": true,
+      "docs": "https://sourceware.org/binutils/docs/binutils/readelf.html",
+      "install": {
+        "kind": "apt",
+        "auto": false,
+        "argv": [],
+        "shell": "sudo apt install binutils",
+        "docs": "https://sourceware.org/binutils/docs/binutils/readelf.html",
+        "requires": [
+          "apt"
+        ],
+        "notes": ""
+      },
+      "fallback": {
+        "tools": [
+          "objdump",
+          "file"
+        ],
+        "impact": "B1/B2 部分字段缺失；结论不变"
+      },
+      "notes": "B1/B2 首选；fw_triage.py 也内置 ELF 解析"
+    },
+    {
+      "id": "nm",
+      "kind": "cli",
+      "capabilities": [
+        "B2"
+      ],
+      "argv": [
+        "nm",
+        "--version"
+      ],
+      "docs": "https://sourceware.org/binutils/docs/binutils/nm.html",
+      "install": {
+        "kind": "apt",
+        "auto": false,
+        "argv": [],
+        "shell": "sudo apt install binutils",
+        "docs": "https://sourceware.org/binutils/docs/binutils/nm.html",
+        "requires": [
+          "apt"
+        ],
+        "notes": ""
+      },
+      "fallback": {
+        "tools": [
+          "readelf"
+        ],
+        "impact": "readelf -s 可替代"
+      },
+      "notes": "导入/导出符号"
+    },
+    {
+      "id": "objdump",
+      "kind": "cli",
+      "capabilities": [
+        "B2",
+        "B3",
+        "B4"
+      ],
+      "argv": [
+        "objdump",
+        "--version"
+      ],
+      "docs": "https://sourceware.org/binutils/docs/binutils/objdump.html",
+      "install": {
+        "kind": "apt",
+        "auto": false,
+        "argv": [],
+        "shell": "sudo apt install binutils",
+        "docs": "https://sourceware.org/binutils/docs/binutils/objdump.html",
+        "requires": [
+          "apt"
+        ],
+        "notes": ""
+      },
+      "fallback": {
+        "tools": [
+          "readelf",
+          "radare2"
+        ],
+        "impact": "反汇编可读性下降，手工成本上升"
+      },
+      "notes": "B3/B4 的最后一道可用替代"
+    },
+    {
+      "id": "radare2",
+      "kind": "cli",
+      "capabilities": [
+        "B3",
+        "B4"
+      ],
+      "argv": [
+        "radare2",
+        "-v"
+      ],
+      "alternates": [
+        [
+          "r2",
+          "-v"
+        ]
+      ],
+      "docs": "https://github.com/radareorg/radare2",
+      "install": {
+        "kind": "official-release",
+        "auto": false,
+        "argv": [],
+        "shell": "git clone https://github.com/radareorg/radare2 && radare2/sys/install.sh",
+        "docs": "https://github.com/radareorg/radare2",
+        "requires": [
+          "git"
+        ],
+        "notes": "也可用发行版包；避免用 pip 的旧包装"
+      },
+      "fallback": {
+        "tools": [
+          "objdump"
+        ],
+        "impact": "xref/反编译能力下降"
+      },
+      "notes": "B3 首选；可脚本化 axt"
+    },
+    {
+      "id": "ghidra",
+      "kind": "cli",
+      "capabilities": [
+        "B4",
+        "B9"
+      ],
+      "argv": [
+        "analyzeHeadless"
+      ],
+      "extra_paths": [
+        "$GHIDRA_HOME/support/analyzeHeadless",
+        "$GHIDRA_HOME/support/analyzeHeadless.bat"
+      ],
+      "docs": "https://github.com/NationalSecurityAgency/ghidra",
+      "install": {
+        "kind": "official-release",
+        "auto": false,
+        "argv": [],
+        "shell": "从官方 release 解压 Ghidra，设置 GHIDRA_HOME，并安装匹配的 JDK",
+        "docs": "https://github.com/NationalSecurityAgency/ghidra",
+        "requires": [],
+        "notes": "体积大、需要 JDK；本 skill 不会自动下载 Ghidra"
+      },
+      "fallback": {
+        "tools": [
+          "radare2",
+          "objdump"
+        ],
+        "impact": "反编译质量下降，xref 需手工"
+      },
+      "notes": "B4 的免费语义级路线；需 GHIDRA_HOME 或 PATH"
+    },
+    {
+      "id": "ida-mcp",
+      "kind": "cli",
+      "capabilities": [
+        "B4",
+        "B9"
+      ],
+      "argv": [
+        "ida-mcp",
+        "--help"
+      ],
+      "docs": "https://docs.hex-rays.com/add-ons/mcp",
+      "install": {
+        "kind": "official-installer",
+        "auto": false,
+        "argv": [
+          "uvx",
+          "ida-hcli",
+          "mcp",
+          "install"
+        ],
+        "docs": "https://docs.hex-rays.com/add-ons/mcp/getting-started",
+        "requires": [
+          "uv"
+        ],
+        "notes": "官方 Hex-Rays 安装器；需要 IDA 9.4+（含 idalib）与 Python 3.11+，会修改 agent MCP 配置，因此不自动执行"
+      },
+      "fallback": {
+        "tools": [
+          "pyghidra-mcp",
+          "ghidra",
+          "radare2"
+        ],
+        "impact": "没有 IDA 时走 Ghidra/radare2 链；结论强度不变，效率下降"
+      },
+      "notes": "官方 HexRaysSA/ida-mcp（不是社区 mrexodia/ida-pro-mcp）；本项只探测 ida-mcp 命令，未在 PATH 时按官方用 uvx ida-mcp stdio"
+    },
+    {
+      "id": "pyghidra-mcp",
+      "kind": "cli",
+      "capabilities": [
+        "B4"
+      ],
+      "argv": [
+        "pyghidra-mcp",
+        "--version"
+      ],
+      "docs": "https://github.com/clearbluejar/pyghidra-mcp",
+      "install": {
+        "kind": "uv-tool",
+        "auto": false,
+        "argv": [
+          "uv",
+          "tool",
+          "install",
+          "pyghidra-mcp"
+        ],
+        "shell": "",
+        "docs": "https://github.com/clearbluejar/pyghidra-mcp",
+        "requires": [
+          "uv"
+        ],
+        "notes": "仍需本机 Ghidra/JDK；版本兼容性按官方 README"
+      },
+      "fallback": {
+        "tools": [
+          "ghidra"
+        ],
+        "impact": "MCP 断链，回到 analyzeHeadless 脚本"
+      },
+      "notes": "Ghidra 的 MCP 封装；不是 Ghidra 本体"
+    },
+    {
+      "id": "qiling",
+      "kind": "python-module",
+      "capabilities": [
+        "D5",
+        "D6",
+        "D7",
+        "D9",
+        "D11",
+        "D12"
+      ],
+      "module": "qiling",
+      "docs": "https://docs.qiling.io/",
+      "install": {
+        "kind": "pip",
+        "auto": false,
+        "argv": [
+          "uv",
+          "pip",
+          "install",
+          "qiling @ git+https://github.com/qilingframework/qiling@86c927cb329993b14e2586e04d1dd7a90deee5fb"
+        ],
+        "shell": "",
+        "docs": "https://docs.qiling.io/en/latest/install/",
+        "requires": [
+          "uv",
+          "git"
+        ],
+        "notes": "宿主机安装不等于适配器可用；adapter_qiling.py 固定经 sandbox_run.py 使用镜像"
+      },
+      "fallback": {
+        "tools": [
+          "qiling-image",
+          "qemu-user"
+        ],
+        "impact": "单二进制 Hook 能力下降"
+      },
+      "notes": "检测的是 python -c import qiling；adapter 实际优先用容器镜像"
+    },
+    {
+      "id": "qiling-image",
+      "kind": "container-image",
+      "capabilities": [
+        "D5",
+        "D6",
+        "D7",
+        "D9",
+        "D11",
+        "D12"
+      ],
+      "images": [
+        "iot-fw/qiling:1.4.11",
+        "iot-fw/qiling:latest"
+      ],
+      "docs": "https://github.com/qilingframework/qiling",
+      "install": {
+        "kind": "container-build",
+        "auto": true,
+        "argv": [
+          "{container}",
+          "build",
+          "-t",
+          "iot-fw/qiling:1.4.11",
+          "{root}/assets/qiling"
+        ],
+        "shell": "",
+        "docs": "https://docs.qiling.io/en/latest/install/",
+        "requires": [
+          "docker"
+        ],
+        "notes": "推荐路线；构建含 Qiling 1.4.11 的固定镜像"
+      },
+      "fallback": {
+        "tools": [
+          "qiling",
+          "qemu-user"
+        ],
+        "impact": "无容器运行时则 D5-D7 降级"
+      },
+      "notes": "adapter_qiling.py 的真实执行环境；版本固定为 1.4.11"
+    },
+    {
+      "id": "qemu-system",
+      "kind": "family",
+      "capabilities": [
+        "D1"
+      ],
+      "prefix": "qemu-system-",
+      "docs": "https://www.qemu.org/docs/master/system/",
+      "install": {
+        "kind": "apt",
+        "auto": false,
+        "argv": [],
+        "shell": "sudo apt install qemu-system-mips qemu-system-arm qemu-system-aarch64",
+        "docs": "https://www.qemu.org/download/",
+        "requires": [
+          "apt"
+        ],
+        "notes": "按目标架构只装需要的包"
+      },
+      "fallback": {
+        "tools": [
+          "qemu-user"
+        ],
+        "impact": "整机启动不可用，只能证单二进制"
+      },
+      "notes": "D1 整机启动；检测 PATH 中所有 qemu-system-*"
+    },
+    {
+      "id": "qemu-user",
+      "kind": "family",
+      "capabilities": [
+        "D5",
+        "D8"
+      ],
+      "prefixes": [
+        "qemu-mips",
+        "qemu-mipsel",
+        "qemu-arm",
+        "qemu-aarch64",
+        "qemu-x86_64"
+      ],
+      "docs": "https://www.qemu.org/docs/master/user/",
+      "install": {
+        "kind": "apt",
+        "auto": false,
+        "argv": [],
+        "shell": "sudo apt install qemu-user-static binfmt-support",
+        "docs": "https://www.qemu.org/download/",
+        "requires": [
+          "apt"
+        ],
+        "notes": ""
+      },
+      "fallback": {
+        "tools": [
+          "qiling"
+        ],
+        "impact": "依赖/系统调用覆盖下降"
+      },
+      "notes": "D5/D8 的轻量替代；qemu-*-static 更适合 chroot"
+    },
+    {
+      "id": "afl-fuzz",
+      "kind": "cli",
+      "capabilities": [
+        "D10"
+      ],
+      "argv": [
+        "afl-fuzz",
+        "-V"
+      ],
+      "docs": "https://github.com/AFLplusplus/AFLplusplus",
+      "install": {
+        "kind": "apt",
+        "auto": false,
+        "argv": [],
+        "shell": "sudo apt install afl++  # 或从源码构建",
+        "docs": "https://github.com/AFLplusplus/AFLplusplus",
+        "requires": [
+          "apt"
+        ],
+        "notes": ""
+      },
+      "fallback": {
+        "tools": [
+          "honggfuzz"
+        ],
+        "impact": "二进制模式支持弱"
+      },
+      "notes": "D10 首选；-Q/-U/-O 模式按目标选",
+      "ok_returncodes": [
+        0,
+        1
+      ]
+    },
+    {
+      "id": "honggfuzz",
+      "kind": "cli",
+      "capabilities": [
+        "D10"
+      ],
+      "argv": [
+        "honggfuzz",
+        "--version"
+      ],
+      "docs": "https://github.com/google/honggfuzz",
+      "install": {
+        "kind": "apt",
+        "auto": false,
+        "argv": [],
+        "shell": "sudo apt install honggfuzz",
+        "docs": "https://github.com/google/honggfuzz",
+        "requires": [
+          "apt"
+        ],
+        "notes": ""
+      },
+      "fallback": {
+        "tools": [
+          "afl-fuzz"
+        ],
+        "impact": "覆盖与生态较弱"
+      },
+      "notes": "D10 备选"
+    },
+    {
+      "id": "gdb-multiarch",
+      "kind": "cli",
+      "capabilities": [
+        "D8",
+        "D11",
+        "D12"
+      ],
+      "argv": [
+        "gdb-multiarch",
+        "--version"
+      ],
+      "docs": "https://sourceware.org/gdb/",
+      "install": {
+        "kind": "apt",
+        "auto": false,
+        "argv": [],
+        "shell": "sudo apt install gdb-multiarch",
+        "docs": "https://sourceware.org/gdb/",
+        "requires": [
+          "apt"
+        ],
+        "notes": ""
+      },
+      "fallback": {
+        "tools": [
+          "qiling"
+        ],
+        "impact": "断点/寄存器观测能力下降"
+      },
+      "notes": "跨架构崩溃 triage 与调试"
+    },
+    {
+      "id": "frida",
+      "kind": "python-module",
+      "capabilities": [
+        "D12"
+      ],
+      "module": "frida",
+      "docs": "https://frida.re/docs/installation/",
+      "install": {
+        "kind": "uv-tool",
+        "auto": true,
+        "argv": [
+          "uv",
+          "tool",
+          "install",
+          "frida-tools"
+        ],
+        "shell": "",
+        "docs": "https://frida.re/docs/installation/",
+        "requires": [
+          "uv"
+        ],
+        "notes": ""
+      },
+      "fallback": {
+        "tools": [
+          "gdb-multiarch"
+        ],
+        "impact": "动态插桩能力下降"
+      },
+      "notes": "D12；需目标架构的 frida-server"
+    },
+    {
+      "id": "nmap",
+      "kind": "cli",
+      "capabilities": [
+        "D4",
+        "N1"
+      ],
+      "argv": [
+        "nmap",
+        "--version"
+      ],
+      "docs": "https://nmap.org/book/install.html",
+      "install": {
+        "kind": "apt",
+        "auto": false,
+        "argv": [],
+        "shell": "sudo apt install nmap",
+        "docs": "https://nmap.org/book/install.html",
+        "requires": [
+          "apt"
+        ],
+        "notes": ""
+      },
+      "fallback": {
+        "tools": [
+          "nc"
+        ],
+        "impact": "服务指纹能力下降"
+      },
+      "notes": "D4/N1；只在授权范围内扫描"
+    },
+    {
+      "id": "nc",
+      "kind": "cli",
+      "capabilities": [
+        "D4"
+      ],
+      "argv": [
+        "nc",
+        "-h"
+      ],
+      "docs": "https://nc110.sourceforge.net/",
+      "install": {
+        "kind": "apt",
+        "auto": false,
+        "argv": [],
+        "shell": "sudo apt install netcat-openbsd",
+        "docs": "https://nc110.sourceforge.net/",
+        "requires": [
+          "apt"
+        ],
+        "notes": ""
+      },
+      "fallback": {
+        "tools": [],
+        "impact": "用 curl / socat / Python socket 手工探测"
+      },
+      "notes": "D4 的轻量探测；版本命令因实现而异"
+    },
+    {
+      "id": "docker",
+      "kind": "cli",
+      "capabilities": [
+        "D5",
+        "D6",
+        "D7",
+        "D9",
+        "D11",
+        "D12"
+      ],
+      "argv": [
+        "docker",
+        "--version"
+      ],
+      "recommended": true,
+      "docs": "https://docs.docker.com/engine/install/",
+      "install": {
+        "kind": "official-release",
+        "auto": false,
+        "argv": [],
+        "shell": "按官方文档安装 Docker Engine；Windows 用 Docker Desktop/WSL2",
+        "docs": "https://docs.docker.com/engine/install/",
+        "requires": [],
+        "notes": "本 skill 的沙箱与 Qiling 镜像依赖容器运行时"
+      },
+      "fallback": {
+        "tools": [
+          "podman"
+        ],
+        "impact": "命令基本兼容；sandbox_run.py 会探测可用运行时"
+      },
+      "notes": "不可信固件执行的基础设施"
+    },
+    {
+      "id": "podman",
+      "kind": "cli",
+      "capabilities": [
+        "D5",
+        "D6",
+        "D7",
+        "D9",
+        "D11",
+        "D12"
+      ],
+      "argv": [
+        "podman",
+        "--version"
+      ],
+      "docs": "https://podman.io/docs/installation",
+      "install": {
+        "kind": "official-release",
+        "auto": false,
+        "argv": [],
+        "shell": "按官方文档安装 podman",
+        "docs": "https://podman.io/docs/installation",
+        "requires": [],
+        "notes": "无 root 容器运行时"
+      },
+      "fallback": {
+        "tools": [
+          "docker"
+        ],
+        "impact": "镜像构建/运行命令可能略有差异"
+      },
+      "notes": "docker 的替代运行时"
+    },
+    {
+      "id": "uv",
+      "kind": "cli",
+      "argv": [
+        "uv",
+        "--version"
+      ],
+      "recommended": true,
+      "docs": "https://docs.astral.sh/uv/",
+      "install": {
+        "kind": "official-release",
+        "auto": false,
+        "argv": [],
+        "shell": "按官方安装脚本安装 uv；Windows 可用 winget install astral-sh.uv",
+        "docs": "https://docs.astral.sh/uv/getting-started/installation/",
+        "requires": [],
+        "notes": "本 skill 推荐的环境管理器；不是运行必需"
+      },
+      "fallback": {
+        "tools": [
+          "python"
+        ],
+        "impact": "改用 venv + pip；不影响脚本逻辑"
+      },
+      "notes": "Python 环境与工具安装入口"
+    },
+    {
+      "id": "firmwalker",
+      "kind": "cli",
+      "capabilities": [
+        "C1"
+      ],
+      "argv": [
+        "firmwalker",
+        "--help"
+      ],
+      "docs": "https://github.com/craigz28/firmwalker",
+      "install": {
+        "kind": "manual",
+        "auto": false,
+        "argv": [],
+        "shell": "按官方 README 安装 Node 依赖",
+        "docs": "https://github.com/craigz28/firmwalker",
+        "requires": [],
+        "notes": "C1 的降级实现"
+      },
+      "fallback": {
+        "tools": [
+          "rg",
+          "mithril"
+        ],
+        "impact": "规则覆盖有限，CVE/SBOM 关联缺失"
+      },
+      "notes": "mithril 缺席时的 C1 替代"
+    }
+  ]
+}

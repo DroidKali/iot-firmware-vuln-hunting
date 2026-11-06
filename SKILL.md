@@ -139,6 +139,12 @@ python scripts/tool_index.py --profile all \
 
 这里用 `python` 而不是 `uv run`：脚本本身就要报告 `uv` 在不在。它探测 41 个实现（moria / binwalk / unblob / ast-grep / semgrep / qiling / qiling-image / QEMU / AFL++ / Ghidra / radare2 等），输出 `tool-index/1.0`。除 `PATH` 外还会检查 `~/.local/bin`、`~/bin`、`~/.cargo/bin` 等常见用户安装目录，避免 `uv tool install` 的工具被误报缺失；这些目录只用于查找，不修改 `PATH`。
 
+工具与能力清单在 `assets/tool-registry.json`（`tool-registry/1.0`，当前 41 个工具 / 54 项能力）。新增或调整工具只改这个 JSON，不改 Python；`tool_index.py` 只加载、校验、探测与渲染。注册表损坏、未知字段、重复 ID 或悬空能力引用都会以退出 2 fail-closed。需要对照另一份清单时显式指定：
+
+```bash
+python scripts/tool_index.py --registry assets/tool-registry.json --only qiling --json
+```
+
 - `summary`：本次探测的工具总数与 available / degraded / missing 计数；
 - `tools`：每个工具的 `found`、`status`、版本、路径、探测命令，以及官方文档、固定安装配方、降级替代；
 - `capabilities`：`atomic-capabilities.md` 的 54 项能力逐项映射到工具，状态为 available / degraded / missing / manual；
@@ -159,7 +165,11 @@ python scripts/tool_index.py --install binwalk
 python scripts/tool_index.py --install binwalk --yes
 ```
 
-自动安装只执行脚本内置、可审计的固定命令（uv / cargo / docker build 等），并先检查 `uv`、`docker`、`git`、`cmake`、`c++` 等前置条件；moria、Ghidra、radare2 等没有固定自动配方的工具只输出官方文档，不联网抓页面、不猜命令。**加 `--yes` 前必须取得用户对安装范围和来源的明确同意。** 某个能力缺工具时，先按索引给出的 fallback 选等价实现，并在报告和覆盖说明里注明降级及其对结论强度的影响。字段定义见 `references/data-contracts.md` §21，回归见 selftest 第 27 组。
+自动安装只执行脚本内置、可审计的固定命令（uv / cargo / docker build 等），并先检查 `uv`、`docker`、`git`、`cmake`、`c++` 等前置条件；moria、Ghidra、radare2 等没有固定自动配方的工具只输出官方文档，不联网抓页面、不猜命令。**加 `--yes` 前必须取得用户对安装范围和来源的明确同意。** 某个能力缺工具时，先按索引给出的 fallback 选等价实现，并在报告和覆盖说明里注明降级及其对结论强度的影响。
+
+IDA Pro MCP 条目固定为 IDA 官方开源版 [HexRaysSA/ida-mcp](https://github.com/HexRaysSA/ida-mcp)，不是旧的社区版 `mrexodia/ida-pro-mcp`：官方安装器是 `uvx ida-hcli mcp install`，MCP 连接用 `uvx --exclude-newer=1s ida-mcp stdio`。官方 CLI 没有 `--version`，所以索引只能探测 `ida-mcp --help` 是否存在，版本显示为未知（degraded）而不是伪造版本号。
+
+字段定义见 `references/data-contracts.md` §21，回归见 selftest 第 27 组。
 
 #### 0.1 度量与定界
 
@@ -1097,7 +1107,7 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 | 脚本 | 用途 |
 |---|---|
 | `scripts/fw_triage.py` | Phase 0 / 2：固件度量、熵扫描、ELF 加固画像、SUID 面、Tier 分层、EALB 预算 |
-| `scripts/tool_index.py` | Phase 0 前置：探测 41 个工具的版本与可用性，输出 `tool-index/1.0`；缺失工具给官方文档、固定安装命令与降级路径，`--install` 必须显式 `--yes` |
+| `scripts/tool_index.py` | Phase 0 前置：从 `assets/tool-registry.json` 加载 41 个工具 / 54 项能力，探测版本与可用性并输出 `tool-index/1.0`；注册表校验 fail-closed，`--registry` 可替换，`--install` 必须显式 `--yes` |
 | `scripts/sink_scan.py` | Phase 3 Layer 1：多语言危险模式扫描（数据驱动规则） |
 | `scripts/coverage_gate.py` | Phase 5：覆盖率门禁校验 + **CVE 纪律检查**（`--report`）+ **审阅清单三方对齐**（`--review-list`）+ **G4 入口级覆盖**（`--entrypoints`）+ **G5 绕过矩阵**（`--bypass-check`）+ **G6 跨请求污点溯源**（`--cross-request`）+ **G7 跨请求污点图**（`--taint-graph`）+ **类型→Base 命中**（`--type-base`）+ **自动修复计划**（`--auto-recover`）+ **`--profile {light,standard,strict}` 档位与 `gate-config.json` 执行台账** |
 | `scripts/taint_graph.py` | Phase 3/5：跨请求污点图（BDG/ADG 最小实现）——`recover` 从反编译产物恢复常量键（literal / local-const / fill-composed），`build` 构图并校验「写请求 ≠ 触发读的请求、键一致、两端有证据、跨进程读带 via_control」；产出 `taint-graph.json` 供 G7 消费 |
@@ -1117,7 +1127,7 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 | `scripts/emu_run.py` | M4：复核计划、镜像与内核哈希，固定经 `sandbox_run.py --mode sandbox` 执行 QEMU，采串口/退出码并输出 `emulation-result/1.0`；无宿主机回退 |
 | `scripts/adapter_qiling.py` | M4：Qiling 定向仿真——只读计划、经 sandbox 执行、按 trigger marker / sink hook 重算事件并输出 `qiling-import/1.0`；无宿主机回退 |
 | `scripts/qiling_runner.py` | M4：容器内 Qiling runner——安装 syscall / API / libc Hook，写事件 JSONL 与运行报告；不判定漏洞，无宿主模式 |
-| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证其余二十一个脚本的判据，并把**文档示例命令与 CLI 参数表对拍**；覆盖工具盘点、黑板事件/快照/状态机、资源准入、EMBA 适配、整机仿真计划/结果分类、Qiling 定向仿真与 M7 调度闭环（27 组 / 340 条断言，结尾自报总数） |
+| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证其余二十一个脚本的判据，并把**文档示例命令与 CLI 参数表对拍**；覆盖工具注册表、黑板事件/快照/状态机、资源准入、EMBA 适配、整机仿真计划/结果分类、Qiling 定向仿真与 M7 调度闭环（27 组 / 344 条断言，结尾自报总数） |
 
 除 `qiling_runner.py`（只在 Qiling 容器镜像内运行）外，脚本都只用 Python 标准库，无第三方依赖，Windows / Linux / macOS 均可运行。用 `uv` 管理环境（`uv run` 自动建临时环境；无 `uv` 时直接 `python scripts/xxx.py` 亦可）。安装后建议先跑一次自检：
 

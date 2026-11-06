@@ -14,7 +14,9 @@ moria / ast-grep / Qiling 缺失，然后临时猜安装命令。这个脚本把
 * 只探测工具自身（--version / image inspect / 模块元数据），不读取固件，
   不执行固件，不把目标文件传给被测工具。
 * 默认绝不安装。安装是显式动作：--install TOOL --yes；无 --yes 只打印计划。
-* 安装配方固定在脚本内，不抓取网页后执行。网页只作为 docs 链接，避免把
+* 工具与能力清单在 assets/tool-registry.json；新增/调整工具只改配置文件，
+  脚本只负责加载、校验、探测与渲染。
+* 安装配方固定在注册表里，不抓取网页后执行。网页只作为 docs 链接，避免把
   第三方页面内容当成命令。
 * 探测失败不伪造版本：找不到就是 missing；找到但版本命令失败是 degraded，
   仍算 found，但 --strict 会拒绝把它当作“已验证版本”。
@@ -22,6 +24,7 @@ moria / ast-grep / Qiling 缺失，然后临时猜安装命令。这个脚本把
 用法
 ----
     python scripts/tool_index.py --out fw-audit/<target>/00-tool-index.json
+    python scripts/tool_index.py --registry assets/tool-registry.json --json
     python scripts/tool_index.py --only moria,ast-grep,qiling --json
     python scripts/tool_index.py --require moria --require ast-grep
     python scripts/tool_index.py --docs --only qiling
@@ -34,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import importlib.metadata as md
 import importlib.util
 import json
@@ -90,474 +94,375 @@ def _fallback(tools: List[str], impact: str) -> Dict[str, Any]:
     return {"tools": list(tools), "impact": impact}
 
 
-def _tool(tool_id: str, kind: str, capabilities: List[str], *,
-          argv: Optional[List[str]] = None, alternates: Optional[List[List[str]]] = None,
-          module: str = "", images: Optional[List[str]] = None,
-          prefix: str = "", prefixes: Optional[List[str]] = None,
-          extra_paths: Optional[List[str]] = None,
-          required: bool = False, recommended: bool = False,
-          docs: str = "", install: Optional[Dict[str, Any]] = None,
-          fallback: Optional[Dict[str, Any]] = None, notes: str = "",
-          version_must_contain: str = "",
-          ok_returncodes: Optional[List[int]] = None) -> Dict[str, Any]:
+# ── 工具注册表加载 ───────────────────────────────────────────────────────────
+# 工具与能力清单放在 assets/tool-registry.json；新增/调整工具只改那一个文件。
+# 本脚本只负责：加载并校验注册表 -> 探测版本 -> 渲染索引/安装计划。
+DEFAULT_REGISTRY = os.path.join(ROOT, "assets", "tool-registry.json")
+REGISTRY_SCHEMA = "tool-registry/1.0"
+TOOL_KINDS = ("cli", "family", "python-module", "python-runtime", "container-image")
+TOOL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+CAP_ID_RE = re.compile(r"^[A-Z][0-9]{1,2}$")
+DEFAULT_FALLBACK_IMPACT = "按 atomic-capabilities.md §11 选择替代路径"
+REGISTRY_TOP_KEYS = {"schema", "version", "description", "p0_tools", "capabilities", "tools"}
+CAP_KEYS = {"id", "name", "phases", "primary", "tools", "manual", "fallback"}
+TOOL_KEYS = {
+    "id", "kind", "capabilities", "argv", "alternates", "module", "images",
+    "prefix", "prefixes", "extra_paths", "required", "recommended", "docs",
+    "install", "fallback", "notes", "version_must_contain", "ok_returncodes",
+}
+INSTALL_KEYS = {"kind", "auto", "argv", "shell", "docs", "requires", "notes"}
+FALLBACK_KEYS = {"tools", "impact"}
+
+
+class RegistryError(Exception):
+    """注册表缺失、损坏或不合契约；调用方必须 fail-closed。"""
+
+    def __init__(self, message: str, path: str = "") -> None:
+        self.path = path
+        prefix = (path + "：") if path else ""
+        super().__init__(prefix + message)
+
+
+def _bad(errors: List[str], path: str, message: str) -> None:
+    errors.append(path + ": " + message)
+
+
+def _unknown_fields(obj: Dict[str, Any], allowed: Any, path: str,
+                    errors: List[str]) -> None:
+    for key in obj:
+        if key not in allowed:
+            _bad(errors, path + "." + key, "未知字段（拼写错误或注册表版本不匹配）")
+
+
+def _field_str(obj: Dict[str, Any], key: str, path: str, errors: List[str],
+               *, required: bool = False, allow_empty: bool = False) -> str:
+    if key not in obj:
+        if required:
+            _bad(errors, path + "." + key, "必填")
+        return ""
+    value = obj[key]
+    if not isinstance(value, str):
+        _bad(errors, path + "." + key, "必须是字符串")
+        return ""
+    if not allow_empty and not value.strip():
+        _bad(errors, path + "." + key, "不能为空")
+        return ""
+    return value
+
+
+def _field_bool(obj: Dict[str, Any], key: str, path: str, errors: List[str],
+                *, default: bool = False) -> bool:
+    if key not in obj:
+        return default
+    value = obj[key]
+    if not isinstance(value, bool):
+        _bad(errors, path + "." + key, "必须是 true/false")
+        return default
+    return value
+
+
+def _field_str_list(obj: Dict[str, Any], key: str, path: str, errors: List[str],
+                    *, required: bool = False, allow_empty: bool = True) -> List[str]:
+    if key not in obj:
+        if required:
+            _bad(errors, path + "." + key, "必填")
+        return []
+    value = obj[key]
+    if not isinstance(value, list):
+        _bad(errors, path + "." + key, "必须是字符串数组")
+        return []
+    out: List[str] = []
+    for i, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip():
+            _bad(errors, "%s.%s[%d]" % (path, key, i), "必须是非空字符串")
+            continue
+        out.append(item)
+    if not allow_empty and not out:
+        _bad(errors, path + "." + key, "至少需要一项")
+    return out
+
+
+def _check_install(raw: Any, path: str, errors: List[str]) -> None:
+    if not isinstance(raw, dict):
+        _bad(errors, path, "install 必须是对象")
+        return
+    _unknown_fields(raw, INSTALL_KEYS, path, errors)
+    _field_str(raw, "kind", path, errors, required=True)
+    _field_bool(raw, "auto", path, errors)
+    _field_str_list(raw, "argv", path, errors)
+    _field_str(raw, "shell", path, errors, allow_empty=True)
+    _field_str(raw, "docs", path, errors, allow_empty=True)
+    _field_str_list(raw, "requires", path, errors)
+    _field_str(raw, "notes", path, errors, allow_empty=True)
+
+
+def _check_fallback(raw: Any, path: str, errors: List[str]) -> None:
+    if not isinstance(raw, dict):
+        _bad(errors, path, "fallback 必须是对象")
+        return
+    _unknown_fields(raw, FALLBACK_KEYS, path, errors)
+    _field_str_list(raw, "tools", path, errors)
+    _field_str(raw, "impact", path, errors, allow_empty=True)
+
+
+def _check_tool(raw: Any, index: int, errors: List[str]) -> str:
+    path = "tools[%d]" % index
+    if not isinstance(raw, dict):
+        _bad(errors, path, "工具必须是对象")
+        return ""
+    _unknown_fields(raw, TOOL_KEYS, path, errors)
+    tid = _field_str(raw, "id", path, errors, required=True)
+    if tid and not TOOL_ID_RE.match(tid):
+        _bad(errors, path + ".id", "只允许小写字母/数字/点/下划线/连字符，且必须以字母或数字开头")
+    kind = _field_str(raw, "kind", path, errors) or "cli"
+    if kind not in TOOL_KINDS:
+        _bad(errors, path + ".kind", "未知类型 %r；可选：%s" % (kind, ", ".join(TOOL_KINDS)))
+    _field_str_list(raw, "capabilities", path, errors)
+    argv = _field_str_list(raw, "argv", path, errors)
+    alternates = raw.get("alternates", [])
+    if not isinstance(alternates, list):
+        _bad(errors, path + ".alternates", "必须是字符串数组的数组")
+        alternates = []
+    for i, cand in enumerate(alternates):
+        _field_str_list({"argv": cand}, "argv", "%s.alternates[%d]" % (path, i), errors,
+                        required=True, allow_empty=False)
+    module = _field_str(raw, "module", path, errors, allow_empty=True)
+    images = _field_str_list(raw, "images", path, errors)
+    prefix = _field_str(raw, "prefix", path, errors, allow_empty=True)
+    prefixes = _field_str_list(raw, "prefixes", path, errors)
+    _field_str_list(raw, "extra_paths", path, errors)
+    _field_bool(raw, "required", path, errors)
+    _field_bool(raw, "recommended", path, errors)
+    _field_str(raw, "docs", path, errors, allow_empty=True)
+    if raw.get("install") is not None:
+        _check_install(raw.get("install"), path + ".install", errors)
+    if raw.get("fallback") is not None:
+        _check_fallback(raw.get("fallback"), path + ".fallback", errors)
+    _field_str(raw, "notes", path, errors, allow_empty=True)
+    _field_str(raw, "version_must_contain", path, errors, allow_empty=True)
+    codes = raw.get("ok_returncodes", [0])
+    if not isinstance(codes, list) or not codes:
+        _bad(errors, path + ".ok_returncodes", "必须是非空整数数组")
+    else:
+        for i, code in enumerate(codes):
+            if isinstance(code, bool) or not isinstance(code, int):
+                _bad(errors, "%s.ok_returncodes[%d]" % (path, i), "必须是整数")
+    if kind == "cli" and not argv and not alternates:
+        _bad(errors, path, "cli 类型至少需要 argv 或 alternates")
+    if kind == "family" and not prefix and not prefixes:
+        _bad(errors, path, "family 类型至少需要 prefix 或 prefixes")
+    if kind == "python-module" and not module:
+        _bad(errors, path + ".module", "python-module 类型必须给 module")
+    if kind == "container-image" and not images:
+        _bad(errors, path + ".images", "container-image 类型必须给 images")
+    return tid
+
+
+def _check_capability(raw: Any, index: int, errors: List[str]) -> str:
+    path = "capabilities[%d]" % index
+    if not isinstance(raw, dict):
+        _bad(errors, path, "能力必须是对象")
+        return ""
+    _unknown_fields(raw, CAP_KEYS, path, errors)
+    cid = _field_str(raw, "id", path, errors, required=True)
+    if cid and not CAP_ID_RE.match(cid):
+        _bad(errors, path + ".id", "能力 ID 形如 R1/E9/C6/F4/B8/D12/N3/H2")
+    _field_str(raw, "name", path, errors, required=True)
+    phases = _field_str_list(raw, "phases", path, errors, required=True, allow_empty=False)
+    for i, pid in enumerate(phases):
+        if pid not in ALL_PHASES:
+            _bad(errors, "%s.phases[%d]" % (path, i), "未知阶段 %r" % pid)
+    primary = _field_str(raw, "primary", path, errors, allow_empty=True)
+    tools = _field_str_list(raw, "tools", path, errors)
+    manual = _field_str(raw, "manual", path, errors, allow_empty=True)
+    _field_str(raw, "fallback", path, errors, allow_empty=True)
+    if primary and primary not in tools:
+        _bad(errors, path + ".primary", "primary=%r 不在 tools 中" % primary)
+    if not tools and not manual:
+        _bad(errors, path, "没有 tools 时必须写 manual 替代路径，否则会把缺口误报成可用")
+    return cid
+
+
+def _validate_registry(doc: Any) -> List[str]:
+    errors: List[str] = []
+    if not isinstance(doc, dict):
+        return ["$: 顶层必须是 JSON 对象"]
+    _unknown_fields(doc, REGISTRY_TOP_KEYS, "$", errors)
+    if doc.get("schema") != REGISTRY_SCHEMA:
+        _bad(errors, "$.schema", "必须是 %r，实际 %r" % (REGISTRY_SCHEMA, doc.get("schema")))
+    version = _field_str(doc, "version", "$", errors, required=True)
+    if version and not re.match(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$", version):
+        _bad(errors, "$.version", "建议使用 YYYY-MM-DD，实际 %r" % version)
+    _field_str(doc, "description", "$", errors, allow_empty=True)
+    p0_tools = _field_str_list(doc, "p0_tools", "$", errors, required=True, allow_empty=False)
+    tools_raw = doc.get("tools")
+    if not isinstance(tools_raw, list) or not tools_raw:
+        _bad(errors, "$.tools", "必须是非空数组")
+        tools_raw = []
+    tool_ids = set()
+    for i, raw in enumerate(tools_raw):
+        tid = _check_tool(raw, i, errors)
+        if tid:
+            if tid in tool_ids:
+                _bad(errors, "tools[%d].id" % i, "工具 ID 重复：%r" % tid)
+            tool_ids.add(tid)
+    caps_raw = doc.get("capabilities")
+    if not isinstance(caps_raw, list) or not caps_raw:
+        _bad(errors, "$.capabilities", "必须是非空数组")
+        caps_raw = []
+    cap_ids = set()
+    for i, raw in enumerate(caps_raw):
+        cid = _check_capability(raw, i, errors)
+        if cid:
+            if cid in cap_ids:
+                _bad(errors, "capabilities[%d].id" % i, "能力 ID 重复：%r" % cid)
+            cap_ids.add(cid)
+    for i, raw in enumerate(tools_raw):
+        if not isinstance(raw, dict):
+            continue
+        for cid in raw.get("capabilities") or []:
+            if cid not in cap_ids:
+                _bad(errors, "tools[%d].capabilities" % i, "未定义的能力 %r" % cid)
+    for i, raw in enumerate(caps_raw):
+        if not isinstance(raw, dict):
+            continue
+        for tid in raw.get("tools") or []:
+            if tid not in tool_ids:
+                _bad(errors, "capabilities[%d].tools" % i, "未注册的工具 %r" % tid)
+    for i, tid in enumerate(p0_tools):
+        if tid not in tool_ids:
+            _bad(errors, "$.p0_tools[%d]" % i, "未注册的工具 %r" % tid)
+    if "python" not in tool_ids:
+        _bad(errors, "$.tools", "缺少 python；Phase 0 无法运行本 skill")
+    if "python" not in p0_tools:
+        _bad(errors, "$.p0_tools", "必须包含 python")
+    return errors
+
+
+def _norm_tool(raw: Dict[str, Any]) -> Dict[str, Any]:
+    docs = raw.get("docs") or ""
+    inst_raw = raw.get("install")
+    if inst_raw is None:
+        install = _install("manual", docs=docs, shell="按官方文档安装",
+                           notes="没有固定安装配方")
+    else:
+        install = _install(
+            inst_raw.get("kind") or "manual",
+            auto=bool(inst_raw.get("auto")),
+            argv=list(inst_raw.get("argv") or []),
+            shell=inst_raw.get("shell") or "",
+            docs=inst_raw.get("docs") or docs,
+            requires=list(inst_raw.get("requires") or []),
+            notes=inst_raw.get("notes") or "",
+        )
+    fb_raw = raw.get("fallback")
+    if fb_raw is None:
+        fallback = _fallback([], DEFAULT_FALLBACK_IMPACT)
+    else:
+        fallback = _fallback(fb_raw.get("tools") or [],
+                             fb_raw.get("impact") or DEFAULT_FALLBACK_IMPACT)
     return {
-        "id": tool_id,
-        "kind": kind,
-        "capabilities": list(capabilities),
-        "argv": list(argv or []),
-        "alternates": [list(a) for a in (alternates or [])],
-        "module": module,
-        "images": list(images or []),
-        "prefix": prefix,
-        "prefixes": list(prefixes or []),
-        "extra_paths": list(extra_paths or []),
-        "required": bool(required),
-        "recommended": bool(recommended),
+        "id": raw["id"],
+        "kind": raw.get("kind") or "cli",
+        "capabilities": list(raw.get("capabilities") or []),
+        "argv": list(raw.get("argv") or []),
+        "alternates": [list(a) for a in (raw.get("alternates") or [])],
+        "module": raw.get("module") or "",
+        "images": list(raw.get("images") or []),
+        "prefix": raw.get("prefix") or "",
+        "prefixes": list(raw.get("prefixes") or []),
+        "extra_paths": list(raw.get("extra_paths") or []),
+        "required": bool(raw.get("required")),
+        "recommended": bool(raw.get("recommended")),
         "docs": docs,
-        "install": install or _install("manual", docs=docs,
-                                       shell="按官方文档安装", notes="没有固定安装配方"),
-        "fallback": fallback or _fallback([], "按 atomic-capabilities.md §11 选择替代路径"),
-        "notes": notes,
-        "version_must_contain": version_must_contain,
-        "ok_returncodes": list(ok_returncodes or [0]),
+        "install": install,
+        "fallback": fallback,
+        "notes": raw.get("notes") or "",
+        "version_must_contain": raw.get("version_must_contain") or "",
+        "ok_returncodes": list(raw.get("ok_returncodes") or [0]),
     }
 
 
-# ── 原子能力（与 references/atomic-capabilities.md §2 对齐）──────────────────
-# tools 为空表示该能力没有单一默认工具，或需要物理接触/人工判断；manual 字段
-# 写明替代路径，避免把“没有工具”误报成“能力缺失”。
-CAPABILITIES: List[Dict[str, Any]] = [
-    {"id": "R1", "name": "固件格式识别", "phases": ["P1"], "primary": "file",
-     "tools": ["file", "binwalk", "moria"], "manual": "",
-     "fallback": "magic bytes 手工核对"},
-    {"id": "R2", "name": "熵分布扫描", "phases": ["P1"], "primary": "moria",
-     "tools": ["moria", "binwalk"], "manual": "", "fallback": "binwalk -E"},
-    {"id": "R3", "name": "头部与分区解析", "phases": ["P1"], "primary": "binwalk",
-     "tools": ["binwalk", "moria"], "manual": "", "fallback": "按偏移 dd，手工解析"},
-    {"id": "R4", "name": "版本与型号提取", "phases": ["P1"], "primary": "rg",
-     "tools": ["rg", "strings"], "manual": "", "fallback": "grep -r / strings"},
-    {"id": "E1", "name": "递归解包", "phases": ["P1"], "primary": "unblob",
-     "tools": ["unblob", "binwalk", "moria"], "manual": "",
-     "fallback": "binwalk v3 递归 / moria -e"},
-    {"id": "E2", "name": "SquashFS 解包", "phases": ["P1"], "primary": "unsquashfs",
-     "tools": ["unsquashfs", "moria"], "manual": "", "fallback": "moria -e"},
-    {"id": "E3", "name": "UBI / UBIFS 解包", "phases": ["P1"],
-     "primary": "ubireader_extract_images", "tools": ["ubireader_extract_images", "moria"],
-     "manual": "", "fallback": "moria -e"},
-    {"id": "E4", "name": "JFFS2 解包", "phases": ["P1"], "primary": "jefferson",
-     "tools": ["jefferson", "moria"], "manual": "", "fallback": "moria -e"},
-    {"id": "E5", "name": "ext / F2FS / EROFS / cramfs / romfs",
-     "phases": ["P1"], "primary": "moria",
-     "tools": ["moria", "debugfs", "dump.f2fs", "fsck.erofs", "cramfsck"],
-     "manual": "", "fallback": "debugfs / dump.f2fs / fsck.erofs / cramfsck"},
-    {"id": "E6", "name": "内核提取", "phases": ["P1"], "primary": "binwalk",
-     "tools": ["binwalk", "moria"], "manual": "", "fallback": "按 R3 偏移 dd"},
-    {"id": "E7", "name": "DTB / bootargs 提取", "phases": ["P1"], "primary": "dtc",
-     "tools": ["dtc"], "manual": "", "fallback": "strings 找 bootargs / uImage 头解析"},
-    {"id": "E8", "name": "内核符号恢复", "phases": ["P1"], "primary": "vmlinux-to-elf",
-     "tools": ["vmlinux-to-elf"], "manual": "", "fallback": "手工符号恢复，成本高"},
-    {"id": "E9", "name": "加密固件判定与解密", "phases": ["P1"], "primary": "",
-     "tools": [], "manual": "熵 + 魔数 + 头部规律判据（atomic-capabilities.md §3.1 E 分支）",
-     "fallback": "moria -E / binwalk -E 只圈边界，不负责解密"},
-    {"id": "C1", "name": "凭据 / 密钥 / 哈希扫描", "phases": ["P3"], "primary": "mithril",
-     "tools": ["mithril", "rg", "firmwalker"], "manual": "",
-     "fallback": "firmwalker + 自写 rg 规则（可信度下降）"},
-    {"id": "C2", "name": "SBOM 生成", "phases": ["P3"], "primary": "mithril",
-     "tools": ["mithril"], "manual": "", "fallback": "无等价替代，需人工整理"},
-    {"id": "C3", "name": "组件 CVE 比对", "phases": ["P3"], "primary": "mithril",
-     "tools": ["mithril"], "manual": "", "fallback": "在线 CVE 查询（注意断网与可信度）"},
-    {"id": "C4", "name": "启动与信任姿态", "phases": ["P3"], "primary": "mithril",
-     "tools": ["mithril"], "manual": "", "fallback": "读 U-Boot env / 手工检查密钥"},
-    {"id": "C5", "name": "许可证与文件来源", "phases": ["P3"], "primary": "mithril",
-     "tools": ["mithril"], "manual": "", "fallback": "手工抽样，覆盖不完整"},
-    {"id": "C6", "name": "源码 / 脚本结构级扫描", "phases": ["P3"], "primary": "ast-grep",
-     "tools": ["ast-grep", "semgrep"], "manual": "",
-     "fallback": "rg -U 多行正则（可能漏检/误报）"},
-    {"id": "F1", "name": "文件类型清单", "phases": ["P1"], "primary": "fd",
-     "tools": ["fd", "file"], "manual": "", "fallback": "find + file"},
-    {"id": "F2", "name": "SUID / SGID 与权限异常", "phases": ["P1"], "primary": "fd",
-     "tools": ["fd"], "manual": "Windows 上权限位不可靠时用 fw_triage.py",
-     "fallback": "find -perm -4000"},
-    {"id": "F3", "name": "启动链读取", "phases": ["P1"], "primary": "",
-     "tools": [], "manual": "直接读 etc/init.d、rcS、inittab、rc.local",
-     "fallback": "rg / less 人工读取"},
-    {"id": "F4", "name": "动作关键字枚举", "phases": ["P3"], "primary": "rg",
-     "tools": ["rg"], "manual": "", "fallback": "grep -r"},
-    {"id": "F5", "name": "硬编码凭据与 URL 面", "phases": ["P3"], "primary": "mithril",
-     "tools": ["mithril", "rg"], "manual": "", "fallback": "rg 规则集 + 人工复核"},
-    {"id": "F6", "name": "NVRAM / 配置键面", "phases": ["P3"], "primary": "strings",
-     "tools": ["strings"], "manual": "", "fallback": "rg -a"},
-    {"id": "B1", "name": "架构与 ABI 识别", "phases": ["P3"], "primary": "readelf",
-     "tools": ["readelf", "file"], "manual": "", "fallback": "file / Python ELF 解析"},
-    {"id": "B2", "name": "符号与导入表", "phases": ["P3"], "primary": "readelf",
-     "tools": ["readelf", "nm", "strings"], "manual": "", "fallback": "objdump -T"},
-    {"id": "B3", "name": "危险符号与调用点定位", "phases": ["P3"], "primary": "radare2",
-     "tools": ["radare2", "objdump"], "manual": "", "fallback": "objdump + nm + strings"},
-    {"id": "B4", "name": "反编译与 xref 追链", "phases": ["P3"], "primary": "ida-mcp",
-     "tools": ["ida-mcp", "pyghidra-mcp", "ghidra", "radare2", "objdump"],
-     "manual": "", "fallback": "Ghidra 无头 → radare2 手工 → objdump + strings"},
-    {"id": "B5", "name": "分发入口表枚举", "phases": ["P3"], "primary": "",
-     "tools": [], "manual": "找 .cgi/.asp 名表与函数指针数组（fat handler-table / 自写脚本）",
-     "fallback": "人工枚举，覆盖不完整"},
-    {"id": "B6", "name": "数据流 / 污点追踪", "phases": ["P3"], "primary": "",
-     "tools": [], "manual": "人工三跳追链 + IDA MCP / fat taint",
-     "fallback": "人工追链，耗时但结论强度不变"},
-    {"id": "B7", "name": "跨请求污点配对", "phases": ["P3"], "primary": "",
-     "tools": [], "manual": "写面枚举 → 读端枚举 → 反向溯源（SKILL.md Track C）",
-     "fallback": "人工，覆盖有限"},
-    {"id": "B8", "name": "二进制比对定位补丁", "phases": ["P3"], "primary": "",
-     "tools": [], "manual": "BinDiff / Diaphora / Ghidriff / fat inspect update",
-     "fallback": "人工 diff / 函数哈希"},
-    {"id": "B9", "name": "FLIRT / 库函数识别", "phases": ["P3"], "primary": "ghidra",
-     "tools": ["ghidra", "ida-mcp"], "manual": "", "fallback": "手工识别库函数"},
-    {"id": "D1", "name": "整机启动", "phases": ["P4"], "primary": "qemu-system",
-     "tools": ["qemu-system"], "manual": "", "fallback": "QEMU user + chroot"},
-    {"id": "D2", "name": "启动失败诊断", "phases": ["P4"], "primary": "",
-     "tools": [], "manual": "读串口输出 / dmesg，按 §3.2 分支定位",
-     "fallback": "人工诊断"},
-    {"id": "D3", "name": "rootfs 可挂载性修补", "phases": ["P4"], "primary": "",
-     "tools": [], "manual": "改 init、补 /dev、stub 硬件依赖、换 root=/mtdparts",
-     "fallback": "人工修补"},
-    {"id": "D4", "name": "服务可达性探测", "phases": ["P4"], "primary": "nmap",
-     "tools": ["nmap", "nc"], "manual": "", "fallback": "curl / nc 手工探测"},
-    {"id": "D5", "name": "单二进制运行", "phases": ["P4"], "primary": "qiling-image",
-     "tools": ["qiling-image", "qiling", "qemu-user"], "manual": "",
-     "fallback": "QEMU user + chroot / Unicorn 手写 harness"},
-    {"id": "D6", "name": "依赖打桩", "phases": ["P4"], "primary": "qiling",
-     "tools": ["qiling", "qiling-image"], "manual": "", "fallback": "Unicorn 手写 harness"},
-    {"id": "D7", "name": "sink 参数真值观测", "phases": ["P4"], "primary": "qiling",
-     "tools": ["qiling", "qiling-image"], "manual": "", "fallback": "gdb-multiarch 手工断点"},
-    {"id": "D8", "name": "系统调用 / 文件访问追踪", "phases": ["P4"], "primary": "qemu-user",
-     "tools": ["qemu-user", "gdb-multiarch"], "manual": "", "fallback": "strace / ltrace"},
-    {"id": "D9", "name": "覆盖率采集", "phases": ["P4"], "primary": "qiling",
-     "tools": ["qiling", "qiling-image"], "manual": "", "fallback": "AFL++ map"},
-    {"id": "D10", "name": "模糊测试", "phases": ["P4"], "primary": "afl-fuzz",
-     "tools": ["afl-fuzz", "honggfuzz"], "manual": "", "fallback": "libFuzzer（有源码时）"},
-    {"id": "D11", "name": "崩溃 triage", "phases": ["P4"], "primary": "gdb-multiarch",
-     "tools": ["gdb-multiarch", "qiling"], "manual": "", "fallback": "手工复现 / 判 PC"},
-    {"id": "D12", "name": "插桩与动态调试", "phases": ["P4"], "primary": "gdb-multiarch",
-     "tools": ["gdb-multiarch", "frida", "qiling"], "manual": "", "fallback": "Qiling --gdb"},
-    {"id": "N1", "name": "端口与协议指纹", "phases": ["P4"], "primary": "nmap",
-     "tools": ["nmap"], "manual": "", "fallback": "nc / 协议库手工探测"},
-    {"id": "N2", "name": "协议客户端与重放", "phases": ["P4"], "primary": "",
-     "tools": [], "manual": "MQTT/CoAP/UPnP 客户端、Scapy、boofuzz 按需",
-     "fallback": "手工构造请求"},
-    {"id": "N3", "name": "流量拦截代理", "phases": ["P4"], "primary": "",
-     "tools": [], "manual": "mitmproxy / IoXY / Burp（需授权）",
-     "fallback": "抓包 + 手工重放"},
-    {"id": "N4", "name": "主动情报查询", "phases": ["P4"], "primary": "",
-     "tools": [], "manual": "Shodan / Censys / ZoomEye / FCC ID（需授权）",
-     "fallback": "不做主动查询，仅用被动情报"},
-    {"id": "H1", "name": "UART 控制台", "phases": ["P4"], "primary": "",
-     "tools": [], "manual": "物理接触：万用表 + screen /dev/ttyUSB0 115200",
-     "fallback": "不适用（需硬件）"},
-    {"id": "H2", "name": "SPI NOR 读取", "phases": ["P4"], "primary": "",
-     "tools": [], "manual": "物理接触：CH341A + flashrom",
-     "fallback": "不适用（需硬件）"},
-    {"id": "H3", "name": "eMMC / JTAG / SWD", "phases": ["P4"], "primary": "",
-     "tools": [], "manual": "物理接触：读卡器 / JTAGulator / OpenOCD / pyOCD",
-     "fallback": "不适用（需硬件）"},
-    {"id": "H4", "name": "故障注入", "phases": ["P4"], "primary": "",
-     "tools": [], "manual": "物理接触：ChipWhisperer（电压/时钟毛刺）",
-     "fallback": "不适用（需硬件）"},
-]
-CAP_BY_ID = {c["id"]: c for c in CAPABILITIES}
+def _norm_cap(raw: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": raw["id"],
+        "name": raw["name"],
+        "phases": list(raw["phases"]),
+        "primary": raw.get("primary") or "",
+        "tools": list(raw.get("tools") or []),
+        "manual": raw.get("manual") or "",
+        "fallback": raw.get("fallback") or "",
+    }
 
-# ── 工具注册表 ───────────────────────────────────────────────────────────────
-# 只登记能明确探测版本的实现；不确定的“可能有”不写进来，避免制造虚假安全感。
-TOOLS: List[Dict[str, Any]] = [
-    _tool("python", "python-runtime", ["R4", "B1", "B2"], required=True, recommended=True,
-          docs="https://www.python.org/downloads/",
-          install=_install("system", docs="https://www.python.org/downloads/",
-                           shell="安装 Python 3.8+ 并确保 python 在 PATH",
-                           notes="本 skill 的脚本都要求 Python"),
-          fallback=_fallback([], "缺少 Python 时本 skill 无法运行"),
-          notes="运行本脚本的解释器；版本取 sys.version"),
-    _tool("file", "cli", ["R1", "B1"], argv=["file", "--version"], recommended=True,
-          docs="https://www.darwinsys.com/file/",
-          install=_install("apt", docs="https://www.darwinsys.com/file/",
-                           shell="sudo apt install file  # Debian/Ubuntu；macOS 自带",
-                           requires=["apt"], notes="Windows 可用 w64devkit / Git Bash"),
-          fallback=_fallback(["moria", "binwalk"], "moria/binwalk 的识别结果可替代 file 的魔数判断"),
-          notes="R1 首选；没有时仍可用 Python 魔数猜测"),
-    _tool("moria", "cli", ["R1", "R2", "R3", "E1", "E2", "E3", "E4", "E5", "E6"],
-          argv=["moria", "--version"], alternates=[["moria", "version"]], recommended=True,
-          docs="https://github.com/nmatt0/moria",
-          install=_install("build-from-source", auto=False, docs="https://github.com/nmatt0/moria",
-                           shell="git clone https://github.com/nmatt0/moria.git && cmake -S moria -B moria/build -DCMAKE_BUILD_TYPE=Release && cmake --build moria/build -j && cmake --install moria/build --prefix ~/.local",
-                           requires=["git", "cmake", "c++"],
-                           notes="官方 release 也提供 .deb；先看 release assets 再决定"),
-          fallback=_fallback(["binwalk", "unblob", "unsquashfs"],
-                             "E1-E6 覆盖下降；未知块可能丢失，报告需注明降级"),
-          notes="单 C++ 二进制，进程内覆盖最全；Phase 1 首选"),
-    _tool("binwalk", "cli", ["R1", "R2", "R3", "E1", "E6"],
-          argv=["binwalk", "--version"], recommended=True,
-          docs="https://github.com/ReFirmLabs/binwalk",
-          install=_install("cargo", auto=True, argv=["cargo", "install", "binwalk", "--locked"],
-                           docs="https://github.com/ReFirmLabs/binwalk",
-                           requires=["cargo"], notes="binwalk v3 是 Rust 实现；旧版 Python 包不要混用"),
-          fallback=_fallback(["moria", "unblob"], "R2/E1 可替代，但递归覆盖较弱"),
-          notes="R2 熵扫描和 R3 分区列表仍好用"),
-    _tool("unblob", "cli", ["E1"], argv=["unblob", "--version"], recommended=True,
-          docs="https://github.com/onekey-sec/unblob",
-          install=_install("uv-tool", auto=True, argv=["uv", "tool", "install", "unblob"],
-                           docs="https://github.com/onekey-sec/unblob", requires=["uv"],
-                           notes="官方镜像 ghcr.io/onekey-sec/unblob 也适合一次性使用"),
-          fallback=_fallback(["binwalk", "moria"], "78+ 格式覆盖下降，未知块 carve 能力变弱"),
-          notes="E1 首选；有官方 Docker 镜像"),
-    _tool("unsquashfs", "cli", ["E2"], argv=["unsquashfs", "-version"], recommended=True,
-          docs="https://github.com/plougher/squashfs-tools",
-          install=_install("apt", docs="https://github.com/plougher/squashfs-tools",
-                           shell="sudo apt install squashfs-tools  # 非标压缩需 sasquatch 版",
-                           requires=["apt"], notes="厂商镜像常用非标压缩，必要时换 sasquatch"),
-          fallback=_fallback(["moria"], "moria -e 支持多压缩后端"),
-          notes="标准 SquashFS 首选；非标压缩看 sasquatch",
-          ok_returncodes=[0, 1]),
-    _tool("ubireader_extract_images", "cli", ["E3"],
-          argv=["ubireader_extract_images", "--version"], recommended=True,
-          docs="https://github.com/jrspruitt/ubi_reader",
-          install=_install("pip", auto=False, docs="https://github.com/jrspruitt/ubi_reader",
-                           shell="uv tool install ubi_reader  # 或 pip install ubi_reader",
-                           requires=["uv"], notes="包名 ubi_reader，命令名带前缀"),
-          fallback=_fallback(["moria"], "moria -e 可重建 UBI 卷"),
-          notes="E3 首选"),
-    _tool("jefferson", "cli", ["E4"], argv=["jefferson", "--version"], recommended=True,
-          docs="https://github.com/onekey-sec/jefferson",
-          install=_install("uv-tool", auto=True, argv=["uv", "tool", "install", "jefferson"],
-                           docs="https://github.com/onekey-sec/jefferson", requires=["uv"]),
-          fallback=_fallback(["moria"], "moria -e 支持 JFFS2"),
-          notes="E4 首选"),
-    _tool("debugfs", "cli", ["E5"], argv=["debugfs", "-V"], recommended=False,
-          docs="https://e2fsprogs.sourceforge.net/",
-          install=_install("apt", docs="https://e2fsprogs.sourceforge.net/",
-                           shell="sudo apt install e2fsprogs", requires=["apt"]),
-          fallback=_fallback(["moria"], "moria -e 支持 ext2/3/4"),
-          notes="ext2/3/4 单文件系统实现"),
-    _tool("dump.f2fs", "cli", ["E5"], argv=["dump.f2fs", "-V"], recommended=False,
-          docs="https://git.kernel.org/pub/scm/linux/kernel/git/jaegeuk/f2fs-tools.git",
-          install=_install("apt", docs="https://git.kernel.org/pub/scm/linux/kernel/git/jaegeuk/f2fs-tools.git",
-                           shell="sudo apt install f2fs-tools", requires=["apt"]),
-          fallback=_fallback(["moria"], "moria -e 支持 F2FS"),
-          notes="F2FS 单文件系统实现"),
-    _tool("fsck.erofs", "cli", ["E5"], argv=["fsck.erofs", "-V"], recommended=False,
-          docs="https://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git",
-          install=_install("apt", docs="https://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git",
-                           shell="sudo apt install erofs-utils", requires=["apt"]),
-          fallback=_fallback(["moria"], "moria -e 支持 EROFS"),
-          notes="EROFS 单文件系统实现"),
-    _tool("cramfsck", "cli", ["E5"], argv=["cramfsck", "-V"], recommended=False,
-          docs="https://github.com/npitre/cramfs-tools",
-          install=_install("apt", docs="https://github.com/npitre/cramfs-tools",
-                           shell="sudo apt install cramfsprogs", requires=["apt"]),
-          fallback=_fallback(["moria"], "moria -e 支持 cramfs"),
-          notes="cramfs 单文件系统实现"),
-    _tool("dtc", "cli", ["E7"], argv=["dtc", "--version"], recommended=False,
-          docs="https://git.kernel.org/pub/scm/utils/dtc/dtc.git",
-          install=_install("apt", docs="https://git.kernel.org/pub/scm/utils/dtc/dtc.git",
-                           shell="sudo apt install device-tree-compiler", requires=["apt"]),
-          fallback=_fallback(["strings"], "只能找 bootargs，无法反编译 DTB"),
-          notes="DTB -> DTS；决定 root= 与 mtdparts"),
-    _tool("vmlinux-to-elf", "cli", ["E8"], argv=["vmlinux-to-elf", "--version"],
-          recommended=False, docs="https://github.com/marin-m/vmlinux-to-elf",
-          install=_install("uv-tool", auto=True, argv=["uv", "tool", "install", "vmlinux-to-elf"],
-                           docs="https://github.com/marin-m/vmlinux-to-elf", requires=["uv"]),
-          fallback=_fallback([], "没有等价替代，手工恢复符号成本高"),
-          notes="剥离符号内核的符号恢复"),
-    _tool("mithril", "cli", ["C1", "C2", "C3", "C4", "C5", "F5"],
-          argv=["mithril", "--version"], recommended=True,
-          docs="https://github.com/nmatt0/mithril",
-          install=_install("official-release", auto=False, docs="https://github.com/nmatt0/mithril",
-                           shell="从 GitHub release 下载对应架构的 mithril 二进制并放到 ~/.local/bin",
-                           notes="官方 release 提供 Linux amd64/arm64；不要在审计中在线拉 CVE 镜像"),
-          fallback=_fallback(["rg", "firmwalker"],
-                             "C1 可部分替代；C2-C5 的 SBOM/KEV/EPSS 关联丢失，可信度下降"),
-          notes="C1-C5 首选；CVE 命中只是线索，不是漏洞"),
-    _tool("ast-grep", "cli", ["C6"], argv=["ast-grep", "--version"],
-          alternates=[["sg", "--version"]], recommended=True,
-          docs="https://ast-grep.github.io/",
-          install=_install("uv-tool", auto=True, argv=["uv", "tool", "install", "ast-grep-cli"],
-                           docs="https://ast-grep.github.io/guide/quick-start.html",
-                           requires=["uv"], notes="也可 npm i -g @ast-grep/cli；Linux 上 sg 是 setgroups，优先 ast-grep"),
-          fallback=_fallback(["semgrep", "rg"],
-                             "结构级过滤失效 -> 注释/字符串误报回归；Cross-line 可能漏检"),
-          notes="C6 首选；sink_scan.py 的 structural 规则会调用它",
-          version_must_contain="ast-grep"),
-    _tool("semgrep", "cli", ["C6"], argv=["semgrep", "--version"],
-          alternates=[["semgrep", "--disable-version-check", "--version"]], recommended=False,
-          docs="https://semgrep.dev/docs/",
-          install=_install("uv-tool", auto=True, argv=["uv", "tool", "install", "semgrep"],
-                           docs="https://semgrep.dev/docs/getting-started/", requires=["uv"]),
-          fallback=_fallback(["ast-grep", "rg"], "taint 模式不可用；人工三跳追链"),
-          notes="源码类目标的跨函数污点；剥离 ELF 不适用"),
-    _tool("rg", "cli", ["R4", "F4", "F5", "C1"], argv=["rg", "--version"],
-          recommended=True, docs="https://github.com/BurntSushi/ripgrep",
-          install=_install("uv-tool", auto=True, argv=["uv", "tool", "install", "ripgrep"],
-                           docs="https://github.com/BurntSushi/ripgrep", requires=["uv"],
-                           notes="cargo install ripgrep / apt install ripgrep 也可以"),
-          fallback=_fallback(["grep"], "grep -r -I；噪声变大、变慢，结论不变"),
-          notes="R4/F4/F5 首选；-uu 关忽略、-t 限类型"),
-    _tool("fd", "cli", ["F1", "F2"], argv=["fd", "--version"], recommended=False,
-          docs="https://github.com/sharkdp/fd",
-          install=_install("uv-tool", auto=True, argv=["uv", "tool", "install", "fd-find"],
-                           docs="https://github.com/sharkdp/fd", requires=["uv"],
-                           notes="apt install fd-find；命令名可能是 fdfind"),
-          fallback=_fallback(["find"], "find -perm / 语法更长，结论不变"),
-          notes="F1/F2 首选"),
-    _tool("strings", "cli", ["R4", "F6", "B2"], argv=["strings", "--version"],
-          recommended=False, docs="https://sourceware.org/binutils/docs/binutils/strings.html",
-          install=_install("apt", docs="https://sourceware.org/binutils/docs/binutils/strings.html",
-                           shell="sudo apt install binutils", requires=["apt"]),
-          fallback=_fallback(["rg"], "rg -a 可替代大部分字符串搜索"),
-          notes="F6 / B2 的轻量入口"),
-    _tool("readelf", "cli", ["B1", "B2"], argv=["readelf", "--version"],
-          recommended=True, docs="https://sourceware.org/binutils/docs/binutils/readelf.html",
-          install=_install("apt", docs="https://sourceware.org/binutils/docs/binutils/readelf.html",
-                           shell="sudo apt install binutils", requires=["apt"]),
-          fallback=_fallback(["objdump", "file"], "B1/B2 部分字段缺失；结论不变"),
-          notes="B1/B2 首选；fw_triage.py 也内置 ELF 解析"),
-    _tool("nm", "cli", ["B2"], argv=["nm", "--version"], recommended=False,
-          docs="https://sourceware.org/binutils/docs/binutils/nm.html",
-          install=_install("apt", docs="https://sourceware.org/binutils/docs/binutils/nm.html",
-                           shell="sudo apt install binutils", requires=["apt"]),
-          fallback=_fallback(["readelf"], "readelf -s 可替代"),
-          notes="导入/导出符号"),
-    _tool("objdump", "cli", ["B2", "B3", "B4"], argv=["objdump", "--version"],
-          recommended=False, docs="https://sourceware.org/binutils/docs/binutils/objdump.html",
-          install=_install("apt", docs="https://sourceware.org/binutils/docs/binutils/objdump.html",
-                           shell="sudo apt install binutils", requires=["apt"]),
-          fallback=_fallback(["readelf", "radare2"], "反汇编可读性下降，手工成本上升"),
-          notes="B3/B4 的最后一道可用替代"),
-    _tool("radare2", "cli", ["B3", "B4"], argv=["radare2", "-v"],
-          alternates=[["r2", "-v"]], recommended=False,
-          docs="https://github.com/radareorg/radare2",
-          install=_install("official-release", auto=False, docs="https://github.com/radareorg/radare2",
-                           shell="git clone https://github.com/radareorg/radare2 && radare2/sys/install.sh",
-                           requires=["git"], notes="也可用发行版包；避免用 pip 的旧包装"),
-          fallback=_fallback(["objdump"], "xref/反编译能力下降"),
-          notes="B3 首选；可脚本化 axt"),
-    _tool("ghidra", "cli", ["B4", "B9"], argv=["analyzeHeadless"],
-          extra_paths=["$GHIDRA_HOME/support/analyzeHeadless",
-                       "$GHIDRA_HOME/support/analyzeHeadless.bat"],
-          recommended=False, docs="https://github.com/NationalSecurityAgency/ghidra",
-          install=_install("official-release", auto=False, docs="https://github.com/NationalSecurityAgency/ghidra",
-                           shell="从官方 release 解压 Ghidra，设置 GHIDRA_HOME，并安装匹配的 JDK",
-                           notes="体积大、需要 JDK；本 skill 不会自动下载 Ghidra"),
-          fallback=_fallback(["radare2", "objdump"], "反编译质量下降，xref 需手工"),
-          notes="B4 的免费语义级路线；需 GHIDRA_HOME 或 PATH"),
-    _tool("ida-mcp", "cli", ["B4", "B9"], argv=["ida-mcp", "--version"],
-          recommended=False, docs="https://github.com/mrexodia/ida-pro-mcp",
-          install=_install("manual", auto=False, docs="https://github.com/mrexodia/ida-pro-mcp",
-                           shell="按官方文档安装 IDA 插件与 MCP server", notes="需要 IDA Pro 授权"),
-          fallback=_fallback(["ghidra", "radare2"], "没有 IDA 时走 Ghidra/radare2 链"),
-          notes="B4 的最省人力路线；需商业授权"),
-    _tool("pyghidra-mcp", "cli", ["B4"], argv=["pyghidra-mcp", "--version"],
-          recommended=False, docs="https://github.com/clearbluejar/pyghidra-mcp",
-          install=_install("uv-tool", auto=False, argv=["uv", "tool", "install", "pyghidra-mcp"],
-                           docs="https://github.com/clearbluejar/pyghidra-mcp", requires=["uv"],
-                           notes="仍需本机 Ghidra/JDK；版本兼容性按官方 README"),
-          fallback=_fallback(["ghidra"], "MCP 断链，回到 analyzeHeadless 脚本"),
-          notes="Ghidra 的 MCP 封装；不是 Ghidra 本体"),
-    _tool("qiling", "python-module", ["D5", "D6", "D7", "D9", "D11", "D12"],
-          module="qiling", recommended=False, docs="https://docs.qiling.io/",
-          install=_install("pip", auto=False,
-                           argv=["uv", "pip", "install",
-                                 "qiling @ git+https://github.com/qilingframework/qiling@86c927cb329993b14e2586e04d1dd7a90deee5fb"],
-                           docs="https://docs.qiling.io/en/latest/install/", requires=["uv", "git"],
-                           notes="宿主机安装不等于适配器可用；adapter_qiling.py 固定经 sandbox_run.py 使用镜像"),
-          fallback=_fallback(["qiling-image", "qemu-user"], "单二进制 Hook 能力下降"),
-          notes="检测的是 python -c import qiling；adapter 实际优先用容器镜像"),
-    _tool("qiling-image", "container-image", ["D5", "D6", "D7", "D9", "D11", "D12"],
-          images=["iot-fw/qiling:1.4.11", "iot-fw/qiling:latest"], recommended=False,
-          docs="https://github.com/qilingframework/qiling",
-          install=_install("container-build", auto=True,
-                           argv=["{container}", "build", "-t", "iot-fw/qiling:1.4.11",
-                                 "{root}/assets/qiling"],
-                           docs="https://docs.qiling.io/en/latest/install/",
-                           requires=["docker"], notes="推荐路线；构建含 Qiling 1.4.11 的固定镜像"),
-          fallback=_fallback(["qiling", "qemu-user"], "无容器运行时则 D5-D7 降级"),
-          notes="adapter_qiling.py 的真实执行环境；版本固定为 1.4.11"),
-    _tool("qemu-system", "family", ["D1"], prefix="qemu-system-", recommended=False,
-          docs="https://www.qemu.org/docs/master/system/",
-          install=_install("apt", docs="https://www.qemu.org/download/",
-                           shell="sudo apt install qemu-system-mips qemu-system-arm qemu-system-aarch64",
-                           requires=["apt"], notes="按目标架构只装需要的包"),
-          fallback=_fallback(["qemu-user"], "整机启动不可用，只能证单二进制"),
-          notes="D1 整机启动；检测 PATH 中所有 qemu-system-*"),
-    _tool("qemu-user", "family", ["D5", "D8"],
-          prefixes=["qemu-mips", "qemu-mipsel", "qemu-arm", "qemu-aarch64", "qemu-x86_64"],
-          recommended=False, docs="https://www.qemu.org/docs/master/user/",
-          install=_install("apt", docs="https://www.qemu.org/download/",
-                           shell="sudo apt install qemu-user-static binfmt-support",
-                           requires=["apt"]),
-          fallback=_fallback(["qiling"], "依赖/系统调用覆盖下降"),
-          notes="D5/D8 的轻量替代；qemu-*-static 更适合 chroot"),
-    _tool("afl-fuzz", "cli", ["D10"], argv=["afl-fuzz", "-V"], recommended=False,
-          docs="https://github.com/AFLplusplus/AFLplusplus",
-          install=_install("apt", docs="https://github.com/AFLplusplus/AFLplusplus",
-                           shell="sudo apt install afl++  # 或从源码构建", requires=["apt"]),
-          fallback=_fallback(["honggfuzz"], "二进制模式支持弱"),
-          notes="D10 首选；-Q/-U/-O 模式按目标选",
-          ok_returncodes=[0, 1]),
-    _tool("honggfuzz", "cli", ["D10"], argv=["honggfuzz", "--version"], recommended=False,
-          docs="https://github.com/google/honggfuzz",
-          install=_install("apt", docs="https://github.com/google/honggfuzz",
-                           shell="sudo apt install honggfuzz", requires=["apt"]),
-          fallback=_fallback(["afl-fuzz"], "覆盖与生态较弱"),
-          notes="D10 备选"),
-    _tool("gdb-multiarch", "cli", ["D8", "D11", "D12"], argv=["gdb-multiarch", "--version"],
-          recommended=False, docs="https://sourceware.org/gdb/",
-          install=_install("apt", docs="https://sourceware.org/gdb/",
-                           shell="sudo apt install gdb-multiarch", requires=["apt"]),
-          fallback=_fallback(["qiling"], "断点/寄存器观测能力下降"),
-          notes="跨架构崩溃 triage 与调试"),
-    _tool("frida", "python-module", ["D12"], module="frida", recommended=False,
-          docs="https://frida.re/docs/installation/",
-          install=_install("uv-tool", auto=True, argv=["uv", "tool", "install", "frida-tools"],
-                           docs="https://frida.re/docs/installation/", requires=["uv"]),
-          fallback=_fallback(["gdb-multiarch"], "动态插桩能力下降"),
-          notes="D12；需目标架构的 frida-server"),
-    _tool("nmap", "cli", ["D4", "N1"], argv=["nmap", "--version"], recommended=False,
-          docs="https://nmap.org/book/install.html",
-          install=_install("apt", docs="https://nmap.org/book/install.html",
-                           shell="sudo apt install nmap", requires=["apt"]),
-          fallback=_fallback(["nc"], "服务指纹能力下降"),
-          notes="D4/N1；只在授权范围内扫描"),
-    _tool("nc", "cli", ["D4"], argv=["nc", "-h"], recommended=False,
-          docs="https://nc110.sourceforge.net/",
-          install=_install("apt", docs="https://nc110.sourceforge.net/",
-                           shell="sudo apt install netcat-openbsd", requires=["apt"]),
-          fallback=_fallback([], "用 curl / socat / Python socket 手工探测"),
-          notes="D4 的轻量探测；版本命令因实现而异"),
-    _tool("docker", "cli", ["D5", "D6", "D7", "D9", "D11", "D12"], argv=["docker", "--version"],
-          recommended=True, docs="https://docs.docker.com/engine/install/",
-          install=_install("official-release", auto=False, docs="https://docs.docker.com/engine/install/",
-                           shell="按官方文档安装 Docker Engine；Windows 用 Docker Desktop/WSL2",
-                           notes="本 skill 的沙箱与 Qiling 镜像依赖容器运行时"),
-          fallback=_fallback(["podman"], "命令基本兼容；sandbox_run.py 会探测可用运行时"),
-          notes="不可信固件执行的基础设施"),
-    _tool("podman", "cli", ["D5", "D6", "D7", "D9", "D11", "D12"], argv=["podman", "--version"],
-          recommended=False, docs="https://podman.io/docs/installation",
-          install=_install("official-release", auto=False, docs="https://podman.io/docs/installation",
-                           shell="按官方文档安装 podman", notes="无 root 容器运行时"),
-          fallback=_fallback(["docker"], "镜像构建/运行命令可能略有差异"),
-          notes="docker 的替代运行时"),
-    _tool("uv", "cli", [], argv=["uv", "--version"], recommended=True,
-          docs="https://docs.astral.sh/uv/",
-          install=_install("official-release", auto=False, docs="https://docs.astral.sh/uv/getting-started/installation/",
-                           shell="按官方安装脚本安装 uv；Windows 可用 winget install astral-sh.uv",
-                           notes="本 skill 推荐的环境管理器；不是运行必需"),
-          fallback=_fallback(["python"], "改用 venv + pip；不影响脚本逻辑"),
-          notes="Python 环境与工具安装入口"),
-    _tool("firmwalker", "cli", ["C1"], argv=["firmwalker", "--help"], recommended=False,
-          docs="https://github.com/craigz28/firmwalker",
-          install=_install("manual", auto=False, docs="https://github.com/craigz28/firmwalker",
-                           shell="按官方 README 安装 Node 依赖", notes="C1 的降级实现"),
-          fallback=_fallback(["rg", "mithril"], "规则覆盖有限，CVE/SBOM 关联缺失"),
-          notes="mithril 缺席时的 C1 替代"),
-]
-TOOL_BY_ID = {t["id"]: t for t in TOOLS}
+
+def _registry_source(path: str) -> str:
+    abspath = os.path.abspath(path)
+    try:
+        rel = os.path.relpath(abspath, ROOT)
+    except ValueError:
+        rel = abspath
+    if rel.startswith(".." + os.sep) or rel == "..":
+        rel = abspath
+    return rel.replace(os.sep, "/")
+
+
+def load_registry(path: str = DEFAULT_REGISTRY) -> Dict[str, Any]:
+    abspath = os.path.abspath(path)
+    try:
+        with open(abspath, "rb") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        raise RegistryError("无法读取：%s" % exc, abspath)
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise RegistryError("不是 UTF-8 文本：%s" % exc, abspath)
+    try:
+        doc = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RegistryError("JSON 解析失败（第 %d 行第 %d 列）：%s" % (
+            exc.lineno, exc.colno, exc.msg), abspath)
+    errors = _validate_registry(doc)
+    if errors:
+        shown = errors[:12]
+        more = "\n  ... 另有 %d 条" % (len(errors) - len(shown)) if len(errors) > len(shown) else ""
+        raise RegistryError("校验失败：\n  - " + "\n  - ".join(shown) + more, abspath)
+    return {
+        "path": abspath,
+        "source": _registry_source(abspath),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "version": doc["version"],
+        "p0_tools": list(doc["p0_tools"]),
+        "tools": [_norm_tool(t) for t in doc["tools"]],
+        "capabilities": [_norm_cap(c) for c in doc["capabilities"]],
+    }
+
+
+def init_registry(path: str = DEFAULT_REGISTRY) -> None:
+    global TOOLS, CAPABILITIES, CAP_BY_ID, TOOL_BY_ID, P0_TOOLS, REGISTRY_META
+    reg = load_registry(path)
+    TOOLS = reg["tools"]
+    CAPABILITIES = reg["capabilities"]
+    CAP_BY_ID = {c["id"]: c for c in CAPABILITIES}
+    TOOL_BY_ID = {t["id"]: t for t in TOOLS}
+    P0_TOOLS = tuple(reg["p0_tools"])
+    REGISTRY_META = {
+        "schema": REGISTRY_SCHEMA,
+        "version": reg["version"],
+        "tools": len(TOOLS),
+        "source": reg["source"],
+        "sha256": reg["sha256"],
+    }
+
+
+TOOLS: List[Dict[str, Any]] = []
+CAPABILITIES: List[Dict[str, Any]] = []
+CAP_BY_ID: Dict[str, Dict[str, Any]] = {}
+TOOL_BY_ID: Dict[str, Dict[str, Any]] = {}
+P0_TOOLS: tuple = ()
+REGISTRY_META: Dict[str, Any] = {}
+
 ALL_PHASES = [p for p, _ in PHASES]
-P0_TOOLS = ("python", "file", "uv")
 
 
 def _tool_phases(tool: Dict[str, Any]) -> List[str]:
@@ -968,8 +873,7 @@ def build_index(only: Optional[List[str]] = None, profile: str = "all",
             "python": platform.python_version(),
             "is_windows": os.name == "nt",
         },
-        "registry": {"version": "2026-11-06", "tools": len(TOOLS),
-                     "source": "scripts/tool_index.py"},
+        "registry": dict(REGISTRY_META),
         "profile": profile,
         "summary": summary,
         "tools": rows,
@@ -1155,6 +1059,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         description="Phase 0 工具索引：探测 moria/ast-grep/qiling 等实现，给出安装/降级路径")
     ap.add_argument("--out", help="把 tool-index/1.0 写到这个 JSON 路径")
+    ap.add_argument("--registry", default=DEFAULT_REGISTRY,
+                    help="工具注册表 JSON（默认 assets/tool-registry.json）")
     ap.add_argument("--json", action="store_true", help="把索引 JSON 打到 stdout")
     ap.add_argument("--only", help="只探测这些工具（逗号分隔）")
     ap.add_argument("--require", action="append", default=[], help="必需工具；缺失退出 3（可重复）")
@@ -1173,6 +1079,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         args.timeout = 0.5
     if args.timeout > 30:
         args.timeout = 30
+    try:
+        init_registry(args.registry)
+    except RegistryError as exc:
+        print("[error] 工具注册表不可用：%s" % exc, file=sys.stderr)
+        return 2
     only = _parse_ids(args.only)
     unknown = [x for x in only if x not in TOOL_BY_ID]
     if unknown:

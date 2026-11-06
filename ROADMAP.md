@@ -202,10 +202,11 @@ G1–G7 必须是代码校验器，而不是 Prompt、README 或报告模板。�
 记录命令、版本、退出码与结果。重点确认 Strict、Coverage、沙箱和结构化证据的真实调用路径。
 
 **现状**：2026-10 已完成一轮门禁、契约、沙箱入口与合成基准整改；M3/M4/M7 落地后
-selftest 覆盖 27 组 / 340 条断言，`exec_paths.py` 已给出 22 个脚本 / 12 条子进程调用的
-分类清单。2026-11-06 增加 Phase 0 前置的 `scripts/tool_index.py`：探测 41 个实现的版本与
-可用性，映射 `atomic-capabilities.md` 的 54 项能力，输出 `00-tool-index.json`；缺失工具
-给出官方文档、固定安装配方与 fallback，不让 Agent 在 Phase 1/4 才撞 `command not found`。沙箱已在无运行时、Python 桩运行时与 **Ubuntu 24.04.5 + Docker 29.9.2** 下验证
+selftest 覆盖 27 组 / 344 条断言，`exec_paths.py` 已给出 22 个脚本 / 12 条子进程调用的
+分类清单。2026-11-06 增加 Phase 0 前置的 `scripts/tool_index.py`：工具与能力清单外置在
+`assets/tool-registry.json`（`tool-registry/1.0`，41 个工具 / 54 项能力），探测这些实现的版本与
+可用性，输出 `00-tool-index.json`；缺失工具给出官方文档、固定安装配方与 fallback，不让 Agent
+在 Phase 1/4 才撞 `command not found`。注册表加载失败即退出 2，`--registry` 可替换。沙箱已在无运行时、Python 桩运行时与 **Ubuntu 24.04.5 + Docker 29.9.2** 下验证
 fail-closed、资源准入、超时清理与容器内权限；`sink_scan.py` 的 ast-grep / semgrep
 仍属宿主机静态解析。
 
@@ -372,7 +373,7 @@ policy 与 evidence 同时给出时才检查；无 schema 的历史弱证据仍�
 run、固件不一致、缺目标哈希、缺 schema、contracts 不可导入、多条证据中混入异 run、
 证据撤销、证据过期、同冲突组结论不一致、证据声明取代同时选中的证据；另测
 `board_store.py transition` 引用不存在证据时返回 `EVIDENCE_REF_NOT_FOUND`。M6 完成时
-M6 完成时全量 selftest 为 25 组 / 311 条断言；M7 后为 26 组 / 331 条；加入工具索引第 27 组后为 27 组 / 340 条。
+M6 完成时全量 selftest 为 25 组 / 311 条断言；M7 后为 26 组 / 331 条；加入工具索引第 27 组后为 27 组 / 344 条。
 
 **边界**：历史 `evidence/1.0` 仍可由 `contracts.py` 读取以兼容旧产物，但**不能**用于
 `validated` / `confirmed`；黑板导入阶段仍允许先落盘弱证据，升级时统一拒绝。M6 只解决
@@ -413,7 +414,7 @@ M6 完成时全量 selftest 为 25 组 / 311 条断言；M7 后为 26 组 / 331 
 重复 plan 去重且 revision 不变、next 只列 READY、紧策略 exit 5 且 Intent 保持 open、
 claim attempts 递增、可重试失败回 open、超过 max_retries 转 failed + outcome、新 Fact 生成
 新 Intent、SUCCESS 回写 Evidence/Fact、PHASE_ADVANCED、BACKTRACK 与最终 verify。全量为
-M7 落地时 26 组 / 331 条断言；加入工具索引第 27 组后全量 27 组 / 340 条。
+M7 落地时 26 组 / 331 条断言；加入工具索引第 27 组后全量 27 组 / 344 条。
 
 **边界**：当前是单 Agent 串行闭环，没有并发 Planner、跨进程 claim / heartbeat 或抢占；
 `stop_conditions` 作为 Intent 的执行契约记录，由执行器遵守，调度器只强制 `max_retries` 与
@@ -439,6 +440,8 @@ Precision / Recall / F1 / FPR、成本与失败样本；真实基准与合成基
 ```text
 scripts/
   tool_index.py         # 已新增：Phase 0 前置工具探测（tool-index/1.0）
+assets/
+  tool-registry.json    # 已新增：工具/能力注册表（tool-registry/1.0，41 tools / 54 capabilities）
   contracts.py          # 现有：增加 Fact / Intent / EmulationResult / BoardState 校验
   board_store.py        # 新增：快照、查询、去重
   board_events.py       # 新增：append-only 事件日志与回放

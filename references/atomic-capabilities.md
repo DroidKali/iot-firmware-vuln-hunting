@@ -96,7 +96,7 @@ uv run script.py                         # 用项目环境跑
 - `--only` / `--profile` 只统计本次选中的工具，所以同一个能力在不同调用里可能显示不同状态。局部索引不能当作全量环境结论。
 - 缺失时先看 `fallback.tools` 与 `fallback.impact`：能替代就替代，并在报告里写明降级；没有替代路径时再按 `docs` 安装，或向用户说明该能力不可用。
 - `--require` 用在「已经确定必须用某个实现」之后；不要在侦察前把整张推荐表都设成硬门槛。
-- 注册表（41 个工具）与本文件 §2 的能力映射必须同步维护；新增/删除实现时同时改 `scripts/tool_index.py` 的 `TOOLS` / `CAPABILITIES` 与本节，selftest 第 27 组会校验索引产物契约。
+- 注册表（41 个工具）在 `assets/tool-registry.json`（`tool-registry/1.0`），与本文件 §2 的能力映射必须同步维护；新增/删除实现时只改该 JSON 的工具/能力条目与本节，不改 Python。`tool_index.py` 只做加载、校验、探测与渲染，注册表缺文件/坏 JSON/未知字段/悬空引用会退出 2；selftest 第 27 组校验索引产物契约与注册表 fail-closed。
 
 **环境矩阵**（决定用哪条执行通道）：
 
