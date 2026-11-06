@@ -12,7 +12,7 @@
 |---|---|---|
 | 确定性流水线 | Phase 0–5 已落地；门禁可阻断 | 保持不变，作为控制平面与最终裁决者 |
 | 黑板 / 动态探索 | M1 已落地：事实/候选/意图/提示持久化，事件日志 + 快照 + 去重 + 状态机；M7 已落地单 Agent 确定性调度（规则、去重、依赖、准入、重试、回写、阶段前进/回退）；多 Agent 并发编排未实现 | Fact / Candidate / Intent / Hint 持久化，可回放、可去重、可预算 |
-| 数据契约 | 23 种 schema，含 Fact / Intent / Hint / EmulationPlan / EmulationResult / BoardState / BoardEvent、QilingPlan / QilingEvent / QilingImport、SchedulerRules / SchedulerResult、`evidence/1.1` 与 `emba-import/1.0`；状态转换由 `board_transitions.py` 校验，M6 起强制候选自带 run/固件、证据同 run/同固件/同目标并检查生命周期 | 随适配器扩展 `EmulationResult` 后端字段，保持向后兼容 |
+| 数据契约 | 24 种 schema，含 Fact / Intent / Hint / EmulationPlan / EmulationResult / BoardState / BoardEvent、QilingPlan / QilingEvent / QilingImport、SchedulerRules / SchedulerResult、ToolIndex、`evidence/1.1` 与 `emba-import/1.0`；状态转换由 `board_transitions.py` 校验，M6 起强制候选自带 run/固件、证据同 run/同固件/同目标并检查生命周期 | 随适配器扩展 `EmulationResult` 后端字段，保持向后兼容 |
 | 沙箱 | `sandbox_run.py` 已 fail-closed，但尚未证明所有执行路径都经过它 | 所有解包、执行、仿真、外部工具调用统一入口；隔离失败不回落宿主机 |
 | EMBA / Qiling / QEMU | M3 的 EMBA 适配仅用于导入既有日志；M4 的 `emu_plan.py` / `emu_run.py` 已落地并经沙箱执行 QEMU；Qiling 适配器已落地，静态受控目标已在 Qiling 1.4.6 下执行、动态 `busybox` 已在 Qiling 1.4.11 下执行并产出 Evidence | 适配器只消费既有产物；整机仿真按架构/内核/init/网络判据执行，输出统一 `EmulationResult` |
 | 检测质量评估 | 合成基准 + 回归门禁 | 增加合法来源、可追溯、人工复核的真实固件基准 |
@@ -202,8 +202,10 @@ G1–G7 必须是代码校验器，而不是 Prompt、README 或报告模板。�
 记录命令、版本、退出码与结果。重点确认 Strict、Coverage、沙箱和结构化证据的真实调用路径。
 
 **现状**：2026-10 已完成一轮门禁、契约、沙箱入口与合成基准整改；M3/M4/M7 落地后
-selftest 覆盖 26 组 / 331 条断言，`exec_paths.py` 已给出 21 个脚本 / 11 条子进程调用的
-分类清单。沙箱已在无运行时、Python 桩运行时与 **Ubuntu 24.04.5 + Docker 29.9.2** 下验证
+selftest 覆盖 27 组 / 340 条断言，`exec_paths.py` 已给出 22 个脚本 / 12 条子进程调用的
+分类清单。2026-11-06 增加 Phase 0 前置的 `scripts/tool_index.py`：探测 41 个实现的版本与
+可用性，映射 `atomic-capabilities.md` 的 54 项能力，输出 `00-tool-index.json`；缺失工具
+给出官方文档、固定安装配方与 fallback，不让 Agent 在 Phase 1/4 才撞 `command not found`。沙箱已在无运行时、Python 桩运行时与 **Ubuntu 24.04.5 + Docker 29.9.2** 下验证
 fail-closed、资源准入、超时清理与容器内权限；`sink_scan.py` 的 ast-grep / semgrep
 仍属宿主机静态解析。
 
@@ -222,7 +224,7 @@ fail-closed、资源准入、超时清理与容器内权限；`sink_scan.py` 的
 - `validate_transition` 与结构化失败原因；
 - Phase 0–5 的产物可以导入黑板，门禁仍只读原有结构化产物。
 
-**现状（2026-10-27，已落地；2026-11-05 补 M7）**：`contracts.py` 当时扩到 16 种 schema（含六个黑板对象与 `evidence/1.1`；M3 后为 17 种，M4 后为 21 种，M7 后为 23 种，含 QilingPlan / QilingEvent / QilingImport 与 SchedulerRules / SchedulerResult）；
+**现状（2026-10-27，已落地；2026-11-05 补 M7；2026-11-06 补 ToolIndex）**：`contracts.py` 当时扩到 16 种 schema（含六个黑板对象与 `evidence/1.1`；M3 后为 17 种，M4 后为 21 种，M7 后为 23 种，含 QilingPlan / QilingEvent / QilingImport 与 SchedulerRules / SchedulerResult；增加 Phase 0 工具索引后为 24 种，含 `tool-index/1.0`）；
 `board_events.py` 提供 append-only 日志、`seq` 校验与回放；`board_store.py` 提供快照、去重、
 导入与状态转换；`board_transitions.py` 提供候选状态机与类型化证据校验。selftest 第 21 组
 覆盖重复事件幂等、非法转换拒绝、跨 run 证据拒绝、快照删除后恢复、坏事件行报错和
@@ -370,7 +372,7 @@ policy 与 evidence 同时给出时才检查；无 schema 的历史弱证据仍�
 run、固件不一致、缺目标哈希、缺 schema、contracts 不可导入、多条证据中混入异 run、
 证据撤销、证据过期、同冲突组结论不一致、证据声明取代同时选中的证据；另测
 `board_store.py transition` 引用不存在证据时返回 `EVIDENCE_REF_NOT_FOUND`。M6 完成时
-全量 selftest 为 25 组 / 311 条断言；M7 后为 26 组 / 331 条。
+M6 完成时全量 selftest 为 25 组 / 311 条断言；M7 后为 26 组 / 331 条；加入工具索引第 27 组后为 27 组 / 340 条。
 
 **边界**：历史 `evidence/1.0` 仍可由 `contracts.py` 读取以兼容旧产物，但**不能**用于
 `validated` / `confirmed`；黑板导入阶段仍允许先落盘弱证据，升级时统一拒绝。M6 只解决
@@ -411,7 +413,7 @@ run、固件不一致、缺目标哈希、缺 schema、contracts 不可导入、
 重复 plan 去重且 revision 不变、next 只列 READY、紧策略 exit 5 且 Intent 保持 open、
 claim attempts 递增、可重试失败回 open、超过 max_retries 转 failed + outcome、新 Fact 生成
 新 Intent、SUCCESS 回写 Evidence/Fact、PHASE_ADVANCED、BACKTRACK 与最终 verify。全量为
-26 组 / 331 条断言。
+M7 落地时 26 组 / 331 条断言；加入工具索引第 27 组后全量 27 组 / 340 条。
 
 **边界**：当前是单 Agent 串行闭环，没有并发 Planner、跨进程 claim / heartbeat 或抢占；
 `stop_conditions` 作为 Intent 的执行契约记录，由执行器遵守，调度器只强制 `max_retries` 与
@@ -436,6 +438,7 @@ Precision / Recall / F1 / FPR、成本与失败样本；真实基准与合成基
 
 ```text
 scripts/
+  tool_index.py         # 已新增：Phase 0 前置工具探测（tool-index/1.0）
   contracts.py          # 现有：增加 Fact / Intent / EmulationResult / BoardState 校验
   board_store.py        # 新增：快照、查询、去重
   board_events.py       # 新增：append-only 事件日志与回放

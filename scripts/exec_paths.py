@@ -74,6 +74,11 @@ KNOWN = {
         "input_trust": "none",
         "note": "本清单工具自身；不执行外部命令",
     },
+    "tool_index.py": {
+        "classification": "host-tool-probe",
+        "input_trust": "trusted-local",
+        "note": "只调用 --version / image inspect 探测工具可用性；不读取固件，不执行固件",
+    },
 }
 SUBPROCESS_APIS = {"run", "Popen", "call", "check_call", "check_output",
                    "getoutput", "getstatusoutput"}

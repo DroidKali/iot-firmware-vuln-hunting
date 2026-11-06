@@ -1,8 +1,8 @@
-# 数据契约（FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / SandboxRun / BenchManifest / EmbaImport / EmulationPlan / QilingPlan / QilingEvent / QilingImport / SchedulerRules / SchedulerResult / 黑板对象 / 执行路径）
+# 数据契约（FirmwareManifest / AuditTask / Candidate / Finding / Evidence / GateResult / SandboxRun / BenchManifest / EmbaImport / EmulationPlan / QilingPlan / QilingEvent / QilingImport / SchedulerRules / SchedulerResult / ToolIndex / 黑板对象 / 执行路径）
 
 本文件定义跨阶段传递的结构化数据，以及**校验入口、版本规则、兼容模式边界**。目标是消除「同一事实在 plan、报告、gate-config 里三种写法」的漂移：任何下游脚本要消费上游产物时，先看 schema 版本，再按本文件取字段。
 
-配套校验器：`scripts/contracts.py`（纯标准库）。`--list` 当前列出 23 种 schema；候选的整文件 envelope 由 `candidates` 文档校验器单独处理。
+配套校验器：`scripts/contracts.py`（纯标准库）。`--list` 当前列出 24 种 schema；候选的整文件 envelope 由 `candidates` 文档校验器单独处理。
 
 ```bash
 # 列出支持的所有 schema
@@ -197,7 +197,7 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 
 ### 8.1 SandboxPolicy（`sandbox-policy/1.0`）
 
-由 `scripts/resource_manager.py` 校验，**不在 `contracts.py` 的 23 种 schema 内**。策略是运维配置，不是每次运行的产物；其规范化 JSON 的 sha256 写入 `admission.policy_sha256`，用于证明「这次执行用的是哪份策略」。
+由 `scripts/resource_manager.py` 校验，**不在 `contracts.py` 的 24 种 schema 内**。策略是运维配置，不是每次运行的产物；其规范化 JSON 的 sha256 写入 `admission.policy_sha256`，用于证明「这次执行用的是哪份策略」。
 
 | 字段 | 默认 | 约束 | 说明 |
 |---|---|---|---|
@@ -231,7 +231,7 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 
 `scripts/exec_paths.py` 用 AST 扫描 `scripts/*.py` 的子进程调用，防止新增执行路径绕过统一入口。字段：`schema` / `tool` / `version` / `generated_at` / `root` / `files_scanned` / `total_paths` / `counts` / `ok` / `paths` / `unclassified`。每条 path 记录 `file` / `line` / `api` / `scope` / `call` / `classification` / `input_trust` / `note`。
 
-分类：`sandbox-boundary`（固件执行边界，必须经 `sandbox_run.py`）、`host-static-analyzer`（只解析不可信字节、不执行）、`trusted-metadata`（可信本地元数据）、`test-harness`、`inventory`。出现未知文件即 `unclassified` 并退出 1。当前 20 个脚本共 11 条调用；`sink_scan.py:131` / `sink_scan.py:148` 的 ast-grep / semgrep 仍是 `host-static-analyzer`，是已知残留风险（只解析、不执行）。
+分类：`sandbox-boundary`（固件执行边界，必须经 `sandbox_run.py`）、`sandbox-client`（只调用 `sandbox_run.py` 的适配器）、`host-static-analyzer`（只解析不可信字节、不执行）、`host-tool-probe`（只跑 `--version` / 镜像 inspect，不读固件）、`trusted-metadata`（可信本地元数据）、`test-harness`、`inventory`。出现未知文件即 `unclassified` 并退出 1。当前 22 个脚本共 12 条调用；`sink_scan.py:131` / `sink_scan.py:148` 的 ast-grep / semgrep 仍是 `host-static-analyzer`，是已知残留风险（只解析、不执行）。
 
 ## 9. BenchManifest / BenchResult（`bench-manifest/1.0` / `bench-result/1.0`）
 
@@ -762,3 +762,118 @@ python scripts/board_scheduler.py backtrack --workspace runs/audit --from-phase 
 ```
 
 退出码：`0` 正常；`1` 契约/状态失败；`2` 用法错误；`5` 资源准入拒绝。
+
+## 21. ToolIndex（tool-index/1.0）
+
+Phase 0 之前由 `scripts/tool_index.py` 生成，记录本次审计实际能用的工具、版本与能力覆盖。它不是漏洞证据，也不替代 Phase 1 的格式侦察：索引只回答「这台机器上有什么、缺什么、缺了走哪条替代路径」，不回答「固件里有什么」。产物固定写入 `00-tool-index.json`，随审计交付物保存。
+
+```bash
+python scripts/tool_index.py --profile all --out fw-audit/<target>/00-tool-index.json
+python scripts/tool_index.py --require moria --require ast-grep
+python scripts/tool_index.py --install binwalk --yes
+```
+
+### 21.1 顶层字段
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `schema` | string | 固定 `tool-index/1.0` |
+| `tool_version` | string | 生成器版本，当前 `1.0` |
+| `generated_at` | string | UTC ISO 8601，探测完成时间 |
+| `host` | object | `os` / `release` / `machine` / `python` / `is_windows`；用于解释平台相关缺口 |
+| `registry` | object | `version`（注册表日期）、`tools`（注册表总数，当前 41）、`source`（`scripts/tool_index.py`） |
+| `profile` | string | 请求的 `all` / `phase0` / `extract` / `static` / `dynamic` |
+| `summary` | object | 本次**实际探测**的工具计数：`total` / `available` / `degraded` / `missing`，四者满足 `total = available + degraded + missing` |
+| `tools` | array | 探测结果，按注册表顺序；`--only` 时只含所选工具 |
+| `capabilities` | array | `atomic-capabilities.md` 的 54 项能力映射；`--profile` / `--only` 时只保留相关项 |
+| `phases` | array | 阶段就绪度；`all` 时为 P0/P1/P3/P4，按 profile 时只含对应阶段 |
+| `notes` | string | 固定说明：只做版本探测、不读固件、安装必须显式确认 |
+
+`summary.total` 是本次选中的工具数，不是 `registry.tools`。用 `--only moria` 时 `total` 为 1，不能拿它推断环境里只有 1 个工具。
+
+### 21.2 tools[]
+
+| 字段 | 说明 |
+|---|---|
+| `id` | 稳定工具 ID，与 CLI `--only` / `--require` / `--install` 使用同一套名字 |
+| `kind` | `cli` / `family` / `python-module` / `python-runtime` / `container-image` |
+| `capabilities` | 该工具能支撑的能力编号，如 `E2`、`D5` |
+| `argv` / `alternates` | 版本探测命令候选；`alternates` 用于 `sg` 之类命名冲突时的退路 |
+| `module` | `python-module` 的导入名 |
+| `images` | `container-image` 的候选镜像（如 `iot-fw/qiling:1.4.11`、`:latest`） |
+| `prefix` / `prefixes` / `extra_paths` | 非 PATH 安装位置的补充搜索路径 |
+| `required` / `recommended` | 是否为硬依赖 / 推荐工具；只影响摘要语气，不改变退出码 |
+| `docs` | 官方文档或仓库 URL |
+| `install` | `kind`（`uv` / `cargo` / `pip` / `docker-build` / `system` / `build-from-source` / `manual`）、`auto`（能否自动执行固定配方）、`argv`、`requires`（前置命令）、`shell`（人工安装命令）、`docs`、`notes` |
+| `fallback` | `tools`（可替代实现）与 `impact`（降级对结论的影响） |
+| `notes` | 选型说明 |
+| `version_must_contain` | 版本字符串必须包含的标记；为空表示不限制 |
+| `found` | PATH / 模块 / 镜像是否找到；与 `status` 分开，避免把「找到但版本命令失败」误报为 missing |
+| `status` | `available`（找到且探测成功）/ `degraded`（找到但版本未知或探测失败）/ `missing`（未找到） |
+| `version` / `path` | 探测到的版本与可执行文件路径；缺失时为 `null` |
+| `probe` | `argv`（实际执行）、`returncode`、`ok`、`duration_ms`、`error`（`not-found` / `timeout` / 启动错误等） |
+| `phases` | 该工具参与的阶段，如 `["P1"]`；P0 只对 python/file/uv 额外标注 |
+
+探测只执行版本命令或镜像 inspect，不接收固件路径，不执行固件。除 `PATH` 外还检查 `~/.local/bin`、`~/bin`、`~/.cargo/bin`、`/usr/local/bin`、`/opt/homebrew/bin`、`/snap/bin`（只用于查找，不改变进程 `PATH`）。Windows 上的 `.cmd` / `.bat` 经 `COMSPEC /d /s /c` 包装，单次超时默认 5 秒（`--timeout` 可调，限制在 0.5–30 秒）；`unsquashfs` / `afl-fuzz` 的版本命令固定返回 1，只要输出可解析出版本仍记为 `available`。
+
+### 21.3 capabilities[]
+
+| 字段 | 说明 |
+|---|---|
+| `id` / `name` | 能力编号与名称，编号与 `references/atomic-capabilities.md` 一致 |
+| `phases` | 能力所属阶段 |
+| `status` | 见下 |
+| `primary` | 首选实现；为空表示没有单一首选 |
+| `available_tools` | 本次选中且 `found=true` 的实现 |
+| `missing_tools` | 本次选中但未找到的实现；未选中的工具不会出现在这里 |
+| `manual` | 无工具能力的人工路径（如物理故障注入），仅 `manual` 状态使用 |
+| `fallback` | 降级路径说明 |
+
+能力状态判定：
+
+| 状态 | 条件 |
+|---|---|
+| `available` | `primary` 已找到；没有 primary 时至少一个实现找到 |
+| `degraded` | primary 缺失，但还有其它实现可用 |
+| `missing` | 该能力登记的实现全部缺失；`--only` / `--profile` 局部索引下只指本次选中的实现，不代表全局缺失 |
+| `manual` | 能力本身没有工具实现，只能人工完成（E9、F3、B5–B8、D2/D3、N2–N4、H1–H4 等） |
+
+`manual` 不是缺失，不能因为出现 manual 就判定审计不可做；但必须在报告里写明该能力未自动化、结论强度受限。
+
+### 21.4 phases[]
+
+| 字段 | 说明 |
+|---|---|
+| `id` / `name` | `P0` 度量、`P1` 提取、`P3` 审计、`P4` 动态验证 |
+| `status` | `ready` / `partial` / `blocked` / `n/a` |
+| `available_tools` / `missing_tools` | 参与该阶段的能力所对应的实现，去重排序 |
+
+- `P0` 特殊处理：`python` 缺失为 `blocked`；`python` + `file` 都在为 `ready`；只有 `python` 为 `partial`；本次未选 `python` 为 `n/a`。`uv` 参与 P0 工具列表，但不单独决定 P0 状态。
+- `P1` / `P3` / `P4`：该阶段相关能力全部 `available` 为 `ready`；至少有一个 `available` 或 `degraded` 为 `partial`；全部 `missing` 为 `blocked`；该阶段没有相关能力为 `n/a`。`partial` 表示「能开工但有缺口」，不是硬阻断；缺口必须按 `fallback` 降级并记录。
+- `--only` 会缩小参与统计的工具集合，阶段状态随之变化。做全量审计决策时不要用 `--only` 的局部结果代替全量索引。
+
+### 21.5 命令行与退出码
+
+| 参数 | 行为 |
+|---|---|
+| `--out PATH` | 写 `tool-index/1.0`；目录不存在时创建 |
+| `--json` | 把同一份 JSON 打到 stdout；与文本摘要互斥 |
+| `--only a,b` | 只探测指定工具；未知 ID 退出 2 |
+| `--profile NAME` | `all` / `phase0` / `extract` / `static` / `dynamic`，按阶段筛选工具与能力 |
+| `--require ID` | 可重复；索引生成后检查，必需工具不满足退出 3 并点名 |
+| `--strict` | 与 `--require` 连用：工具必须版本已知，`degraded` 也算不满足 |
+| `--docs` | 只打印工具与官方文档 URL，不探测 |
+| `--install ID` | 可重复；显式请求安装。无 `--yes` 时只打印计划 |
+| `--yes` | 确认执行脚本内置的固定安装配方；没有它绝不执行 |
+| `--quiet` | 不打印文本摘要；`--out` 仍写文件 |
+
+退出码：`0` 索引正常；`1` 安装失败或有工具只能人工安装；`2` 用法错误、未知 ID，或 `--install` 未加 `--yes` 且存在可执行计划；`3` `--require` 的工具缺失（`--strict` 下版本未知也算）。
+
+安装策略是「固定配方 + 显式确认」，不是「运行时抓网页自动装」：脚本内置可审计的 `uv` / `cargo` / `pip` / `docker build` 命令，先检查 `uv`、`docker`、`git`、`cmake`、`c++` 等前置；moria、Ghidra、radare2 等没有稳定自动配方的工具只打印官方文档和人工命令，返回 1。这样避免把远端页面内容当成指令执行，也避免未经批准改动宿主机。
+
+### 21.6 与 Phase 0 的边界
+
+- 索引在 `fw_triage.py` 之前跑；`00-tool-index.json` 与 `00-metrics.json`、`00-scope.md` 一起保存。
+- `summary.missing` 或 `phases[].status=blocked` 不自动终止审计：先看 `fallback`，能降级就降级并记录；确实没有替代路径时再向用户说明需要安装什么、为什么。
+- `--require` 是给「已确定打法」的硬门槛用的，例如已决定用 moria 做多压缩后端解包；不要在还没侦察前就把所有推荐工具都设成 required。
+- 当前 `coverage_gate.py` 不消费 `tool-index`；它不能作为门禁通过或漏洞存在的证据。若后续接入门禁，应作为「覆盖说明」输入，而不是 PASS 条件。

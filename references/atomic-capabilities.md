@@ -36,6 +36,15 @@ FAT / Firmadyne / FirmAE / EMBA / FACT 这类工具的本质，是**把一整套
 
 分析过程中凡是「在**我自己的机器上**查文件 / 搜内容 / 跑 Python」，一律按下面的优先级，**不要默认用 `find` / `grep` / `pip`**：
 
+**Phase 0 之前先跑工具索引**，不要等某个能力调用失败才发现工具没装：
+
+```bash
+python scripts/tool_index.py --profile all \
+    --out fw-audit/<target>/00-tool-index.json
+```
+
+产物 `00-tool-index.json` 记录 41 个实现的版本与可用性，并把 §2 的 54 项能力逐项映射成 `available` / `degraded` / `missing` / `manual`；每个缺失工具都带官方文档、固定安装配方和 `fallback`。默认只探测、不安装；确定打法后用 `--require` 把关键工具变成硬门槛（缺失退出 3），需要安装时显式执行 `--install <id> --yes`，并先取得用户对安装范围与来源的同意。
+
 | 场景 | 首选 | 替代（缺失时） | 要点 |
 |---|---|---|---|
 | **查找文件** | **`fd`**（Rust 重写 find） | `find` | 语法短、默认忽略 `.gitignore` 与隐藏项、并行遍历 |
@@ -79,6 +88,16 @@ uv run script.py                         # 用项目环境跑
 
 > 缺失时的处理：`fd`/`rg` 没装就用 `find`/`grep` 兜底，但**在报告与回复里显式注明降级**，不要静默替换——否则后人复现时命令对不上。
 
+### 1.1 索引与本文件的关系
+
+`tool_index.py` 不是第二套能力清单，它只是本文件 §2 的**运行时投影**：能力编号、首选实现和 fallback 仍以本文件为准，索引负责回答「这台机器上实际能跑哪几个」。
+
+- 一个能力可能登记多个实现。`status=available` 表示首选实现（`primary`）在；`degraded` 表示首选缺失但还有替代；`missing` 表示登记的实现在本次探测范围内全缺；`manual` 表示该能力本来就没有工具实现（如物理故障注入），不是安装失败。
+- `--only` / `--profile` 只统计本次选中的工具，所以同一个能力在不同调用里可能显示不同状态。局部索引不能当作全量环境结论。
+- 缺失时先看 `fallback.tools` 与 `fallback.impact`：能替代就替代，并在报告里写明降级；没有替代路径时再按 `docs` 安装，或向用户说明该能力不可用。
+- `--require` 用在「已经确定必须用某个实现」之后；不要在侦察前把整张推荐表都设成硬门槛。
+- 注册表（41 个工具）与本文件 §2 的能力映射必须同步维护；新增/删除实现时同时改 `scripts/tool_index.py` 的 `TOOLS` / `CAPABILITIES` 与本节，selftest 第 27 组会校验索引产物契约。
+
 **环境矩阵**（决定用哪条执行通道）：
 
 | 环境 | 适用性 | 说明 |
@@ -87,7 +106,7 @@ uv run script.py                         # 用项目环境跑
 | Docker | ★★★★★ | 推荐。unblob 官方镜像自带全部解包器；`docker run --rm -v "$PWD:/data" -w /data ghcr.io/onekey-sec/unblob:latest /data/firmware.bin` |
 | WSL2 | ★★★★ | 可用，注意 `/mnt/c` 上执行大文件解包会慢 |
 | AttifyOS / EmbedOS / IoT Pentesting OS | ★★★★★ | 预装 Attify 全家桶 |
-| Windows 原生 | ★★ | 只有本 skill 的五个 Python 脚本能原生跑；其余走 Docker 或 Linux 主机 |
+| Windows 原生 | ★★ | 本 skill 的 22 个 Python 脚本能原生跑（工具链缺口由 `tool_index.py` 报告）；其余走 Docker 或 Linux 主机 |
 
 ---
 
@@ -697,6 +716,8 @@ afl-showmap -o map -- ./target @@           # 覆盖率确认
 ## 11. 能力不可用时的替代路径
 
 > 列这张表的目的不是「有降级链所以不会卡死」，而是让你在**某个原子能力缺席**时，知道还有哪些实现能达到同一能力，以及**代价是什么**。
+
+先跑 `python scripts/tool_index.py --profile all --out fw-audit/<target>/00-tool-index.json`：索引会按本表给出每个缺失实现的 `fallback.tools` 与 `impact`，并区分「缺失」和「本来就没有工具实现的 manual 能力」。本表是人工判读的兜底，不能替代索引的实测结果。
 
 | 缺失的能力 | 替代实现 | 代价 / 是否影响结论强度 |
 |---|---|---|

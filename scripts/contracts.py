@@ -4,11 +4,12 @@
 
 为什么需要它
 ------------
-本 skill 的判定链路里有 23 种 schema：FirmwareManifest / AuditTask / Candidate /
+本 skill 的判定链路里有 24 种 schema：FirmwareManifest / AuditTask / Candidate /
 Finding / Evidence / GateResult / AuditStages / ScanWaiver / SandboxRun /
 BenchManifest / EmbaImport / EmulationPlan / QilingPlan / QilingEvent /
 QilingImport，黑板层的 Fact / Intent / Hint / EmulationResult / BoardState /
-BoardEvent，以及 M7 调度层的 SchedulerRules / SchedulerResult。它们此前散落在各自的脚本输出里，字段名、必填项、枚举值、
+BoardEvent，M7 调度层的 SchedulerRules / SchedulerResult，以及 Phase 0 的
+ToolIndex。它们此前散落在各自的脚本输出里，字段名、必填项、枚举值、
 schema 版本各写各的，Markdown 文案一变就可能影响判定。
 本模块把这些契约收敛到一处：
 
@@ -64,6 +65,8 @@ SUPPORTED: Dict[str, List[str]] = {
     # ── M7 动态调度：确定性规则与执行结果 ────────────────────────────────
     "scheduler-rules": ["scheduler-rules/1.0"],
     "scheduler-result": ["scheduler-result/1.0"],
+    # ── Phase 0 工具索引：版本探测、能力缺口与安装/降级路径 ────────────────
+    "tool-index": ["tool-index/1.0"],
 }
 
 CAND_STATUSES = (
@@ -221,6 +224,12 @@ def _opt_str(out, obj, path: str, key: str) -> None:
         return
     if not isinstance(obj[key], str) or not obj[key].strip():
         _err(out, f"{path}.{key}", "BAD_TYPE", "必须是非空字符串")
+
+
+def _opt_text(out, obj, path: str, key: str) -> None:
+    """可选描述字段：允许空串，但类型必须是字符串。"""
+    if key in obj and obj[key] is not None and not isinstance(obj[key], str):
+        _err(out, f"{path}.{key}", "BAD_TYPE", "必须是字符串")
 
 
 def _opt_bool(out, obj, path: str, key: str) -> None:
@@ -1250,6 +1259,173 @@ def validate_scheduler_result(obj: Any) -> List[Dict[str, str]]:
     return out
 
 
+def validate_tool_index(obj: Any) -> List[Dict[str, str]]:
+    """ToolIndex：Phase 0 工具盘点结果；不能让“没探测”伪装成“可用”。"""
+    out: List[Dict[str, str]] = []
+    if not _schema(out, obj, "index", "tool-index"):
+        return out
+    _req(out, obj, "index", "tool_version", str)
+    _req(out, obj, "index", "generated_at", str)
+    _req(out, obj, "index", "profile", str)
+    _enum(out, obj, "index", "profile",
+          ("all", "phase0", "extract", "static", "dynamic"))
+    _req(out, obj, "index", "notes", str)
+    host = obj.get("host")
+    if not isinstance(host, dict):
+        _err(out, "index.host", "MISSING", "host 必须是对象")
+    else:
+        for key in ("os", "release", "machine", "python"):
+            _req(out, host, "index.host", key, str)
+        _req(out, host, "index.host", "is_windows", bool)
+    registry = obj.get("registry")
+    if not isinstance(registry, dict):
+        _err(out, "index.registry", "MISSING", "registry 必须是对象")
+    else:
+        _req(out, registry, "index.registry", "version", str)
+        _req(out, registry, "index.registry", "tools", int)
+        _req(out, registry, "index.registry", "source", str)
+    tools = _list_of_dicts(out, obj, "index", "tools")
+    tool_ids = set()
+    status_counts = {"available": 0, "degraded": 0, "missing": 0}
+    kinds = ("cli", "family", "python-module", "python-runtime", "container-image")
+    for i, tool in enumerate(tools):
+        sub = f"index.tools[{i}]"
+        tid = tool.get("id")
+        if not isinstance(tid, str) or not tid.strip():
+            _err(out, sub + ".id", "BAD_TYPE", "工具 ID 必须是非空字符串")
+        elif tid in tool_ids:
+            _err(out, sub + ".id", "DUPLICATE_ID", "工具 ID 重复：%r" % tid)
+        else:
+            tool_ids.add(tid)
+        _enum(out, tool, sub, "kind", kinds)
+        _req(out, tool, sub, "status", str)
+        _enum(out, tool, sub, "status", ("available", "degraded", "missing"))
+        _req(out, tool, sub, "found", bool)
+        _str_list(out, tool, sub, "capabilities", required=False, allow_empty=True)
+        phases = _str_list(out, tool, sub, "phases", required=False, allow_empty=True)
+        for pid in phases:
+            if pid not in BOARD_PHASES:
+                _err(out, sub + ".phases", "BAD_ENUM", "未知阶段：%r" % pid)
+        if "version" in tool and tool["version"] is not None:
+            _opt_str(out, tool, sub, "version")
+        if "path" in tool and tool["path"] is not None:
+            _opt_str(out, tool, sub, "path")
+        found = tool.get("found")
+        status = tool.get("status")
+        if found is True and status == "missing":
+            _err(out, sub, "STATUS_MISMATCH", "found=true 不能同时 status=missing")
+        if found is False and status in ("available", "degraded"):
+            _err(out, sub, "STATUS_MISMATCH", "found=false 时 status 只能是 missing")
+        if status in status_counts:
+            status_counts[status] += 1
+        probe = tool.get("probe")
+        if probe is not None:
+            if not isinstance(probe, dict):
+                _err(out, sub + ".probe", "BAD_TYPE", "probe 必须是对象")
+            else:
+                _str_list(out, probe, sub + ".probe", "argv",
+                          required=False, allow_empty=True)
+                _req(out, probe, sub + ".probe", "ok", bool)
+                _opt_int(out, probe, sub + ".probe", "duration_ms")
+                _opt_str(out, probe, sub + ".probe", "error")
+                if "returncode" in probe and probe["returncode"] is not None \
+                        and (not isinstance(probe["returncode"], int)
+                             or isinstance(probe["returncode"], bool)):
+                    _err(out, sub + ".probe.returncode", "BAD_TYPE",
+                         "returncode 必须是整数或 null")
+        inst = tool.get("install")
+        if inst is not None:
+            if not isinstance(inst, dict):
+                _err(out, sub + ".install", "BAD_TYPE", "install 必须是对象")
+            else:
+                _req(out, inst, sub + ".install", "kind", str)
+                _req(out, inst, sub + ".install", "auto", bool)
+                _str_list(out, inst, sub + ".install", "argv",
+                          required=False, allow_empty=True)
+                _str_list(out, inst, sub + ".install", "requires",
+                          required=False, allow_empty=True)
+                _opt_text(out, inst, sub + ".install", "shell")
+                _opt_text(out, inst, sub + ".install", "docs")
+                _opt_text(out, inst, sub + ".install", "notes")
+        fb = tool.get("fallback")
+        if fb is not None:
+            if not isinstance(fb, dict):
+                _err(out, sub + ".fallback", "BAD_TYPE", "fallback 必须是对象")
+            else:
+                _str_list(out, fb, sub + ".fallback", "tools",
+                          required=False, allow_empty=True)
+                _req(out, fb, sub + ".fallback", "impact", str)
+    summary = obj.get("summary")
+    if not isinstance(summary, dict):
+        _err(out, "index.summary", "MISSING", "summary 必须是对象")
+    else:
+        for key in ("total", "available", "degraded", "missing"):
+            val = summary.get(key)
+            if not isinstance(val, int) or isinstance(val, bool) or val < 0:
+                _err(out, "index.summary." + key, "BAD_VALUE",
+                     "必须是非负整数")
+        if isinstance(summary.get("total"), int) and summary["total"] != len(tools):
+            _err(out, "index.summary.total", "MISMATCH",
+                 "total=%r 与 tools 数量 %d 不一致" % (summary["total"], len(tools)))
+        total = summary.get("total")
+        if isinstance(total, int) and not isinstance(total, bool) \
+                and summary.get("available") == status_counts["available"] \
+                and summary.get("degraded") == status_counts["degraded"] \
+                and summary.get("missing") == status_counts["missing"]:
+            pass
+        elif isinstance(total, int) and not isinstance(total, bool):
+            if summary.get("available") != status_counts["available"]:
+                _err(out, "index.summary.available", "MISMATCH",
+                     "与 tools.status=available 数量不一致")
+            if summary.get("degraded") != status_counts["degraded"]:
+                _err(out, "index.summary.degraded", "MISMATCH",
+                     "与 tools.status=degraded 数量不一致")
+            if summary.get("missing") != status_counts["missing"]:
+                _err(out, "index.summary.missing", "MISMATCH",
+                     "与 tools.status=missing 数量不一致")
+    caps = _list_of_dicts(out, obj, "index", "capabilities", required=False)
+    cap_ids = set()
+    for i, cap in enumerate(caps):
+        sub = f"index.capabilities[{i}]"
+        cid = cap.get("id")
+        if not isinstance(cid, str) or not cid.strip():
+            _err(out, sub + ".id", "BAD_TYPE", "能力 ID 必须是非空字符串")
+        elif cid in cap_ids:
+            _err(out, sub + ".id", "DUPLICATE_ID", "能力 ID 重复：%r" % cid)
+        else:
+            cap_ids.add(cid)
+        _req(out, cap, sub, "name", str)
+        _enum(out, cap, sub, "status", ("available", "degraded", "missing", "manual"))
+        phases = _str_list(out, cap, sub, "phases", required=False, allow_empty=True)
+        for pid in phases:
+            if pid not in BOARD_PHASES:
+                _err(out, sub + ".phases", "BAD_ENUM", "未知阶段：%r" % pid)
+        _str_list(out, cap, sub, "available_tools", required=False, allow_empty=True)
+        _str_list(out, cap, sub, "missing_tools", required=False, allow_empty=True)
+        if "primary" in cap and cap["primary"] is not None:
+            _opt_text(out, cap, sub, "primary")
+        if "manual" in cap and cap["manual"] is not None:
+            _opt_text(out, cap, sub, "manual")
+        if "fallback" in cap and cap["fallback"] is not None:
+            _opt_text(out, cap, sub, "fallback")
+    phases_out = _list_of_dicts(out, obj, "index", "phases")
+    phase_ids = set()
+    for i, phase in enumerate(phases_out):
+        sub = f"index.phases[{i}]"
+        pid = phase.get("id")
+        if pid not in BOARD_PHASES:
+            _err(out, sub + ".id", "BAD_ENUM", "未知阶段：%r" % pid)
+        elif pid in phase_ids:
+            _err(out, sub + ".id", "DUPLICATE_ID", "阶段重复：%r" % pid)
+        else:
+            phase_ids.add(pid)
+        _req(out, phase, sub, "name", str)
+        _enum(out, phase, sub, "status", ("ready", "partial", "blocked", "n/a"))
+        _str_list(out, phase, sub, "available_tools", required=False, allow_empty=True)
+        _str_list(out, phase, sub, "missing_tools", required=False, allow_empty=True)
+    return out
+
+
 def validate_hint(obj: Any) -> List[Dict[str, str]]:
     """Hint：只影响优先级或触发审查，不是证据；必须有创建者与时间。"""
     out: List[Dict[str, str]] = []
@@ -2101,6 +2277,7 @@ VALIDATORS = {
     "qiling-import": validate_qiling_import,
     "scheduler-rules": validate_scheduler_rules,
     "scheduler-result": validate_scheduler_result,
+    "tool-index": validate_tool_index,
 }
 
 
