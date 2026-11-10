@@ -108,7 +108,7 @@ BOARD_EVENT_TYPES = (
     "BOARD_INITIALIZED", "FACT_RECORDED", "CANDIDATE_RECORDED",
     "EVIDENCE_RECORDED", "INTENT_CREATED", "INTENT_STATUS_CHANGED",
     "HINT_RECORDED", "EMULATION_RECORDED", "CANDIDATE_TRANSITIONED", "BACKTRACK",
-    "PHASE_ADVANCED",
+    "PHASE_ADVANCED", "INTENT_COMPLETED_WITH_RESULTS",
 )
 BOARD_PHASES = ("P0", "P1", "P2", "P3", "P4", "P5")
 
@@ -1827,6 +1827,22 @@ def validate_board_event(obj: Any) -> List[Dict[str, str]]:
                 if "retryable" in lf and not isinstance(lf["retryable"], bool):
                     _err(out, "event.payload.last_failure.retryable", "BAD_TYPE",
                          "retryable 必须是布尔值")
+    elif typ == "INTENT_COMPLETED_WITH_RESULTS":
+        _req(out, payload, "event.payload", "intent_id", str)
+        _req(out, payload, "event.payload", "worker", str)
+        _opt_int(out, payload, "event.payload", "attempt", minimum=1)
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            _err(out, "event.payload.result", "MISSING",
+                 "结果回写必须携带完整 scheduler-result")
+        else:
+            out.extend(validate_scheduler_result(result))
+            if result.get("intent_id") != payload.get("intent_id"):
+                _err(out, "event.payload.result.intent_id", "INTENT_MISMATCH",
+                     "结果 intent_id 与事件不一致")
+            if isinstance(run_id, str) and result.get("run_id") != run_id:
+                _err(out, "event.payload.result.run_id", "RUN_MISMATCH",
+                     "结果不属于当前黑板 run")
     elif typ == "BACKTRACK":
         _validate_backtrack(out, payload, "event.payload")
     return out

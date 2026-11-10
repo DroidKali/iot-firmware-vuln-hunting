@@ -166,13 +166,15 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 | `checks` | 每项检查的 `{name, status, detail, required}`，status ∈ `PASS`/`FAIL`/`WARN`/`SKIPPED` |
 | `summary` | `{pass, fail, warn, skipped, executed, total, error}` |
 | `result` | `pass`/`fail`；仅当无 FAIL、且 strict 下无 required 的 SKIPPED 时为 `pass` |
-| `blocked` | **机器可读阻断原因**：`{code, detail}`。code 含 `CHECK_FAILED`、`CHECK_NOT_EXECUTED`、`LAYER1_MISSING`、`LAYER1_CORRUPT`、`LAYER1_NO_INTEGRITY`、`LAYER1_SCHEMA`、`MANIFEST_*`、`STAGE_*`、`CAND_PARSE_ERROR`、`CAND_INPUT_INVALID` |
+| `blocked` | **机器可读阻断原因**：`{code, detail}`。code 含 `CHECK_FAILED`、`CHECK_NOT_EXECUTED`、`LAYER1_MISSING`、`LAYER1_CORRUPT`、`LAYER1_NO_INTEGRITY`、`LAYER1_SCHEMA`、`LAYER1_WALK_ERROR`、`LAYER1_ANALYZER_HOST`、`MANIFEST_*`、`STAGE_*`、`CAND_PARSE_ERROR`、`CAND_INPUT_INVALID` |
 | `candidate_input` | `{mode, schema, parse_complete, parse_errors, total, reason}`；`mode` ∈ `structured`/`text`/`legacy-text` |
-| `scan_integrity` | `{verdict, complete_raw, gaps, unwaived, waived, files_*, engine_verdict}`；未提供时为 `null` |
+| `scan_integrity` | `{verdict, complete_raw, gaps, unwaived, waived, files_*, walk_errors, engine_verdict, isolation}`；未提供时为 `null` |
 | `stages` | 各阶段 `{name, status, required, derived}` |
 | `inputs` | 每个输入文件的 sha256，用于证明「这份结论对应这份输入」 |
 
 `WARN` 不参与 `result` 判定，但必须出现在报告里：它表示「降级但可继续」，例如结构引擎不可用而退回正则。
+
+**Layer 1 完整性**：`scan_integrity.gaps` 来自 `partial_files` 与非 scope 类 `skipped_files`；`walk-error`（目录遍历失败）、`read-error`、`stat-failed`、`decode-error`、`too-large` 与 `analyzer-host` 都是硬缺口，未豁免即 `verdict=failed`，分别映射 `LAYER1_WALK_ERROR` / `LAYER1_READ_ERROR` / `LAYER1_ANALYZER_HOST` 等阻断码。`analyzer-host` 由 `engine_status.isolation.host_execution == "explicit-opt-in"` 触发：结构分析器在宿主机解析不可信文件。`scan-waiver/1.0` 可按文件+原因豁免，但仍会出现在报告的 `waived` 中。
 
 ## 8. SandboxRun（`sandbox-run/1.1`，兼容 1.0）
 
@@ -193,7 +195,7 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 
 退出码：`0` 成功 / `1` 命令失败 / `2` 用法 / `3` 隔离不可用（fail-closed）/ `4` 策略或授权拒绝 / `5` 资源准入拒绝（排队超时或预算耗尽）/ `124` 超时。
 
-容器模式会为 `--out` 目录补 other rwx + sticky（保留 owner/group 位，通常 0755 → 1757）后再挂载：bind mount 不做 UID 映射，容器内固定以 uid 65534 运行，否则写 `/out` 会 `Permission denied`。host 模式不改用户原目录权限；调整结果写入 `notes`，不属于 `sandbox-run` 契约字段。
+容器模式**不再向 other 开放写权限**：`--out` 默认 0700。POSIX 非 root 时容器以宿主 `uid:gid` 运行（bind mount 不做 UID 映射，宿主用户可直接写自己的目录）；只有宿主为 root（或 Windows 无 uid 映射）才用 65534，并把 `--out` 临时 `chown` 给该用户，退出后恢复原 mode/uid/gid。Windows 只把权限调整写入 `notes`，不改 ACL。
 
 ### 8.1 SandboxPolicy（`sandbox-policy/1.0`）
 
@@ -242,6 +244,8 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 **BenchResult**：`schema` / `tool` / `status` / `synthetic` / `generated_at`、`dataset`、`parameters`、`validation`（`status` / `warnings`）、`scope`（`split`、`samples`、`samples_by_split`、`findings_in_scope`、`findings_total`、`labels_total`、`labels_reviewed`、`labels_not_evaluable`）、`confusion_matrix`（`tp`/`fp`/`fn`/`tn`）、`metrics`（`micro` / `macro` / `by_category` / `by_arch` / `by_split`，每项含 precision/recall/F1/FPR/FNR）、`provisional`（`authoritative=false`、`reason`、`labels_included`、`metrics`；标签未复核或存在 `not_evaluable` 样本时必须给出）、`not_evaluable`、`out_of_scope`、`details`（TP/FP/FN 明细）、`baseline`、`exit_code`。**不存在顶层 `split` / `counts` / `micro`**——split 在 `scope.split`，计数在 `confusion_matrix`，指标在 `metrics.micro`。
 
 基线比较用 `--baseline <bench-result.json>`：recall 下降超过 `--max-recall-drop`（默认 0.05）或 FPR 上升超过 `--max-fpr-rise`（默认 0.02）→ `regression=true` 且退出码 **3**（不是 1）。`--strict` 不计算 `provisional`（字段为 null），但仍以 reviewed 标签计分。
+
+`--require-real`（`evaluate` / `validate` 均可）把「真实基准」从愿望变成门禁：`dataset.kind != "real"`，或 `dataset.real_firmware` 仍是 `pending` / `unknown` / `tbd` / `none` / `n/a` 等占位值时，直接判校验失败（退出 **1**），错误信息明确写「真实固件基准尚未建立」。合成集仍可用于契约回归，但不能冒充真实检测质量。
 
 ## 10. 兼容模式边界（重要）
 
@@ -301,17 +305,20 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 | `EMULATION_RECORDED` | `result`（完整 `emulation-result/1.0` 对象） |
 | `CANDIDATE_TRANSITIONED` | `candidate_id` / `from_state` / `to_state` / `reason` / `evidence_refs`；`policy` 可选 |
 | `INTENT_STATUS_CHANGED` | `intent_id` / `from_status` / `to_status`；`worker` / `attempts` / `outcome` / `result_refs` / `last_failure` / `reason` 可选 |
+| `INTENT_COMPLETED_WITH_RESULTS` | `intent_id` / `worker` / `result`（完整 `scheduler-result/1.0`）；`attempt` 可选 |
 | `PHASE_ADVANCED` | `from_phase` / `to_phase` / `reason` / `evidence_refs`；`advanced_by` 可选 |
 | `BACKTRACK` | `from_phase` / `to_phase` / `reason` / `evidence_refs`；`approved_by` 可选 |
 
 语义与失败模式：
 
 - 只追加：写入后 `flush` + `fsync`。重复 `dedupe_key` 返回 `duplicate=true` 且不再落盘；回放时同样跳过并计数。
+- **跨进程事务**（`board_store.py` 1.1）：所有写操作先抢 `audit.lock`（Windows `msvcrt.locking` / POSIX `fcntl.flock`，默认 10 秒超时，超时报 `LOCK_TIMEOUT`）。锁内重新加载事件日志，再执行去重、`seq` 分配、`apply_event`、追加事件与原子快照；`append(prepare=)` 的 `prepare(state)` 在锁内用最新状态构造载荷，因此 `set_intent_status(expected_status=...)` 是 CAS，`transition` / `backtrack` / `advance_phase` 也都在同一事务里重新取当前状态。进程崩溃时由 OS 释放锁；锁只保护同一工作区，不提供跨机器互斥。
 - `seq` 必须从 1 连续；`event_id` 唯一；同一日志出现多个 `run_id` 即 `RUN_MISMATCH`。
 - 空行可以容忍（计入 `blank`），但**非法 JSON 行必须报 `PARSE_ERROR` 并非零退出**，不得静默跳过。
 - 快照的 `revision` / `event_count` / `last_event_id` 与日志不一致时，`load` 会重建并标记 `recovered=true`；快照缺失也能从日志恢复。
 - 重复初始化报 `ALREADY_INITIALIZED`（除非显式 `--force`）；`BACKTRACK` 的 `from_phase` 不是当前阶段报 `PHASE_MISMATCH`，方向不是回退报 `NOT_A_BACKTRACK`。
 - `INTENT_STATUS_CHANGED` 的 `worker` / `attempts` / `outcome` / `result_refs` / `last_failure` 全部校验通过后才写入 `intent.status`；否则事件声称切换了状态，重放却停在旧状态。`claimed` 的 `attempts` 必须等于旧值加一，跳号或重放报 `ATTEMPT_MISMATCH`；`done` 必须带成功类 `outcome`，`failed` 必须带失败类 `outcome` 与 `last_failure`（`OUTCOME_REQUIRED` / `FAILURE_REQUIRED`）；`result_refs` 指向的对象必须已在黑板，否则 `RESULT_REF_NOT_FOUND`；重试回到 `open` 时本轮结果引用**追加**到 `result_refs`，不能覆盖上一轮，否则失败尝试的 Evidence/Fact 会脱离 Intent、审计链断裂。
+- `INTENT_COMPLETED_WITH_RESULTS` 是**结果回写的唯一原子入口**：`result` 必须是完整 `scheduler-result/1.0`，且 `result.intent_id` / `run_id` / `firmware_sha256` 与黑板一致。事件在一次 `apply_event` 中校验 worker / `attempt`、结果内 ID 重复与黑板冲突、`fact.evidence_refs` 是否悬空，然后**同时**插入 Evidence / Fact、累加 `result_refs` 并更新 Intent 状态；任一项失败整笔拒绝，不落半份证据（`DUPLICATE_ID` / `ID_CONFLICT` / `DANGLING_EVIDENCE` / `ATTEMPT_MISMATCH`）。成功类结果转 `done`，可重试失败在 `max_retries` 内回 `open`，否则转 `failed`。
 - `PHASE_ADVANCED` 的 `from_phase` 必须等于当前阶段（`PHASE_MISMATCH`），`to_phase` 必须是下一阶段（`NOT_AN_ADVANCE`），`reason` 非空（`REASON_REQUIRED`），`evidence_refs` 必须存在（`EVIDENCE_REF_INVALID` / `EVIDENCE_REF_NOT_FOUND`）。前进用 `PHASE_ADVANCED`，回退只能用 `BACKTRACK`，不能用前进事件倒着写。
 - 事件载荷内的对象若 `run_id` 与事件不一致，报 `RUN_MISMATCH`；引用不存在的证据 / 来源 / Intent，报 `DANGLING_EVIDENCE` / `DANGLING_REF`。
 - 回放遇到状态的 `from_state` 与快照当前状态不一致，报 `STATE_MISMATCH`；未知事件类型报 `UNKNOWN_EVENT`。
@@ -444,9 +451,19 @@ BoardState 是快照文件的结构，所有条目都必须绑定同一个 `run_
 - 所有证据必须同 run、同固件；跨 run → `EVIDENCE_NOT_BOUND_TO_RUN`，固件缺失/非法/不一致 → `EVIDENCE_FIRMWARE_MISSING` / `EVIDENCE_FIRMWARE_INVALID` / `FIRMWARE_MISMATCH`。
 - 漏洞类型要求目标绑定时，候选/policy 必须给出 `target_sha256`，且每条证据都必须带目标哈希并一致；缺失 → `TARGET_HASH_REQUIRED`，非法 → `TARGET_HASH_INVALID`，冲突 → `TARGET_HASH_MISMATCH`。
 - 证据生命周期：`revoked=true` → `EVIDENCE_REVOKED`；`superseded_by` 非空 → `EVIDENCE_SUPERSEDED`；`expires_at` 非法/已过期 → `EVIDENCE_EXPIRY_INVALID` / `EVIDENCE_EXPIRED`；`status=failed` → `EVIDENCE_FAILED`；同 `evidence_id` 不同内容 → `EVIDENCE_ID_CONFLICT`；`supersedes` / `contradicts` 命中本次选中证据 → `EVIDENCE_SUPERSEDES_CONFLICT` / `EVIDENCE_CONTRADICTION`；同 `conflict_group` 签名不一致 → `EVIDENCE_CONFLICT`。
-- 至少一条证据的 `type` 属于该漏洞类型允许的来源；否则 `EVIDENCE_TYPE_NOT_ACCEPTED`。
-- `policy.criteria` 必须覆盖该类型的 `required_criteria` 且全为 true；缺失 → `VALIDATION_CRITERIA_NOT_MET`。
-- 需要触发上下文的类型（命令注入、缓冲区溢出、路径穿越、认证绕过、SSRF、反序列化）必须有 `event.trigger=true`、匹配的触发事件，或候选自带 `trigger` / `poc`；否则 `MISSING_TRIGGER_CONTEXT`。
+- 至少一条证据的 `type` 属于该漏洞类型允许的来源；否则 `EVIDENCE_TYPE_NOT_ACCEPTED`。`validated` 用完整 `evidence_types`（可含静态/人工）；`confirmed` **只**用下表 `confirm_evidence_types`，纯静态线索不能成为最终结论。
+- `confirmed` 的运行时证据要求：
+
+  | 漏洞类型 | 可接受的确认证据 |
+  |---|---|
+  | `command-injection` / `path-traversal` / `auth-bypass` / `ssrf` / `deserialization` | `dynamic` / `emulation` |
+  | `buffer-overflow` | `dynamic` / `emulation` / `fuzzing` |
+  | `hardcoded-credential` | `static` / `manual` |
+  | `other` | `dynamic` / `emulation` / `manual` |
+
+  没有一条命中 → `CONFIRM_EVIDENCE_REQUIRED`。
+- `policy.criteria` 必须覆盖该类型的 `required_criteria` 且全为 true；缺失 → `VALIDATION_CRITERIA_NOT_MET`。`confirmed` 还必须提供 `policy.criterion_evidence`：对象，每个 `required_criteria` 对应非空 Evidence ID 字符串（或字符串数组），且这些 ID 必须在本轮选中的证据里；缺对象 → `CONFIRM_CRITERIA_EVIDENCE_REQUIRED`，判据未绑定 → `CONFIRM_CRITERION_UNBOUND`，值非法 → `CONFIRM_EVIDENCE_REF_INVALID`，引用不在本轮证据 → `CONFIRM_EVIDENCE_REF_NOT_FOUND`。
+- 需要触发上下文的类型（命令注入、缓冲区溢出、路径穿越、认证绕过、SSRF、反序列化）必须有 `event.trigger=true` 或匹配的触发事件；`validated` 还可由候选自带 `trigger` / `poc` / `poc_path` 兜底，**`confirmed` 不接受候选自证**，否则 `MISSING_TRIGGER_CONTEXT`。
 - `policy.expected` 与 `policy.actual` 要么都给且相等，要么都不给；只给一方 → `EXPECTED_ACTUAL_NOT_SUPPORTED`。
 - 其余失败码：`BAD_CANDIDATE` / `BAD_STATE` / `ILLEGAL_TRANSITION` / `TYPE_RULE_MISSING` / `CANDIDATE_TYPE_MISMATCH` / `EVIDENCE_REQUIRED` / `EVIDENCE_INVALID`；成功为 `OK`。
 

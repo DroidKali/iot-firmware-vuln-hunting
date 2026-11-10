@@ -80,6 +80,15 @@ KNOWN = {
         "note": "只调用 --version / image inspect 探测工具可用性；不读取固件，不执行固件",
     },
 }
+
+#: 同一脚本里可能同时存在宿主机调用与沙箱调用；按函数名细化，不能一概而论。
+SCOPE_OVERRIDES = {
+    ("sink_scan.py", "_sandbox_structural"): {
+        "classification": "sandbox-client",
+        "input_trust": "untrusted-bytes",
+        "note": "结构分析器经 sandbox_run.py 在容器内解析不可信字节；宿主机不执行",
+    },
+}
 SUBPROCESS_APIS = {"run", "Popen", "call", "check_call", "check_output",
                    "getoutput", "getstatusoutput"}
 OS_APIS = {"system", "popen", "spawnl", "spawnle", "spawnlp", "spawnlpe",
@@ -205,7 +214,10 @@ def build_inventory(root: str) -> Dict[str, Any]:
         for row in rows:
             if meta:
                 row.update(meta)
-            else:
+            override = SCOPE_OVERRIDES.get((name, str(row.get("scope"))))
+            if override:
+                row.update(override)
+            if not meta and not override:
                 row["classification"] = "unclassified"
                 row["input_trust"] = "unknown"
                 row["note"] = "未登记的执行路径；请先审查再登记到 exec_paths.KNOWN"

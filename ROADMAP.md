@@ -18,7 +18,7 @@
 | 检测质量评估 | 合成基准 + 回归门禁 | 增加合法来源、可追溯、人工复核的真实固件基准 |
 | EALB | 校准工具已就绪，样本不足时标 `heuristic` | 用真实工时样本校准，并在报告中限定适用范围 |
 
-**近期优先级**：M1（契约与黑板）、M2（资源与沙箱统一）、M3（EMBA 适配器）、M4（整机/定向仿真）已落地；2026-11-05 复查把 **M6 证据强绑定**与 **M7 动态调度闭环**提到 M5 之前并已落地：前者堵住「证据与候选不同 run/固件/目标也能升级」，后者把 Fact→Intent→执行→回写→阶段回退连成可审计闭环。下一步进入 M5（真实固件基准）；网络/服务、多 applet 与厂商内核仍未验证。M0 的盘点动作持续进行，不单独占一个版本。
+**近期优先级**：M1（契约与黑板）、M2（资源与沙箱统一）、M3（EMBA 适配器）、M4（整机/定向仿真）已落地；2026-11-05 复查把 **M6 证据强绑定**与 **M7 动态调度闭环**提到 M5 之前并已落地：前者堵住「证据与候选不同 run/固件/目标也能升级」，后者把 Fact→Intent→执行→回写→阶段回退连成可审计闭环。2026-11-10 按 `writing-block.md` 完成 **M8 可靠性整改**（跨进程事务、CAS、确认策略、原子回写、遍历错误、输出权限、分析器隔离、真实基准门禁、故障注入）。下一步进入 M5（真实固件基准）；网络/服务、多 applet 与厂商内核仍未验证。M0 的盘点动作持续进行，不单独占一个版本。
 
 ## 1. 设计原则
 
@@ -202,8 +202,8 @@ G1–G7 必须是代码校验器，而不是 Prompt、README 或报告模板。�
 记录命令、版本、退出码与结果。重点确认 Strict、Coverage、沙箱和结构化证据的真实调用路径。
 
 **现状**：2026-10 已完成一轮门禁、契约、沙箱入口与合成基准整改；M3/M4/M7 落地后
-selftest 覆盖 27 组 / 344 条断言，`exec_paths.py` 已给出 22 个脚本 / 12 条子进程调用的
-分类清单。2026-11-06 增加 Phase 0 前置的 `scripts/tool_index.py`：工具与能力清单外置在
+selftest 覆盖 28 组 / 369 条断言，`exec_paths.py` 已给出 22 个脚本 / 15 条子进程调用的
+分类清单（`host-static-analyzer` 2 条，结构分析器另有 sandbox-client 路径）。2026-11-06 增加 Phase 0 前置的 `scripts/tool_index.py`：工具与能力清单外置在
 `assets/tool-registry.json`（`tool-registry/1.0`，41 个工具 / 54 项能力），探测这些实现的版本与
 可用性，输出 `00-tool-index.json`；缺失工具给出官方文档、固定安装配方与 fallback，不让 Agent
 在 Phase 1/4 才撞 `command not found`。注册表加载失败即退出 2，`--registry` 可替换。沙箱已在无运行时、Python 桩运行时与 **Ubuntu 24.04.5 + Docker 29.9.2** 下验证
@@ -373,7 +373,8 @@ policy 与 evidence 同时给出时才检查；无 schema 的历史弱证据仍�
 run、固件不一致、缺目标哈希、缺 schema、contracts 不可导入、多条证据中混入异 run、
 证据撤销、证据过期、同冲突组结论不一致、证据声明取代同时选中的证据；另测
 `board_store.py transition` 引用不存在证据时返回 `EVIDENCE_REF_NOT_FOUND`。M6 完成时
-M6 完成时全量 selftest 为 25 组 / 311 条断言；M7 后为 26 组 / 331 条；加入工具索引第 27 组后为 27 组 / 344 条。
+全量 selftest 为 25 组 / 311 条断言；M7 后为 26 组 / 331 条；加入工具索引第 27 组后为
+27 组 / 344 条；M8 可靠性整改加入第 28 组后为 28 组 / 369 条。
 
 **边界**：历史 `evidence/1.0` 仍可由 `contracts.py` 读取以兼容旧产物，但**不能**用于
 `validated` / `confirmed`；黑板导入阶段仍允许先落盘弱证据，升级时统一拒绝。M6 只解决
@@ -414,12 +415,33 @@ M6 完成时全量 selftest 为 25 组 / 311 条断言；M7 后为 26 组 / 331 
 重复 plan 去重且 revision 不变、next 只列 READY、紧策略 exit 5 且 Intent 保持 open、
 claim attempts 递增、可重试失败回 open、超过 max_retries 转 failed + outcome、新 Fact 生成
 新 Intent、SUCCESS 回写 Evidence/Fact、PHASE_ADVANCED、BACKTRACK 与最终 verify。全量为
-M7 落地时 26 组 / 331 条断言；加入工具索引第 27 组后全量 27 组 / 344 条。
+M7 落地时 26 组 / 331 条断言；加入工具索引第 27 组后 27 组 / 344 条；M8 加入第 28 组后
+28 组 / 369 条。
 
-**边界**：当前是单 Agent 串行闭环，没有并发 Planner、跨进程 claim / heartbeat 或抢占；
+**边界**：当前是单 Agent 串行闭环，没有并发 Planner、claim 租约 / heartbeat 或抢占；
+M8 已用 `audit.lock` + `expected_status` 让跨进程 claim 只有一个成功，但没有租约超时回收。
 `stop_conditions` 作为 Intent 的执行契约记录，由执行器遵守，调度器只强制 `max_retries` 与
 状态机；`claim` 的资源检查是预检，不代替 `sandbox_run.py` 的真实槽位与预算；这层不判断漏洞，
 只保证「谁在什么证据下做了什么、失败如何分类、下一步为什么这样走」可审计。
+
+### M8：可靠性整改（2026-11-10 已落地）
+
+**为什么需要**：`writing-block.md` 的复查指出，M1–M7 的闭环在**并发、崩溃、证据强度与不可信输入**上仍有缺口：黑板追加无跨进程锁（A01）、`confirmed` 与 `validated` 共用证据策略（A02）、结果回写可能留下半份 Evidence（A03）、目录遍历错误被静默忽略（A04）、沙箱输出目录向 other 开放写权限（A05）、结构分析器在宿主机解析不可信文件（A06）、基准只有合成集（A07）、`claim` 检查与写入非原子（A09）、缺少故障注入测试（A11）。这些不是新功能，而是让既有闭环在失败与竞争下仍然可信。
+
+**已落地**：
+- **A01 / A09 事务与 CAS**：`board_store.py` 升 `1.1`，新增 `WorkspaceLock`（`audit.lock`，Windows `msvcrt.locking` / POSIX `fcntl.flock`，默认 10 秒超时）。`append` 在一次锁内完成 reload → dedupe → seq → `apply_event` → 追加事件（fsync）→ 原子快照；`set_intent_status` 支持 `expected_status`，`board_scheduler.py claim` 用 `expected_status="open"`，两个 worker 只有一个能领取。
+- **A02 confirmed 证据策略**：`board_transitions.py` 为每类漏洞增加 `confirm_evidence_types`；`confirmed` 只接受运行时/仿真证据（命令注入、路径遍历、认证绕过、SSRF、反序列化 → dynamic/emulation；缓冲区溢出另接受 fuzzing；硬编码凭据可接受 static/manual）。`policy.criterion_evidence` 必须把每个 `required_criteria` 绑到本轮 Evidence ID；候选自带 `poc` / `trigger` 不再兜底。错误码 `CONFIRM_EVIDENCE_REQUIRED` / `CONFIRM_CRITERIA_EVIDENCE_REQUIRED` / `CONFIRM_CRITERION_UNBOUND` / `CONFIRM_EVIDENCE_REF_*`。
+- **A03 原子结果回写**：新事件 `INTENT_COMPLETED_WITH_RESULTS` 携带完整 `scheduler-result/1.0`；`apply_event` 在一次重放中校验 worker/attempt、ID 冲突、悬空引用，然后同时插入 Evidence/Fact 并更新 Intent。`board_store.complete_intent` 只追加这一条事件；`board_scheduler.py complete` 不再先逐条写证据。任一冲突整笔拒绝。
+- **A04 目录遍历错误**：`sink_scan.py` 的 `os.walk` 增加 `onerror`，记录 `walk-error`（path/error），计入 `skipped_files` 与 `scan_integrity.walk_errors`；verdict 直接 `failed`。`coverage_gate.py` 把 `walk-error` 列为硬缺口并映射 `LAYER1_WALK_ERROR`。
+- **A05 输出权限**：`sandbox_run.py` 不再 `mode | 0o1007`；`--out` 默认 0700。POSIX 非 root 以宿主 `uid:gid` 运行，root（或 Windows）才用 65534 并临时 chown；退出时恢复原 mode/uid/gid。
+- **A06 结构分析器隔离**：`sink_scan.py` 新增 `--analyzer-mode none|host|sandbox`（默认 none）。sandbox 经 `sandbox_run.py` 在容器内运行 semgrep/ast-grep（network none、固件只读、资源上限、路径 `shlex.quote`），只回布尔；host 必须 `--i-understand-analyzer-host-risk`。`engine_status.isolation` 记录 mode/image/network/firmware_mount/host_execution/last_run；`coverage_gate.py` 把 `host_execution=explicit-opt-in` 记为 `analyzer-host` 硬缺口（`LAYER1_ANALYZER_HOST`）。2026-11-10 在 Ubuntu 24.04 + Docker 29.9.3 上用真实 ast-grep 0.51.1 与 semgrep 1.184.0 镜像验证了命中、字符串误报过滤、引擎缺失三条路径；semgrep 在全离线容器里需要 `HOME=/tmp` 与 `--disable-version-check`。
+- **A07 真实基准门禁**：`bench_eval.py` 新增 `--require-real`；`dataset.kind != real` 或 `real_firmware` 为 pending/unknown 时拒绝并明确「真实固件基准尚未建立」。合成基准继续作为契约回归，不冒充真实质量。
+- **A08 / A10 能力边界**：README 增加 Qiling/QEMU 五层仿真矩阵与 EMBA 适配器 Implemented / Not implemented 表，避免把「日志解析」写成「会跑 EMBA」。
+- **A11 故障注入**：selftest 第 28 组用两个并发进程追加 16 条证据、双 worker 抢同一 Intent、构造含已存在 Evidence 的结果验证整笔拒绝、写坏快照验证恢复、monkeypatch `os.walk` 触发遍历错误、检查 analyzer 默认/host/sandbox 三档与 `--require-real`。
+
+**验收**：`PYTHONIOENCODING=utf-8 python scripts/selftest.py` → EXIT=0，**28 组 / 369 条断言**；第 28 组全部通过。`exec_paths.py` 实测 22 个脚本 / 15 条子进程调用，`host-static-analyzer` 降为 2 条，`_sandbox_structural` 归入 `sandbox-client`。
+
+**边界**：真实固件基准仍未建立（A07 只是门禁，不是数据集）；仓库不附带 semgrep/ast-grep 镜像，sandbox 模式的镜像需自备；真实镜像验证只在 Ubuntu 24.04 + Docker 29.9.3 手工执行，尚未纳入 CI；并发测试只在单机本地文件系统上跑，网络文件系统的 `flock` 语义未验证；锁没有租约/心跳，进程被 SIGKILL 后依赖 OS 释放，长事务会阻塞其他写者；A08 的五层矩阵是能力声明，用户态服务、多进程、NVRAM 与厂商内核仍未实测。
 
 ### M5：真实固件基准
 

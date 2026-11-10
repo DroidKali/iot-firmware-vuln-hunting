@@ -96,6 +96,23 @@ DEFAULT_TMPFS = "/tmp:rw,noexec,nosuid,size=64m"
 DEFAULT_TMPFS_VAR = "/var/tmp:rw,noexec,nosuid,size=64m"   # QEMU -snapshot 默认写这里
 DEFAULT_TMPDIR = "/tmp"                        # 固定值，不继承宿主环境
 CONTAINER_UID = "65534:65534"                 # nobody:nogroup，无家目录、无凭据
+
+
+def container_user() -> str:
+    """容器运行身份：优先宿主当前 uid:gid，root 时退回 nobody。
+
+    bind mount 不做 UID 映射。以宿主 uid 运行时，输出目录只需 0700 即可写，
+    不必把 other 放开到 rwx；只有宿主是 root 时才用 65534，并在执行前把输出
+    目录 chown 给该 uid（执行后恢复原属主/模式）。
+    """
+    if os.name == "posix":
+        try:
+            uid, gid = os.geteuid(), os.getegid()
+        except AttributeError:  # pragma: no cover - 极旧的 Python/平台
+            return CONTAINER_UID
+        if uid != 0:
+            return "%d:%d" % (uid, gid)
+    return CONTAINER_UID
 FIRMWARE_TARGET = "/firmware"                 # 容器内只读挂载点
 OUT_TARGET = "/out"                           # 容器内可写挂载点
 
@@ -391,7 +408,7 @@ def build_container_argv(runtime_argv: List[str], image: str, firmware: str, out
         "--read-only",                          # 根文件系统只读，只有 /out 与 /tmp 可写
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges",
-        "--user", CONTAINER_UID,                # 无根、无家目录、无凭据
+        "--user", container_user(),             # 无根、无家目录、无凭据
         "--memory", args.memory,
         "--cpus", args.cpus,
         "--pids-limit", str(args.pids),
@@ -511,7 +528,7 @@ def sandbox_policy(args: argparse.Namespace) -> Dict[str, Any]:
         "read_only_rootfs": True,
         "cap_drop": "ALL",
         "no_new_privileges": True,
-        "user": CONTAINER_UID,
+        "user": container_user(),
         "memory": args.memory,
         "cpus": args.cpus,
         "pids_limit": args.pids,
@@ -906,6 +923,7 @@ def main(argv=None) -> int:
         return rec
 
     ctx["admission"] = admission_snapshot("pending")
+    ctx["out_restore"] = None
 
     def finish(code: int) -> int:
         """统一收尾：释放槽位 / 补时间 / 写 JSON、Markdown → stderr 摘要。"""
@@ -920,6 +938,17 @@ def main(argv=None) -> int:
                 notes.append("未指定 --out，临时输出目录已删除：%s" % tmp)
             except OSError as exc:
                 notes.append("临时输出目录删除失败（%s）：%s" % (tmp, exc))
+        out_restore = ctx.get("out_restore")
+        if out_restore:
+            path = out_restore["path"]
+            if os.path.exists(path):
+                try:
+                    os.chmod(path, out_restore["mode"])
+                    if os.name == "posix":
+                        os.chown(path, out_restore["uid"], out_restore["gid"])
+                    notes.append("输出目录权限已恢复：%s" % path)
+                except OSError as exc:
+                    notes.append("输出目录权限恢复失败（%s）：%s" % (path, exc))
 
         elapsed = round(time.monotonic() - t0, 3)
         if ctx["stdout_bytes"] > CAPTURE_LIMIT:
@@ -1129,16 +1158,18 @@ def main(argv=None) -> int:
                         % (fw_abs, out_abs))
 
     def prepare_out_for_container() -> None:
-        """让容器内的 uid 65534 能写入 bind mount 的输出目录。
+        """让容器以最小权限写入 bind mount，同时不把输出目录暴露给其他用户。
 
-        docker/podman 的 bind mount 不做 UID 映射：宿主机上由 root 或普通用户
-        创建的 0755 目录，进容器后对 65534 只有 r-x，写 /out 会 Permission denied。
-        这里补 other 的 rwx 与 sticky（保留 owner/group 位）：other 写让容器能落
-        产物，sticky 让其他本地用户不能删除容器创建的文件。只在 sandbox 模式调用，
-        host 模式沿用用户原目录权限。非 POSIX 平台 chmod 语义有限，失败只记 notes，
-        由命令自身的 exit_code 暴露问题，不静默假装可写。
+        bind mount 不做 UID 映射：容器以宿主当前 uid 运行时，0700 的目录已可写，
+        不需要给 other 任何权限。只有宿主是 root 时才把容器降到 65534，并把目录
+        chown 给该 uid；执行结束后恢复原属主/模式。Windows 不做 chmod 放宽，
+        容器 uid 映射交给 Docker Desktop。
         """
         if not out_abs:
+            return
+        if os.name != "posix":
+            notes.append("Windows 不修改输出目录权限；容器 uid 映射由运行时处理"
+                         "（目录不应授予 other 写权限）")
             return
         try:
             st = os.stat(out_abs)
@@ -1146,17 +1177,34 @@ def main(argv=None) -> int:
             notes.append("无法检查输出目录权限：%s" % exc)
             return
         mode = stat.S_IMODE(st.st_mode)
-        wanted = mode | 0o1007
-        if wanted == mode:
+        user = container_user()
+        wanted = mode | 0o700
+        if user == "%d:%d" % (os.geteuid(), os.getegid()):
+            if wanted == mode:
+                return
+            try:
+                os.chmod(out_abs, wanted)
+            except OSError as exc:
+                notes.append("输出目录权限无法调整为属主可写（%04o）：%s" % (mode, exc))
+                return
+            ctx["out_restore"] = {"path": out_abs, "mode": mode,
+                                  "uid": st.st_uid, "gid": st.st_gid}
+            notes.append("输出目录 %s 原模式 %04o，已补属主 rwx 为 %04o"
+                         "（容器以宿主 uid %s 写入）" % (out_abs, mode, wanted, user))
             return
+        # 宿主是 root：容器降到 nobody，目录交给它；结束后恢复 root 属主。
+        ctx["out_restore"] = {"path": out_abs, "mode": mode,
+                              "uid": st.st_uid, "gid": st.st_gid}
         try:
-            os.chmod(out_abs, wanted)
+            os.chmod(out_abs, 0o700)
+            os.chown(out_abs, 65534, 65534)
         except OSError as exc:
-            notes.append("输出目录权限无法调整为容器可写（%04o）：%s" % (mode, exc))
+            ctx["out_restore"] = None
+            notes.append("输出目录无法交给容器 uid 65534（%04o）：%s"
+                         "；执行可能因权限失败" % (mode, exc))
             return
-        notes.append("输出目录 %s 原模式 %04o，已补 other rwx + sticky 为 %04o"
-                     "（容器以 uid %s 写入，bind mount 不做 UID 映射）"
-                     % (out_abs, mode, wanted, CONTAINER_UID))
+        notes.append("输出目录 %s 已 chmod 0700 并 chown 65534:65534，执行后恢复"
+                     % out_abs)
 
     def ensure_out() -> Optional[int]:
         """执行前准备输出目录（未给 --out 时用临时目录，结束后由 finish 删除）。
@@ -1167,7 +1215,7 @@ def main(argv=None) -> int:
         if out_abs:
             if not os.path.isdir(out_abs):
                 try:
-                    os.makedirs(out_abs, exist_ok=True)
+                    os.makedirs(out_abs, mode=0o700, exist_ok=True)
                 except OSError as exc:
                     return fail(EXIT_USAGE, "无法创建输出目录 %s：%s" % (out_abs, exc))
             if args.mode != "host":
@@ -1367,9 +1415,9 @@ def main(argv=None) -> int:
         notes.append("请求 --network %s：容器仍以 --network none 启动（不接任何外部网络）；"
                      "容器内 lo 的启用取决于镜像与命令，本工具不授予 CAP_NET_ADMIN"
                      % args.network)
-    notes.append("容器不注入任何宿主机环境变量（无凭据）；输出目录已按 uid %s "
-                 "调整 other rwx + sticky，写入失败仍会如实记录 exit_code"
-                 % CONTAINER_UID)
+    notes.append("容器不注入任何宿主机环境变量（无凭据）；容器以 uid %s 运行，"
+                 "输出目录不放宽 other 权限，写入失败仍会如实记录 exit_code"
+                 % container_user())
 
     name = "iotfw-sandbox-" + uuid.uuid4().hex[:12]
     rt_argv = runtime.get("argv") or [runtime.get("path") or runtime["name"]]

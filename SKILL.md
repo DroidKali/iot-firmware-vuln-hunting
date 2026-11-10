@@ -169,7 +169,7 @@ python scripts/tool_index.py --install binwalk --yes
 
 IDA Pro MCP 条目固定为 IDA 官方开源版 [HexRaysSA/ida-mcp](https://github.com/HexRaysSA/ida-mcp)，不是旧的社区版 `mrexodia/ida-pro-mcp`：官方安装器是 `uvx ida-hcli mcp install`，MCP 连接用 `uvx --exclude-newer=1s ida-mcp stdio`。官方 CLI 没有 `--version`，所以索引只能探测 `ida-mcp --help` 是否存在，版本显示为未知（degraded）而不是伪造版本号。
 
-字段定义见 `references/data-contracts.md` §21，回归见 selftest 第 27 组。
+字段定义见 `references/data-contracts.md` §21，回归见 selftest 第 28 组。
 
 #### 0.1 度量与定界
 
@@ -637,7 +637,7 @@ strings -a -t x usr/sbin/httpd | rg -i 'referer|cmd|ping|traceroute'
 
 静态链路完整 ≠ 可利用。固件场景还必须过三关：**能不能跑到这段代码**、**环境依赖（NVRAM/ioctl/硬件）能不能满足**、**有没有运行时防护**。
 
-黑板上对应 `pending_dynamic_validation → validated → confirmed`：`validated` 是静态/仿真链路闭合，`confirmed` 是动态复现后的最终态；两步都要过 `board_transitions.py check` 的类型化证据校验。M6 起，候选必须自带合法 `run_id` 与 `firmware_sha256`，所有参与判定的证据必须是 `evidence/1.1`、同 run / 同固件，并按漏洞类型带 `target_sha256`；撤销、过期、被取代、冲突证据一律拒绝，`contracts.py` 不可导入时 fail-closed。状态与事件日志是审计留痕，不替代 `coverage_gate.py` 的门禁判定。
+黑板上对应 `pending_dynamic_validation → validated → confirmed`：`validated` 是静态/仿真链路闭合，`confirmed` 是动态复现后的最终态；两步都要过 `board_transitions.py check` 的类型化证据校验。M6 起，候选必须自带合法 `run_id` 与 `firmware_sha256`，所有参与判定的证据必须是 `evidence/1.1`、同 run / 同固件，并按漏洞类型带 `target_sha256`；撤销、过期、被取代、冲突证据一律拒绝，`contracts.py` 不可导入时 fail-closed。A02 起 `confirmed` 再收紧：命令注入 / 路径遍历 / 认证绕过 / SSRF / 反序列化只接受 `dynamic` 或 `emulation`，缓冲区溢出另接受 `fuzzing`，硬编码凭据可接受静态证据；`verify-policy.json` 的 `criterion_evidence` 必须把每个 `required_criteria` 绑到本轮 Evidence ID，候选自带的 `poc` / `trigger` 不能替代触发证据。状态与事件日志是审计留痕，不替代 `coverage_gate.py` 的门禁判定。
 
 #### 前置：执行边界（在选路之前）
 
@@ -670,7 +670,7 @@ uv run scripts/sandbox_run.py \
 
 1. **fail-closed**：隔离运行时不可用时，脚本以 **退出码 3** 拒绝执行，并在 JSON 里写 `mode="fail-closed"`、`host_fallback=false`。**没有自动回退宿主机这条路径**——"探测失败"与"沙箱可用"在报告里必须长得不一样。
 2. **宿主机执行只能显式授权**：`--mode host --i-understand-host-risk`，输出标记 `mode="host-opt-in"`、`policy.host_execution="explicit-opt-in"`。只用于完全可信的自建 rootfs。
-3. **隔离参数固定**：`--network none`、`--read-only`、`--cap-drop=ALL`、`no-new-privileges`、`--user 65534:65534`、`--memory 512m --cpus 1 --pids-limit 128`、`/tmp` noexec、固件 `:ro`、输出目录与固件目录**不得重叠**。超时由 Python 侧 kill 并清理容器。容器内 uid 65534 与宿主机目录不做 UID 映射，sandbox 模式会为 `--out` 补 other rwx + sticky（0755 → 1757）后再挂载；host 模式不改用户原目录权限。
+3. **隔离参数固定**：`--network none`、`--read-only`、`--cap-drop=ALL`、`no-new-privileges`、`--memory 512m --cpus 1 --pids-limit 128`、`/tmp` noexec、固件 `:ro`、输出目录与固件目录**不得重叠**。超时由 Python 侧 kill 并清理容器。POSIX 非 root 时容器直接以宿主 `uid:gid` 运行；只有宿主为 root（或 Windows 无 uid 映射）才用 65534，并把 `--out` 临时 `chown` 给该用户。`--out` 默认 0700，不再补 other 写权限；host 模式不改用户原目录权限。
 4. **留痕**：JSON 记录容器命令行、运行时版本、固件目录指纹（`sha256`）、退出码、stdout/stderr 头部、超时标志。动态结论必须能指回这份记录；**在宿主机直接跑固件二进制得到的结论不予采信**。
 5. **先准入再启动**：`sandbox-run/1.1` 的 `admission` 必须记录策略哈希、申请资源、槽位等待与预算余量；`--check` 不占槽。准入被拒（退出 5）时不得留下部分产物，也不得改用宿主机重跑。
 
@@ -692,7 +692,22 @@ uv run scripts/sandbox_run.py \
 
 `--slots` / `--queue-timeout` / `--budget` 只能收紧策略，不能放宽；准入拒绝退出码为 **5**，JSON 里 `command=[]`、`exit_code=null`，能从记录里区分「没启动」与「跑了但失败」。
 
-**真实环境复验（2026-10-28）**：Ubuntu 24.04.5 LTS + Docker 29.9.0 + `debian:bookworm-slim`。容器内确认 `uid=65534`、仅 `lo`、`CapEff=0`、`NoNewPrivs=1`、内存 512 MiB、固件与根文件系统只读；`/out` 在补 other rwx + sticky 后可写。隐藏 docker 后 auto 退出 3 且不创建输出目录；`sleep 30` + `--timeout 2` 退出 124 且容器与临时目录清理；持槽时 `--queue-timeout 1` 退出 5、`--queue-timeout 15` 排队后成功；`--budget 2` 排队中耗尽预算退出 5。
+**真实环境复验（2026-10-28）**：Ubuntu 24.04.5 LTS + Docker 29.9.0 + `debian:bookworm-slim`。容器内确认 `uid=65534`、仅 `lo`、`CapEff=0`、`NoNewPrivs=1`、内存 512 MiB、固件与根文件系统只读；输出目录按当前 uid 授权后可写（A05 后不再向 other 开放写权限）。隐藏 docker 后 auto 退出 3 且不创建输出目录；`sleep 30` + `--timeout 2` 退出 124 且容器与临时目录清理；持槽时 `--queue-timeout 1` 退出 5、`--queue-timeout 15` 排队后成功；`--budget 2` 排队中耗尽预算退出 5。
+
+#### 结构分析器隔离（A06）
+
+`ast-grep` / `semgrep` 解析的是固件里的不可信文件，解析器本身也是攻击面。`sink_scan.py` 默认 `--analyzer-mode none`，不调用外部分析器；需要结构级二次过滤时用 `sandbox`：
+
+```bash
+# 隔离模式：镜像内需有规则实际使用的引擎（默认规则用 ast-grep）；经 sandbox_run 执行，只回命中/未命中/引擎不可用标记
+uv run scripts/sink_scan.py fw-audit/$TARGET/01-extract \
+    --analyzer-mode sandbox --analyzer-image analyzer-tools:latest \
+    --json fw-audit/$TARGET/10-layer1-sinks.json
+```
+
+`host` 模式必须显式 `--i-understand-analyzer-host-risk`，且 `engine_status.isolation.host_execution=explicit-opt-in` 会被 `coverage_gate.py` 记为 `analyzer-host` 缺口（`LAYER1_ANALYZER_HOST`）并阻断 strict。`isolation` 还记录 `mode` / `image` / `network` / `firmware_mount` / `last_run`（含 `engine_available` / `error`）；引擎缺失或执行错误回退正则并记 `engine-error`，不会当作未命中丢弃。仓库不附带分析器镜像；`sandbox` 缺 `--analyzer-image` 直接退出 2。
+
+2026-11-10 在 Ubuntu 24.04 + Docker 29.9.3 上用真实镜像验证：ast-grep 0.51.1 与 semgrep 1.184.0 都能把真实 `system()` 调用结构确认、把字符串里的 `system(id)` 过滤掉；换成不含引擎的 `debian:bookworm-slim` 时回退正则并记 `engine-unavailable`/`engine-error`，门禁 `verdict=failed`，没有静默丢命中。semgrep 在全离线容器里需要 `HOME=/tmp` 与 `--disable-version-check`（脚本已内置），否则版本检查可能挂到超时。
 
 #### 既有 EMBA 产物的离线导入（M3）
 
@@ -770,8 +785,8 @@ Phase 4/5 的「下一步做什么」不再只靠 Agent 记忆：`board_schedule
 
 - **规则与去重**：`scheduler-rules/1.0` 的 `when` 支持 `fact_type` / `value_present` / `value_truthy` / `value_equals`；`plan` 生成 `intent/1.1`，带 `from`、`creator`、`provenance.fact_ids` 与 `dedupe_key=sha256(rule,version,type,target,params)`。重复评估只记 `deduped`，不会因同一事实反复建任务。
 - **优先级与依赖**：`priority` 0..100；Hint 最多加 15，只能调顺序，不能绕过准入。`depends_on` 按规则拓扑排序，环直接拒绝；依赖 `failed` / `cancelled` / 缺失分别阻断，不会永久 `WAITING`。
-- **统一资源准入**：`claim` 只领取 READY 且 `open` 的 Intent，先调 `resource_manager.check_request` 对拍 `sandbox-policy/1.0`；超时/内存/CPU/PID/镜像越界，或策略未允许 host 时退出 **5**，Intent 保持 `open`。领取**不占容器槽位**，真正槽位由 `sandbox_run.py` 启动时占用。
-- **结果回写与停止**：`complete` 校验 `scheduler-result/1.0`，先写 Evidence/Fact 再改状态；`SUCCESS` / `PARTIAL` / `NOT_APPLICABLE → done`，可重试失败在 `max_retries` 内回 `open` 并保留 `last_failure`，超限转 `failed` 且必须记录 `outcome`。`PARTIAL` 必须列 `limitations`，不能冒充成功；`SUCCESS` 没有任何输出会被 `RESULT_NO_OUTPUT` 拒绝。
+- **统一准入与 CAS**：`claim` 只领取 READY 且 `open` 的 Intent，先调 `resource_manager.check_request` 对拍 `sandbox-policy/1.0`；超时/内存/CPU/PID/镜像越界，或策略未允许 host 时退出 **5**，Intent 保持 `open`。状态写入带 `expected_status=open`，两个 worker 竞争时只有一个成功。领取**不占容器槽位**，真正槽位由 `sandbox_run.py` 启动时占用。
+- **结果回写与停止**：`complete` 校验 `scheduler-result/1.0` 后只追加一条 `INTENT_COMPLETED_WITH_RESULTS`，在一次加锁重放中同时插入 Evidence/Fact 并更新 Intent；任一 ID 冲突或悬空引用整笔拒绝，不会留下半份证据；`SUCCESS` / `PARTIAL` / `NOT_APPLICABLE → done`，可重试失败在 `max_retries` 内回 `open` 并保留 `last_failure`，超限转 `failed` 且必须记录 `outcome`。`PARTIAL` 必须列 `limitations`，不能冒充成功；`SUCCESS` 没有任何输出会被 `RESULT_NO_OUTPUT` 拒绝。
 - **阶段前进/回退**：`board_store.py advance` 写 `PHASE_ADVANCED`，`from` 必须是当前阶段、`to` 必须是下一阶段、`reason` 必填，如给出证据则必须已存在；`backtrack` 只能从当前阶段回退，两者都不允许跳阶段或静默改状态。
 
 ```bash
@@ -795,7 +810,7 @@ uv run scripts/board_scheduler.py backtrack --workspace fw-audit/$TARGET/board \
     --from-phase P2 --to-phase P1 --reason "服务清单不完整" --evidence E-...
 ```
 
-规则、结果、Intent 1.1 与 `PHASE_ADVANCED` 字段见 `references/data-contracts.md` §20；selftest 第 26 组覆盖去重、准入拒绝、两次尝试后的停止、成功回写与阶段回退。
+规则、结果、Intent 1.1 与 `PHASE_ADVANCED` 字段见 `references/data-contracts.md` §20；selftest 第 26 组覆盖去重、准入拒绝、两次尝试后的停止、成功回写与阶段回退，第 28 组用并发进程验证锁、CAS 与原子回写。
 
 ### 4.0 选路判据：要证明什么 → 需要哪组原子能力
 
@@ -1127,7 +1142,7 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 | `scripts/emu_run.py` | M4：复核计划、镜像与内核哈希，固定经 `sandbox_run.py --mode sandbox` 执行 QEMU，采串口/退出码并输出 `emulation-result/1.0`；无宿主机回退 |
 | `scripts/adapter_qiling.py` | M4：Qiling 定向仿真——只读计划、经 sandbox 执行、按 trigger marker / sink hook 重算事件并输出 `qiling-import/1.0`；无宿主机回退 |
 | `scripts/qiling_runner.py` | M4：容器内 Qiling runner——安装 syscall / API / libc Hook，写事件 JSONL 与运行报告；不判定漏洞，无宿主模式 |
-| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证其余二十一个脚本的判据，并把**文档示例命令与 CLI 参数表对拍**；覆盖工具注册表、黑板事件/快照/状态机、资源准入、EMBA 适配、整机仿真计划/结果分类、Qiling 定向仿真与 M7 调度闭环（27 组 / 344 条断言，结尾自报总数） |
+| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证其余二十一个脚本的判据，并把**文档示例命令与 CLI 参数表对拍**；覆盖工具注册表、黑板事件/快照/状态机、资源准入、EMBA 适配、整机仿真计划/结果分类、Qiling 定向仿真与 M7 调度闭环（28 组 / 369 条断言，结尾自报总数） |
 
 除 `qiling_runner.py`（只在 Qiling 容器镜像内运行）外，脚本都只用 Python 标准库，无第三方依赖，Windows / Linux / macOS 均可运行。用 `uv` 管理环境（`uv run` 自动建临时环境；无 `uv` 时直接 `python scripts/xxx.py` 亦可）。安装后建议先跑一次自检：
 

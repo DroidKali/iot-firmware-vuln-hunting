@@ -38,6 +38,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -57,10 +58,12 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"无法加载同目录模块：{exc}")
 
-VERSION = "1.0"
+VERSION = "1.1"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 EVENTS_NAME = "audit-events.jsonl"
 BOARD_NAME = "audit-board.json"
+LOCK_NAME = "audit.lock"
+LOCK_TIMEOUT_S = 10.0
 
 
 class StoreError(Exception):
@@ -68,6 +71,95 @@ class StoreError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+def _try_lock_fd(fd: int) -> bool:
+    """对 1 个字节加独占锁；已被占用返回 False。"""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _unlock_fd(fd: int) -> None:
+    try:
+        if os.name == "nt":
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except (OSError, ValueError):
+        pass
+
+
+class WorkspaceLock:
+    """黑板工作区的跨进程写锁（单字节文件锁，进程崩溃由操作系统释放）。
+
+    append 必须在同一把锁内完成「重新读日志 → 去重 → 分配 seq → 应用事件 →
+    追加日志 → 替换快照」。否则两个进程会拿到同一个 seq，或者同时通过
+    dedupe。锁只保护写；只读 verify 仍可并发，靠事件链自身校验。
+    """
+
+    def __init__(self, workspace: str, timeout_s: float = LOCK_TIMEOUT_S) -> None:
+        self.workspace = os.path.abspath(workspace)
+        self.path = os.path.join(self.workspace, LOCK_NAME)
+        self.timeout_s = max(0.0, float(timeout_s))
+        self.fd: Optional[int] = None
+
+    def __enter__(self) -> "WorkspaceLock":
+        start = time.monotonic()
+        deadline = start + self.timeout_s
+        while True:
+            try:
+                fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+            except FileNotFoundError as exc:
+                raise StoreError("WORKSPACE_MISSING",
+                                 f"黑板工作区不存在：{self.workspace}") from exc
+            except OSError as exc:
+                raise StoreError("LOCK_ERROR",
+                                 f"无法打开黑板锁 {self.path}：{exc}") from exc
+            try:
+                if os.fstat(fd).st_size == 0:
+                    os.write(fd, b"0")
+                    os.fsync(fd)
+                os.lseek(fd, 0, os.SEEK_SET)
+            except OSError:
+                os.close(fd)
+                raise StoreError("LOCK_ERROR", "无法初始化黑板锁文件")
+            if _try_lock_fd(fd):
+                self.fd = fd
+                return self
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            now = time.monotonic()
+            if now >= deadline:
+                raise StoreError(
+                    "LOCK_TIMEOUT",
+                    f"等待黑板锁超时（{now - start:.1f}s，上限 {self.timeout_s:.1f}s）："
+                    f"{self.path}")
+            time.sleep(min(0.05, max(0.005, deadline - now)))
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self.fd is None:
+            return
+        try:
+            _unlock_fd(self.fd)
+        finally:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+            self.fd = None
 
 
 def _atomic_json(path: str, obj: Any) -> None:
@@ -136,25 +228,31 @@ class BoardStore:
         ws = os.path.abspath(workspace)
         events = os.path.join(ws, EVENTS_NAME)
         board = os.path.join(ws, BOARD_NAME)
-        if os.path.exists(events) and os.path.getsize(events) > 0 and not force:
-            raise StoreError("ALREADY_EXISTS", f"{events} 已存在；如需重建请 --force")
-        os.makedirs(ws, exist_ok=True)
-        if force:
-            for path in (events, board):
-                if os.path.exists(path):
-                    os.remove(path)
-        event = make_event(run_id, 1, "BOARD_INITIALIZED",
-                           {"firmware_sha256": firmware_sha256.lower(),
-                            "manifest_id": manifest_id,
-                            "phase": phase}, ts=ts)
-        state = apply_event(None, event)
-        append_event(events, event)
-        _atomic_json(board, state)
+        try:
+            os.makedirs(ws, exist_ok=True)
+        except OSError as exc:
+            raise StoreError("WORKSPACE_ERROR", f"无法创建黑板目录 {ws}：{exc}") from exc
+        # 初始化也必须串行：两个进程同时 force 会互相删掉对方刚写的事件。
+        with WorkspaceLock(ws):
+            if os.path.exists(events) and os.path.getsize(events) > 0 and not force:
+                raise StoreError("ALREADY_EXISTS",
+                                 f"{events} 已存在；如需重建请 --force")
+            if force:
+                for path in (events, board):
+                    if os.path.exists(path):
+                        os.remove(path)
+            event = make_event(run_id, 1, "BOARD_INITIALIZED",
+                               {"firmware_sha256": firmware_sha256.lower(),
+                                "manifest_id": manifest_id,
+                                "phase": phase}, ts=ts)
+            state = apply_event(None, event)
+            append_event(events, event)
+            _atomic_json(board, state)
         return cls(ws, state)
 
-    @classmethod
-    def load(cls, workspace: str) -> "BoardStore":
-        ws = os.path.abspath(workspace)
+    @staticmethod
+    def _read_state(ws: str) -> tuple:
+        """从事件日志重建 (state, recovered)；不写盘，调用方决定是否修快照。"""
         events = os.path.join(ws, EVENTS_NAME)
         board = os.path.join(ws, BOARD_NAME)
         doc = read_events(events)
@@ -181,14 +279,26 @@ class BoardStore:
                 recovered = True
         else:
             recovered = True
-        if recovered:
-            _atomic_json(board, state)
+        return state, recovered
+
+    @classmethod
+    def load(cls, workspace: str) -> "BoardStore":
+        ws = os.path.abspath(workspace)
+        with WorkspaceLock(ws):
+            state, recovered = cls._read_state(ws)
+            if recovered:
+                _atomic_json(os.path.join(ws, BOARD_NAME), state)
         return cls(ws, state, recovered=recovered)
 
+    def _reload_locked(self) -> None:
+        """调用方已持有 WorkspaceLock；只更新内存状态，不重复加锁。"""
+        state, recovered = self._read_state(self.workspace)
+        self.state = state
+        self.recovered = recovered
+
     def reload(self) -> None:
-        other = BoardStore.load(self.workspace)
-        self.state = other.state
-        self.recovered = other.recovered
+        with WorkspaceLock(self.workspace):
+            self._reload_locked()
 
     # ── 追加 ─────────────────────────────────────────────────────────────────
     def _seen_keys(self) -> Dict[str, Dict[str, Any]]:
@@ -198,25 +308,37 @@ class BoardStore:
 
     def append(self, event_type: str, payload: Dict[str, Any],
                ts: Optional[str] = None,
-               dedupe_key: Optional[str] = None) -> Dict[str, Any]:
-        """验证 → 去重 → 写日志 → 原子替换快照。返回 {ok,duplicate,event,state}。"""
-        key = dedupe_key or make_dedupe_key(event_type, payload)
-        seen = self._seen_keys()
-        if key in seen:
-            return {"ok": True, "duplicate": True, "event": seen[key],
-                    "state": self.state}
-        seq = int(self.state.get("event_count") or 0) + 1
-        event = make_event(self.state["run_id"], seq, event_type, payload,
-                           ts=ts, dedupe_key=key)
-        try:
-            candidate = apply_event(self.state, event)
-        except BoardEventError as exc:
-            raise StoreError(exc.code, exc.message) from exc
-        append_event(self.events_path, event)
-        _atomic_json(self.board_path, candidate)
-        self.state = candidate
-        return {"ok": True, "duplicate": False, "event": event,
-                "state": candidate}
+               dedupe_key: Optional[str] = None,
+               prepare: Optional[Any] = None) -> Dict[str, Any]:
+        """锁内重新读取 → 去重 → 分配 seq → 应用 → 追加日志 → 替换快照。
+
+        prepare(state) 在拿到最新状态后构造 payload，用于「先读后写」的 CAS
+        操作（领取 Intent、候选状态转换、阶段前进/回退）。检查与写入因此在
+        同一把跨进程锁内完成，不会出现两个进程都通过检查的情况。
+        """
+        with WorkspaceLock(self.workspace):
+            self._reload_locked()
+            if prepare is not None:
+                payload = prepare(self.state)
+            if not isinstance(payload, dict):
+                raise StoreError("BAD_PAYLOAD", "事件 payload 必须是 JSON 对象")
+            key = dedupe_key or make_dedupe_key(event_type, payload)
+            seen = self._seen_keys()
+            if key in seen:
+                return {"ok": True, "duplicate": True, "event": seen[key],
+                        "state": self.state}
+            seq = int(self.state.get("event_count") or 0) + 1
+            event = make_event(self.state["run_id"], seq, event_type, payload,
+                               ts=ts, dedupe_key=key)
+            try:
+                candidate = apply_event(self.state, event)
+            except BoardEventError as exc:
+                raise StoreError(exc.code, exc.message) from exc
+            append_event(self.events_path, event)
+            _atomic_json(self.board_path, candidate)
+            self.state = candidate
+            return {"ok": True, "duplicate": False, "event": event,
+                    "state": candidate}
 
     def _bind(self, row: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(row, dict):
@@ -263,31 +385,67 @@ class BoardStore:
                    evidence_refs: Optional[Sequence[str]] = None,
                    policy: Optional[Dict[str, Any]] = None,
                    ts: Optional[str] = None) -> Dict[str, Any]:
-        cand = self._find("candidates", "id", candidate_id)
         refs = list(evidence_refs or [])
-        if any(not isinstance(r, str) or not r for r in refs):
-            raise StoreError("EVIDENCE_REF_INVALID",
-                             "evidence_refs 必须是证据 ID 字符串数组")
-        missing = [r for r in refs
-                   if not any(e.get("evidence_id") == r
-                              for e in self.state.get("evidence") or [])]
-        if missing:
-            raise StoreError("EVIDENCE_REF_NOT_FOUND",
-                             f"证据引用不存在：{missing}（不得静默过滤）")
-        evidence_rows = [self._find("evidence", "evidence_id", r) for r in refs]
-        check = validate_transition(cand, to_state, evidence_rows, policy or {})
-        if not check.get("ok"):
-            raise StoreError(check.get("code", "ILLEGAL_TRANSITION"),
-                             check.get("message", "状态转换被拒绝"))
-        payload = {
-            "candidate_id": candidate_id,
-            "from_state": cand.get("status"),
-            "to_state": to_state,
-            "reason": reason,
-            "evidence_refs": refs,
-            "policy": policy or {},
-        }
-        return self.append("CANDIDATE_TRANSITIONED", payload, ts=ts)
+
+        def build(state: Dict[str, Any]) -> Dict[str, Any]:
+            cand = self._find_in(state, "candidates", "id", candidate_id)
+            if any(not isinstance(r, str) or not r for r in refs):
+                raise StoreError("EVIDENCE_REF_INVALID",
+                                 "evidence_refs 必须是证据 ID 字符串数组")
+            missing = [r for r in refs
+                       if not any(e.get("evidence_id") == r
+                                  for e in state.get("evidence") or [])]
+            if missing:
+                raise StoreError("EVIDENCE_REF_NOT_FOUND",
+                                 f"证据引用不存在：{missing}（不得静默过滤）")
+            evidence_rows = [self._find_in(state, "evidence", "evidence_id", r)
+                             for r in refs]
+            check = validate_transition(cand, to_state, evidence_rows, policy or {},
+                                        state.get("run_id"),
+                                        state.get("firmware_sha256"))
+            if not check.get("ok"):
+                raise StoreError(check.get("code", "ILLEGAL_TRANSITION"),
+                                 check.get("message", "状态转换被拒绝"))
+            return {
+                "candidate_id": candidate_id,
+                "from_state": cand.get("status"),
+                "to_state": to_state,
+                "reason": reason,
+                "evidence_refs": refs,
+                "policy": policy or {},
+            }
+
+        return self.append("CANDIDATE_TRANSITIONED", {}, ts=ts, prepare=build)
+
+    def complete_intent(self, intent_id: str, result: Dict[str, Any],
+                        worker: str, attempt: Optional[int] = None,
+                        ts: Optional[str] = None) -> Dict[str, Any]:
+        """原子回写一次执行结果：证据、事实与 Intent 终态写在同一条事件里。
+
+        prepare 在黑板锁内重读状态并检查 run/固件；任何一步失败都不会落日志，
+        因此不会出现「Evidence 已写入、Intent 仍 claimed」的半成品。
+        """
+        if not isinstance(result, dict):
+            raise StoreError("BAD_RESULT", "执行结果必须是 JSON 对象")
+
+        def build(state: Dict[str, Any]) -> Dict[str, Any]:
+            if result.get("intent_id") != intent_id:
+                raise StoreError("INTENT_MISMATCH",
+                                 "结果里的 intent_id 与目标 Intent 不一致")
+            if result.get("run_id") != state.get("run_id"):
+                raise StoreError("RUN_MISMATCH", "结果不属于当前黑板 run")
+            fw = result.get("firmware_sha256")
+            if not isinstance(fw, str) or fw.lower() != \
+                    str(state.get("firmware_sha256", "")).lower():
+                raise StoreError("FIRMWARE_MISMATCH", "结果的固件哈希与黑板不一致")
+            payload: Dict[str, Any] = {"intent_id": intent_id,
+                                       "worker": worker, "result": result}
+            if attempt is not None:
+                payload["attempt"] = attempt
+            return payload
+
+        return self.append("INTENT_COMPLETED_WITH_RESULTS", {}, ts=ts,
+                           prepare=build)
 
     def set_intent_status(self, intent_id: str, to_status: str,
                           worker: Optional[str] = None,
@@ -296,47 +454,73 @@ class BoardStore:
                           result_refs: Optional[Sequence[str]] = None,
                           last_failure: Optional[Dict[str, Any]] = None,
                           reason: Optional[str] = None,
-                          ts: Optional[str] = None) -> Dict[str, Any]:
-        intent = self._find("intents", "intent_id", intent_id)
-        payload = {"intent_id": intent_id, "from_status": intent.get("status"),
-                   "to_status": to_status, "worker": worker}
-        for key, value in (("attempts", attempts), ("outcome", outcome),
-                           ("result_refs", list(result_refs) if result_refs is not None else None),
-                           ("last_failure", last_failure), ("reason", reason)):
-            if value is not None:
-                payload[key] = value
-        return self.append("INTENT_STATUS_CHANGED", payload, ts=ts)
+                          ts: Optional[str] = None,
+                          expected_status: Optional[str] = None) -> Dict[str, Any]:
+        """在锁内读取最新状态并写入；expected_status 实现领取/回写的 CAS。"""
+        def build(state: Dict[str, Any]) -> Dict[str, Any]:
+            intent = self._find_in(state, "intents", "intent_id", intent_id)
+            current = intent.get("status")
+            if expected_status is not None and current != expected_status:
+                raise StoreError(
+                    "INTENT_STATE_MISMATCH",
+                    f"Intent {intent_id} 当前是 {current}，期望 {expected_status}；"
+                    "另一个 worker 可能已经抢先处理")
+            payload = {"intent_id": intent_id, "from_status": current,
+                       "to_status": to_status, "worker": worker}
+            for key, value in (("attempts", attempts), ("outcome", outcome),
+                               ("result_refs", list(result_refs) if result_refs is not None else None),
+                               ("last_failure", last_failure), ("reason", reason)):
+                if value is not None:
+                    payload[key] = value
+            return payload
+
+        return self.append("INTENT_STATUS_CHANGED", {}, ts=ts, prepare=build)
 
     def advance_phase(self, to_phase: str, reason: str,
                       evidence_refs: Optional[Sequence[str]] = None,
                       advanced_by: Optional[str] = None,
                       ts: Optional[str] = None) -> Dict[str, Any]:
-        frm = self.state.get("phase")
-        payload = {"from_phase": frm, "to_phase": to_phase,
-                   "reason": reason,
-                   "evidence_refs": list(evidence_refs or []),
-                   "advanced_by": advanced_by}
-        return self.append("PHASE_ADVANCED", payload, ts=ts)
+        refs = list(evidence_refs or [])
+
+        def build(state: Dict[str, Any]) -> Dict[str, Any]:
+            frm = state.get("phase")
+            return {"from_phase": frm, "to_phase": to_phase,
+                    "reason": reason, "evidence_refs": refs,
+                    "advanced_by": advanced_by}
+
+        return self.append("PHASE_ADVANCED", {}, ts=ts, prepare=build)
 
     def backtrack(self, from_phase: str, to_phase: str, reason: str,
                   evidence_refs: Sequence[str],
                   approved_by: Optional[str] = None,
                   ts: Optional[str] = None) -> Dict[str, Any]:
+        refs = list(evidence_refs)
         bid = "BT-" + _short_hash({"from": from_phase, "to": to_phase,
-                                   "reason": reason,
-                                   "evidence": list(evidence_refs)})
-        payload = {"backtrack_id": bid, "from_phase": from_phase,
-                   "to_phase": to_phase, "reason": reason,
-                   "evidence_refs": list(evidence_refs),
-                   "approved_by": approved_by}
-        return self.append("BACKTRACK", payload, ts=ts)
+                                   "reason": reason, "evidence": refs})
+
+        def build(state: Dict[str, Any]) -> Dict[str, Any]:
+            frm = state.get("phase")
+            if from_phase != frm:
+                raise StoreError("PHASE_MISMATCH",
+                                 f"回退起点 {from_phase} 与当前阶段 {frm} 不一致")
+            return {"backtrack_id": bid, "from_phase": frm,
+                    "to_phase": to_phase, "reason": reason,
+                    "evidence_refs": refs, "approved_by": approved_by}
+
+        return self.append("BACKTRACK", {}, ts=ts, prepare=build)
+
 
     # ── 查询 ─────────────────────────────────────────────────────────────────
-    def _find(self, key: str, id_key: str, rid: str) -> Dict[str, Any]:
-        for row in self.state.get(key) or []:
+    @staticmethod
+    def _find_in(state: Dict[str, Any], key: str, id_key: str,
+                 rid: str) -> Dict[str, Any]:
+        for row in state.get(key) or []:
             if isinstance(row, dict) and row.get(id_key) == rid:
                 return row
         raise StoreError("NOT_FOUND", f"{key} 中找不到 {id_key}={rid!r}")
+
+    def _find(self, key: str, id_key: str, rid: str) -> Dict[str, Any]:
+        return self._find_in(self.state, key, id_key, rid)
 
     def summary(self) -> Dict[str, Any]:
         s = self.state

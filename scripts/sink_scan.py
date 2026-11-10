@@ -20,6 +20,7 @@ import collections
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -106,6 +107,16 @@ def detect_lang(path: str, head: bytes) -> Optional[str]:
 
 # ------------------------------------------------------------ 结构引擎（二次过滤）
 
+# 结构分析器隔离状态。默认 none：不在宿主机解析不可信固件，除非调用方显式选择
+# host（并承认风险）或 sandbox（经 sandbox_run.py 以只读固件挂载执行）。
+ANALYZER_MODE = "none"
+ANALYZER_IMAGE: Optional[str] = None
+ANALYZER_RUNTIME = "auto"
+ANALYZER_ROOT: Optional[str] = None
+ANALYZER_LAST: Dict[str, Any] = {}
+SANDBOX_RUN = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "sandbox_run.py")
+
 AST_GREP_LANG = {"bash": "bash", "php": "php", "python": "python",
                  "javascript": "javascript", "lua": "lua"}
 SEMGREP_LANG = {"bash": "bash", "php": "php", "python": "python",
@@ -121,6 +132,19 @@ def find_engine(name: str) -> Optional[str]:
     return shutil.which(name)
 
 
+def astgrep_exit_result(returncode: int, stdout: Any) -> Optional[bool]:
+    """解释 ast-grep 退出码：0 且 JSON 非空=命中；0 空输出/1=未命中；其它=错误。
+
+    ast-grep run 在无命中时返回 1（与 grep 类似），不能当成执行错误；
+    否则结构否定永远无法生效，注释/字符串误报会被回退正则保留下来。
+    """
+    if returncode == 1:
+        return False
+    if returncode != 0:
+        return None
+    return bool(str(stdout or "").strip())
+
+
 def astgrep_match(binp: str, lang: str, pattern: str, path: str,
                   timeout: int) -> Optional[bool]:
     """True=结构命中；False=无命中（注释/字符串误报）；None=引擎不可用/解析失败。"""
@@ -133,9 +157,7 @@ def astgrep_match(binp: str, lang: str, pattern: str, path: str,
                            capture_output=True, text=True, timeout=timeout)
     except Exception:
         return None
-    if p.returncode != 0:
-        return None
-    return bool((p.stdout or "").strip())
+    return astgrep_exit_result(p.returncode, p.stdout)
 
 
 def semgrep_match(binp: str, lang: str, pattern: str, path: str,
@@ -159,9 +181,124 @@ def semgrep_match(binp: str, lang: str, pattern: str, path: str,
         return None
     return bool(d.get("results"))
 
+def parse_structural_stdout(stdout: Any) -> Tuple[Optional[bool], Optional[str], Optional[bool]]:
+    """把容器内分析器的标记解析成 (命中, 错误, 引擎是否可用)。
+
+    关键约束：引擎缺失或执行错误必须返回 (None, 错误, ...)，不能返回 False。
+    False 在调用方表示「结构上确认不是命中」，会直接丢弃正则命中；把
+    unavailable/error 伪装成 False 等于静默漏报。
+    """
+    text = str(stdout or "")
+    if "STRUCT_UNAVAILABLE" in text:
+        return None, "engine-unavailable", False
+    if "STRUCT_ERROR" in text:
+        return None, text.strip()[:200] or "engine-error", True
+    if "STRUCT_HIT" in text:
+        return True, None, True
+    if "STRUCT_MISS" in text:
+        return False, None, True
+    return None, "no-structural-marker", None
+
+
+def _sandbox_structural(engine: str, lang: str, pattern: str, path: str,
+                         timeout: int) -> Optional[bool]:
+    """经 sandbox_run.py 在容器内解析不可信文件；只回传布尔结果。
+
+    sandbox_run 负责无网络、只读固件、非 root、CPU/内存/PID/超时限制与
+    fail-closed；这里不把固件路径以外的参数拼进 shell，也不回传大段输出。
+    """
+    if not ANALYZER_ROOT or not ANALYZER_IMAGE:
+        return None
+    try:
+        rel = os.path.relpath(os.path.abspath(path), ANALYZER_ROOT)
+    except (OSError, ValueError):
+        return None
+    if rel.startswith(".." + os.sep) or rel == "..":
+        return None
+    rel_posix = rel.replace(os.sep, "/")
+    if engine == "semgrep":
+        slang = SEMGREP_LANG.get(lang)
+        if not slang:
+            return None
+        # semgrep 默认即使命中也可能返回 0；--error 让「有命中」稳定返回 1。
+        # 引擎缺失/解析失败必须回 STRUCT_UNAVAILABLE/STRUCT_ERROR，不能伪装成
+        # STRUCT_MISS，否则 sandbox 模式会把真实命中静默丢弃。
+        # HOME 必须可写（根只读、/tmp 是 tmpfs），否则 semgrep 会尝试写
+        # /.semgrep 直接失败；--disable-version-check 必须显式关闭，网络为
+        # none 时版本检查可能阻塞到沙箱超时。
+        inner = ("command -v semgrep >/dev/null 2>&1 || "
+                 "{ echo STRUCT_UNAVAILABLE; exit 0; }; "
+                 "HOME=/tmp semgrep --disable-version-check --error -e %s --lang %s --quiet --metrics=off "
+                 "--max-target-bytes 2097152 %s >/dev/null 2>&1; rc=$?; "
+                 "if [ $rc -eq 0 ]; then echo STRUCT_MISS; "
+                 "elif [ $rc -eq 1 ]; then echo STRUCT_HIT; "
+                 "else echo STRUCT_ERROR:$rc; fi") % (
+                     shlex.quote(pattern), shlex.quote(slang),
+                     shlex.quote("/firmware/" + rel_posix))
+    elif engine == "ast-grep":
+        slang = AST_GREP_LANG.get(lang)
+        if not slang:
+            return None
+        # ast-grep 0=命中（stdout JSON 非空）、1=未命中、其它=执行错误。
+        # 1 必须映射为 STRUCT_MISS；当成 STRUCT_ERROR 会让结构过滤整体失败，
+        # 正则命中无法被排除，破坏“结构确认”语义。
+        inner = ("command -v ast-grep >/dev/null 2>&1 || "
+                 "{ echo STRUCT_UNAVAILABLE; exit 0; }; "
+                 "out=$(ast-grep run --pattern %s --lang %s "
+                 "--json=stream %s 2>/dev/null); rc=$?; "
+                 "if [ $rc -eq 0 ] && [ -n \"$out\" ]; then echo STRUCT_HIT; "
+                 "elif [ $rc -eq 0 ] || [ $rc -eq 1 ]; then echo STRUCT_MISS; "
+                 "else echo STRUCT_ERROR:$rc; fi") % (
+                     shlex.quote(pattern), shlex.quote(slang),
+                     shlex.quote("/firmware/" + rel_posix))
+    else:
+        return None
+    import tempfile
+    outdir = tempfile.mkdtemp(prefix="sink-analyzer-")
+    report = os.path.join(outdir, "sandbox.json")
+    argv = [sys.executable, SANDBOX_RUN,
+            "--firmware", ANALYZER_ROOT, "--out", outdir,
+            "--mode", "sandbox", "--runtime", ANALYZER_RUNTIME,
+            "--image", ANALYZER_IMAGE, "--network", "none",
+            "--timeout", str(int(timeout)), "--pids", "64",
+            "--cmd", "/bin/sh -c " + shlex.quote(inner),
+            "--json", report]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True,
+                              timeout=timeout + 30)
+    except Exception:
+        return None
+    try:
+        with open(report, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    ANALYZER_LAST.clear()
+    ANALYZER_LAST.update({
+        "mode": doc.get("mode"),
+        "image": ANALYZER_IMAGE,
+        "runtime": (doc.get("runtime") or {}).get("name"),
+        "runtime_version": (doc.get("runtime") or {}).get("version"),
+        "admission": (doc.get("admission") or {}).get("decision"),
+        "exit_code": doc.get("exit_code"),
+        "timed_out": bool(doc.get("timed_out")),
+        "host_fallback": bool(doc.get("host_fallback")),
+    })
+    if proc.returncode != 0 or doc.get("ok") is not True:
+        return None
+    result, error, available = parse_structural_stdout(
+        doc.get("stdout_head"))
+    if error:
+        ANALYZER_LAST["error"] = error
+    if available is not None:
+        ANALYZER_LAST["engine_available"] = available
+    return result
+
 
 def structural_match(engine: str, binp: str, lang: str, pattern: str, path: str,
                      timeout: int) -> Optional[bool]:
+    if ANALYZER_MODE == "sandbox":
+        return _sandbox_structural(engine, lang, pattern, path, timeout)
     if engine == "semgrep":
         return semgrep_match(binp, lang, pattern, path, timeout)
     return astgrep_match(binp, lang, pattern, path, timeout)
@@ -533,6 +670,17 @@ def main() -> int:
                     help="semgrep 可执行名/路径（另一种可选结构引擎）")
     ap.add_argument("--no-structural", action="store_true",
                     help="禁用结构级二次过滤；回退情况仍会写进 engine_status")
+    ap.add_argument("--analyzer-mode", choices=("none", "host", "sandbox"),
+                    default="none",
+                    help="结构分析器执行边界：none（默认，不在宿主机解析不可信文件）、"
+                         "host（需 --i-understand-analyzer-host-risk）、"
+                         "sandbox（经 sandbox_run.py 容器执行）")
+    ap.add_argument("--analyzer-image",
+                    help="sandbox 模式下含 ast-grep/semgrep 的镜像（必须固定 tag/digest）")
+    ap.add_argument("--analyzer-runtime", choices=("auto", "docker", "podman"),
+                    default="auto", help="sandbox 模式的容器运行时")
+    ap.add_argument("--i-understand-analyzer-host-risk", action="store_true",
+                    help="host 模式的必需授权：承认在宿主机解析不可信固件文件的风险")
     ap.add_argument("--structural-timeout", type=int, default=30,
                     help="单次结构引擎调用超时（秒）")
     ap.add_argument("--strict", action="store_true",
@@ -540,6 +688,19 @@ def main() -> int:
                          "默认只告警、仍返回 0")
     ap.add_argument("--pretty", action="store_true")
     args = ap.parse_args()
+    if args.analyzer_mode == "host" and not args.i_understand_analyzer_host_risk:
+        ap.error("--analyzer-mode host 需要 --i-understand-analyzer-host-risk；"
+                 "默认不在宿主机解析不可信固件")
+    if args.analyzer_mode == "sandbox" and not args.analyzer_image:
+        ap.error("--analyzer-mode sandbox 需要 --analyzer-image（含结构分析器）")
+
+    global ANALYZER_MODE, ANALYZER_IMAGE, ANALYZER_RUNTIME, ANALYZER_ROOT
+    ANALYZER_MODE = "none" if args.no_structural else args.analyzer_mode
+    ANALYZER_IMAGE = args.analyzer_image
+    ANALYZER_RUNTIME = args.analyzer_runtime
+    ANALYZER_ROOT = os.path.abspath(args.target
+                                    if os.path.isdir(args.target)
+                                    else os.path.dirname(args.target))
 
     rj = load_rules(args.rules)
     thresholds = rj.get("thresholds", {})
@@ -555,11 +716,16 @@ def main() -> int:
     chunk_size = max(64 << 10, int(args.read_chunk_mb * 1024 * 1024))
     excl = re.compile(args.exclude, re.I) if args.exclude else None
 
-    engines: Dict[str, Optional[str]] = {
-        "ast-grep": find_engine(args.ast_grep_bin),
-        "semgrep": find_engine(args.semgrep_bin),
-    }
-    enable_structural = not args.no_structural
+    if ANALYZER_MODE == "none":
+        engines: Dict[str, Optional[str]] = {"ast-grep": None, "semgrep": None}
+    elif ANALYZER_MODE == "sandbox":
+        engines = {"ast-grep": "<sandbox>", "semgrep": "<sandbox>"}
+    else:
+        engines = {
+            "ast-grep": find_engine(args.ast_grep_bin),
+            "semgrep": find_engine(args.semgrep_bin),
+        }
+    enable_structural = ANALYZER_MODE != "none"
     fallbacks: List[Dict[str, Any]] = []
     stats: Dict[str, int] = collections.Counter()
     rules_with_structural = sum(1 for r in rules if r["structural"])
@@ -567,6 +733,7 @@ def main() -> int:
     findings: List[Dict[str, Any]] = []
     skipped_files: List[Dict[str, Any]] = []
     partial_files: List[Dict[str, Any]] = []
+    walk_errors: List[Dict[str, Any]] = []
     scanned = 0
 
     def skip(rel: str, reason: str, extra: Optional[Dict[str, Any]] = None) -> None:
@@ -616,7 +783,17 @@ def main() -> int:
         handle(args.target, os.path.basename(args.target))
     else:
         root = os.path.abspath(args.target)
-        for dirpath, dirnames, filenames in os.walk(root):
+
+        def on_walk_error(exc: OSError) -> None:
+            # os.walk 默认静默吞掉目录读取错误；那等于把「没扫到」伪装成
+            # 「扫过且干净」。这里必须记录路径与原因，并让 verdict=failed。
+            path = getattr(exc, "filename", None) or root
+            rec = {"file": os.path.abspath(path), "reason": "walk-error",
+                   "error": str(exc)}
+            walk_errors.append(rec)
+            skipped_files.append(rec)
+
+        for dirpath, dirnames, filenames in os.walk(root, onerror=on_walk_error):
             for fn in filenames:
                 full = os.path.join(dirpath, fn)
                 if os.path.islink(full):
@@ -640,7 +817,7 @@ def main() -> int:
              "excluded": [args.exclude] if args.exclude else []}
     material = {r: n for r, n in reason_counts.items()
                 if r not in ("skip-dir", "excluded")}
-    if any(r in ("stat-failed", "read-error") for r in material):
+    if any(r in ("stat-failed", "read-error", "walk-error") for r in material):
         verdict = "failed"
     elif material or partial_files:
         verdict = "partial"
@@ -694,13 +871,15 @@ def main() -> int:
             "schema": "scan-integrity/1.1",
             # complete 只在「零跳过、零截断」时为真；门禁另用 verdict 区分
             # 「范围外排除」(scoped) 与「真的没扫完」(partial/failed)。
-            "complete": (not skipped_files and not partial_files),
+            "complete": (not skipped_files and not partial_files
+                         and not walk_errors),
             "verdict": verdict,
             "scope": scope,
             "gaps": gaps[:1000],
             "files_scanned": scanned,
             "files_skipped": len(skipped_files),
             "files_partial": len(partial_files),
+            "walk_errors": walk_errors[:200],
             "limits": {
                 "max_file_mb": args.max_file_mb,
                 "read_chunk_mb": round(chunk_size / (1024 * 1024), 3),
@@ -718,6 +897,16 @@ def main() -> int:
         },
         "engine_status": {
             "structural_enabled": enable_structural,
+            "isolation": {
+                "mode": ANALYZER_MODE,
+                "image": ANALYZER_IMAGE if ANALYZER_MODE == "sandbox" else None,
+                "runtime_requested": ANALYZER_RUNTIME,
+                "network": "none" if ANALYZER_MODE == "sandbox" else None,
+                "firmware_mount": "ro" if ANALYZER_MODE == "sandbox" else None,
+                "host_execution": ("explicit-opt-in" if ANALYZER_MODE == "host"
+                                   else "forbidden"),
+                "last_run": dict(ANALYZER_LAST),
+            },
             "verdict": engine_verdict,
             "engines": dict(engines),
             "rules_with_structural": rules_with_structural,

@@ -466,7 +466,7 @@ def validate_labels(
     return labels
 
 
-def validate_manifest(manifest_path: Path) -> Bench:
+def validate_manifest(manifest_path: Path, require_real: bool = False) -> Bench:
     manifest_path = manifest_path.resolve()
     root = manifest_path.parent
     if not manifest_path.is_file():
@@ -510,6 +510,19 @@ def validate_manifest(manifest_path: Path) -> Bench:
                 date.fromisoformat(created.strip())
             except ValueError:
                 issues.append(f"[dataset] dataset.created 不是 ISO 日期: {created!r}")
+        if require_real:
+            if dataset.get("kind") != "real":
+                issues.append(
+                    "[dataset] --require-real：dataset.kind 必须为 real，实际 "
+                    f"{dataset.get('kind')!r}；真实固件基准尚未建立"
+                )
+            real_firmware = dataset.get("real_firmware")
+            placeholder = str(real_firmware or "").strip().lower()
+            if placeholder in ("", "pending", "unknown", "tbd", "none", "n/a"):
+                issues.append(
+                    "[dataset] --require-real：dataset.real_firmware 仍为占位值 "
+                    f"{real_firmware!r}；真实固件基准尚未建立"
+                )
     for key in ("rule_version", "tool_version"):
         value = data.get(key)
         if not isinstance(value, str) or not value.strip():
@@ -2237,6 +2250,11 @@ def _add_eval_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="严格模式：未复核标签全部按不可评估披露，不计算 provisional 指标",
     )
+    parser.add_argument(
+        "--require-real",
+        action="store_true",
+        help="只接受真实固件基准；合成集或 real_firmware=pending 时校验失败",
+    )
     parser.add_argument("--quiet", action="store_true", help="不输出常规摘要")
 
 
@@ -2281,6 +2299,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="只执行基准集契约校验，不读取 findings，不计算指标。",
     )
     validate.add_argument("--manifest", type=Path, required=True, help="bench manifest JSON 路径")
+    validate.add_argument(
+        "--require-real",
+        action="store_true",
+        help="只接受真实固件基准；合成集或 real_firmware=pending 时校验失败",
+    )
     validate.add_argument("--quiet", action="store_true", help="不输出常规摘要")
     return parser
 
@@ -2310,7 +2333,7 @@ def configure_stdio() -> None:
 
 def run_validate(args: argparse.Namespace) -> int:
     try:
-        bench = validate_manifest(args.manifest)
+        bench = validate_manifest(args.manifest, require_real=args.require_real)
     except InputError as exc:
         print(f"[错误] {exc}", file=sys.stderr)
         return 1
@@ -2346,7 +2369,7 @@ def run_validate(args: argparse.Namespace) -> int:
 
 def run_evaluate(args: argparse.Namespace) -> int:
     try:
-        bench = validate_manifest(args.manifest)
+        bench = validate_manifest(args.manifest, require_real=args.require_real)
     except InputError as exc:
         print(f"[错误] {exc}", file=sys.stderr)
         return 1
@@ -2378,6 +2401,7 @@ def run_evaluate(args: argparse.Namespace) -> int:
         "findings": str(args.findings.resolve()),
         "split": args.split,
         "strict": bool(args.strict),
+        "require_real": bool(args.require_real),
         "baseline": str(args.baseline.resolve()) if args.baseline else None,
         "max_recall_drop": args.max_recall_drop,
         "max_fpr_rise": args.max_fpr_rise,

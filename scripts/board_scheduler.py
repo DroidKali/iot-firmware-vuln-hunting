@@ -521,7 +521,11 @@ def cmd_next(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def _get_intent(store: BoardStore, intent_id: str) -> Dict[str, Any]:
-    for row in store.state.get("intents") or []:
+    return _get_intent_state(store.state, intent_id)
+
+
+def _get_intent_state(state: Dict[str, Any], intent_id: str) -> Dict[str, Any]:
+    for row in state.get("intents") or []:
         if isinstance(row, dict) and row.get("intent_id") == intent_id:
             return row
     raise SchedulerError("INTENT_NOT_FOUND", f"Intent 不存在：{intent_id}")
@@ -549,7 +553,10 @@ def cmd_claim(args: argparse.Namespace) -> Dict[str, Any]:
         raise SchedulerError("RESOURCE_DENIED", "资源准入拒绝，Intent 保持 open",
                              5, denied)
     try:
-        res = store.set_intent_status(args.intent, "claimed", args.worker)
+        # expected_status 让「检查 open」与「写 claimed」在同一把黑板锁内完成：
+        # 两个 worker 同时 claim 时，后到的那个会看到 claimed 并失败。
+        res = store.set_intent_status(args.intent, "claimed", args.worker,
+                                      expected_status="open")
     except StoreError as exc:
         raise SchedulerError(exc.code, exc.message)
     updated = _get_intent(store, args.intent)
@@ -631,54 +638,32 @@ def cmd_complete(args: argparse.Namespace) -> Dict[str, Any]:
         raise SchedulerError("ATTEMPT_MISMATCH",
                              f"结果 attempt={result.get('attempt')} 与 "
                              f"Intent attempts={intent.get('attempts')} 不一致")
-    refs = _record_result_rows(store, result)
-    status = result.get("status")
-    done_map = {"SUCCESS": "success", "PARTIAL": "partial",
-                "NOT_APPLICABLE": "not_applicable"}
-    failure_map = {"FAILED": "failed", "BLOCKED": "blocked",
-                   "TIMED_OUT": "timed_out"}
-    if status in done_map:
-        try:
-            res = store.set_intent_status(
-                args.intent, "done", intent.get("worker"),
-                outcome=done_map[status], result_refs=refs,
-                reason=result.get("summary"))
-        except StoreError as exc:
-            raise SchedulerError(exc.code, exc.message)
+    # 单条 INTENT_COMPLETED_WITH_RESULTS 事件：Evidence/Fact 插入、result_refs
+    # 累积和 Intent 状态迁移在同一个 apply_event 里完成，崩溃不会留下半成品。
+    try:
+        res = store.complete_intent(args.intent, result, intent.get("worker"),
+                                    attempt=intent.get("attempts"))
+    except StoreError as exc:
+        raise SchedulerError(exc.code, exc.message)
+    updated = _get_intent_state(res.get("state") or {}, args.intent)
+    refs = list(updated.get("result_refs") or [])
+    if updated.get("status") == "done":
         return {"schema": SCHEMA, "ok": True,
                 "duplicate": bool(res.get("duplicate")),
                 "intent_id": args.intent, "status": "done",
-                "outcome": done_map[status], "result_refs": refs}
-    outcome = failure_map.get(status)
-    failure = dict(result.get("failure") or {})
-    failure.setdefault("at", utc_now())
-    retryable = bool(failure.get("retryable"))
-    attempts = intent.get("attempts") if isinstance(intent.get("attempts"), int) else 1
-    max_retries = intent.get("max_retries") if isinstance(intent.get("max_retries"), int) else 0
-    if retryable and attempts <= max_retries:
-        try:
-            res = store.set_intent_status(
-                args.intent, "open", intent.get("worker"),
-                result_refs=refs, last_failure=failure,
-                reason=result.get("summary"))
-        except StoreError as exc:
-            raise SchedulerError(exc.code, exc.message)
+                "outcome": updated.get("outcome"), "result_refs": refs}
+    if updated.get("status") == "open":
         return {"schema": SCHEMA, "ok": True,
                 "duplicate": bool(res.get("duplicate")),
                 "intent_id": args.intent, "status": "open", "retry": True,
-                "attempts": attempts, "max_retries": max_retries,
-                "failure": failure, "result_refs": refs}
-    try:
-        res = store.set_intent_status(
-            args.intent, "failed", intent.get("worker"),
-            outcome=outcome, result_refs=refs, last_failure=failure,
-            reason=result.get("summary"))
-    except StoreError as exc:
-        raise SchedulerError(exc.code, exc.message)
+                "attempts": updated.get("attempts"),
+                "max_retries": updated.get("max_retries") or 0,
+                "failure": updated.get("last_failure"), "result_refs": refs}
     return {"schema": SCHEMA, "ok": True,
             "duplicate": bool(res.get("duplicate")),
-            "intent_id": args.intent, "status": "failed", "outcome": outcome,
-            "failure": failure, "result_refs": refs}
+            "intent_id": args.intent, "status": "failed",
+            "outcome": updated.get("outcome"),
+            "failure": updated.get("last_failure"), "result_refs": refs}
 
 
 def cmd_backtrack(args: argparse.Namespace) -> Dict[str, Any]:

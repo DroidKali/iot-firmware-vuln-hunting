@@ -153,8 +153,22 @@ VERIFICATION_RULES: Dict[str, Dict[str, Any]] = {
 #: 规则是否要求证据绑定具体目标（ELF / 共享库 / 可执行文件）。
 #: hardcoded-credential 可能来自配置文件，other 可能没有二进制目标；这两类只有在
 #: 策略或候选显式给出 target_sha256 时才强制绑定。
+#:
+#: confirmed 是最终结论，不能用静态线索或候选自带的 PoC 字段自证：运行时类漏洞
+#: 必须有动态/仿真证据；只有硬编码凭据这类静态事实允许 static/manual。
+CONFIRM_EVIDENCE_TYPES: Dict[str, tuple] = {
+    "command-injection": ("dynamic", "emulation"),
+    "buffer-overflow": ("dynamic", "emulation", "fuzzing"),
+    "path-traversal": ("dynamic", "emulation"),
+    "hardcoded-credential": ("static", "manual"),
+    "auth-bypass": ("dynamic", "emulation"),
+    "ssrf": ("dynamic", "emulation"),
+    "deserialization": ("dynamic", "emulation"),
+    "other": ("dynamic", "emulation", "manual"),
+}
 for _rule_name, _rule in VERIFICATION_RULES.items():
     _rule["requires_target"] = _rule_name not in ("hardcoded-credential", "other")
+    _rule["confirm_evidence_types"] = CONFIRM_EVIDENCE_TYPES[_rule_name]
 
 #: Intent 状态机：open → claimed → done/failed；claim 可以被释放回 open。
 INTENT_TRANSITIONS: Dict[str, tuple] = {
@@ -393,6 +407,8 @@ def validate_transition(candidate: Any, to_state: str,
                        **{"from": frm, "to": to, "vuln_type": vuln_type})
 
     rows: List[Dict[str, Any]] = list(raw_rows)
+    accepted_types = (rule.get("confirm_evidence_types")
+                      if to == "confirmed" else rule["evidence_types"])
     type_hits: List[str] = []
     trigger = False
     structure_errors: List[Dict[str, str]] = []
@@ -477,7 +493,7 @@ def validate_transition(candidate: Any, to_state: str,
                            **{"from": frm, "to": to, "vuln_type": vuln_type,
                               "evidence_index": i})
 
-        if ev.get("type") in rule["evidence_types"]:
+        if ev.get("type") in accepted_types:
             type_hits.append(str(ev.get("type")))
         event = ev.get("event") if isinstance(ev.get("event"), dict) else {}
         if event.get("trigger") is True or event.get("type") in rule["trigger_events"]:
@@ -576,8 +592,14 @@ def validate_transition(candidate: Any, to_state: str,
                               "conflict_group": group})
 
     if not type_hits:
+        if to == "confirmed":
+            return _result(False, "CONFIRM_EVIDENCE_REQUIRED",
+                           f"confirmed 需要 {'/'.join(accepted_types)} 证据；"
+                           "静态线索或候选自带 PoC 不能作为最终结论",
+                           **{"from": frm, "to": to, "vuln_type": vuln_type,
+                              "accepted_types": list(accepted_types)})
         return _result(False, "EVIDENCE_TYPE_NOT_ACCEPTED",
-                       f"{vuln_type} 需要 {'/'.join(rule['evidence_types'])} 证据",
+                       f"{vuln_type} 需要 {'/'.join(accepted_types)} 证据",
                        **{"from": frm, "to": to, "vuln_type": vuln_type})
 
     criteria = pol.get("criteria") if isinstance(pol.get("criteria"), dict) else {}
@@ -587,6 +609,39 @@ def validate_transition(candidate: Any, to_state: str,
                        f"缺少或未满足判据：{missing}",
                        **{"from": frm, "to": to, "vuln_type": vuln_type,
                           "missing_criteria": missing})
+
+    # confirmed 不能只写三个 true：每个判据必须指向本轮已选中的 Evidence ID。
+    # 这样报告里的「已验证」可以逐条回溯到具体证据，而不是调用方自述。
+    if to == "confirmed":
+        mapping = pol.get("criterion_evidence")
+        if not isinstance(mapping, dict):
+            return _result(False, "CONFIRM_CRITERIA_EVIDENCE_REQUIRED",
+                           "confirmed 必须在 policy.criterion_evidence 中为每个判据"
+                           "给出对应的 Evidence ID",
+                           **{"from": frm, "to": to, "vuln_type": vuln_type,
+                              "required_criteria": list(rule["required_criteria"])})
+        for criterion in rule["required_criteria"]:
+            refs_raw = mapping.get(criterion)
+            if isinstance(refs_raw, str):
+                refs = [refs_raw]
+            elif isinstance(refs_raw, list) and refs_raw:
+                refs = refs_raw
+            else:
+                return _result(False, "CONFIRM_CRITERION_UNBOUND",
+                               f"判据 {criterion} 没有绑定 Evidence ID",
+                               **{"from": frm, "to": to, "vuln_type": vuln_type,
+                                  "criterion": criterion})
+            if any(not isinstance(r, str) or not r for r in refs):
+                return _result(False, "CONFIRM_EVIDENCE_REF_INVALID",
+                               f"判据 {criterion} 的 Evidence ID 必须是非空字符串",
+                               **{"from": frm, "to": to, "vuln_type": vuln_type,
+                                  "criterion": criterion})
+            unknown = [r for r in refs if r not in selected_ids]
+            if unknown:
+                return _result(False, "CONFIRM_EVIDENCE_REF_NOT_FOUND",
+                               f"判据 {criterion} 引用了未选中的证据：{unknown}",
+                               **{"from": frm, "to": to, "vuln_type": vuln_type,
+                                  "criterion": criterion, "missing": unknown})
 
     has_expected = "expected" in pol
     has_actual = "actual" in pol
@@ -600,8 +655,11 @@ def validate_transition(candidate: Any, to_state: str,
                        **{"from": frm, "to": to, "vuln_type": vuln_type})
 
     if rule["requires_trigger"] and not trigger:
-        has_poc = bool(candidate.get("trigger") or candidate.get("poc")
-                       or candidate.get("poc_path"))
+        # validated 允许候选记录里的 PoC 线索作为待复核上下文；confirmed 不接受：
+        # 最终结论必须由证据里的真实触发事件支撑，不能由候选自述。
+        has_poc = (to != "confirmed" and bool(
+            candidate.get("trigger") or candidate.get("poc")
+            or candidate.get("poc_path")))
         if not has_poc:
             return _result(False, "MISSING_TRIGGER_CONTEXT",
                            "验证证据没有触发上下文（event.trigger / 触发事件 / PoC）",

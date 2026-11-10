@@ -983,7 +983,8 @@ LAYER1_SCHEMAS = ("layer1-sinks/1.3", "layer1-sinks/1.2", "layer1-sinks/1.0")
 SCAN_WAIVER_SCHEMA = "scan-waiver/1.0"
 STAGE_SCHEMA = "audit-stages/1.0"
 STAGE_STATUSES = ("success", "partial", "skipped", "failed")
-SCAN_HARD_GAP_REASONS = ("too-large", "stat-failed", "read-error", "decode-error")
+SCAN_HARD_GAP_REASONS = ("too-large", "stat-failed", "read-error", "decode-error",
+                         "walk-error", "analyzer-host")
 SCAN_SCOPE_REASONS = ("skip-dir", "excluded")
 
 
@@ -1164,6 +1165,15 @@ def check_scan_integrity(path: Optional[str], waiver_path: Optional[str] = None
                                 if s.get("limit_mb") is not None else reason),
                      "bytes_total": s.get("bytes_total")})
 
+    # 结构分析器如果以 host 模式解析不可信文件，扫描完整性本身就有缺口：
+    # 内容可能触发分析器的解析器缺陷，且没有容器边界。strict 门禁必须能看见。
+    iso = (doc.get("engine_status") or {}).get("isolation")
+    if isinstance(iso, dict) and str(iso.get("host_execution") or "") == "explicit-opt-in":
+        gaps.append({
+            "file": "<structural-analyzer>", "reason": "analyzer-host",
+            "detail": ("结构分析器以 host 模式在宿主机解析不可信文件"
+                       f"（mode={iso.get('mode')} image={iso.get('image') or '-'}）")})
+
     for g in gaps:
         w = waiver["files"].get(g["file"])
         if w:
@@ -1175,7 +1185,8 @@ def check_scan_integrity(path: Optional[str], waiver_path: Optional[str] = None
             g["waived"] = False
 
     unwaived = [g for g in gaps if not g["waived"]]
-    hard_fail = any(g["reason"] in ("stat-failed", "read-error", "decode-error")
+    hard_fail = any(g["reason"] in ("stat-failed", "read-error", "decode-error",
+                                      "walk-error", "analyzer-host")
                     for g in unwaived)
     if not out["schema_ok"]:
         out["blocking"].append({
@@ -1198,7 +1209,9 @@ def check_scan_integrity(path: Optional[str], waiver_path: Optional[str] = None
     if out["verdict"] in ("partial", "failed"):
         for g in unwaived:
             out["blocking"].append({
-                "code": ("LAYER1_READ_ERROR" if g["reason"] in
+                "code": ("LAYER1_ANALYZER_HOST" if g["reason"] == "analyzer-host" else
+                         "LAYER1_WALK_ERROR" if g["reason"] == "walk-error" else
+                         "LAYER1_READ_ERROR" if g["reason"] in
                          ("stat-failed", "read-error", "decode-error")
                          else "LAYER1_SCAN_GAP"),
                 "detail": f"{g['file']}: {g['reason']}（{g['detail']}）"

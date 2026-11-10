@@ -271,6 +271,82 @@ def apply_event(state: Optional[Dict[str, Any]], event: Dict[str, Any],
                                   "result.intent_id")
         _add(state, "emulation_results", "emulation_id", row, "result")
         state["counters"]["emulation_results"] = len(state["emulation_results"])
+    elif typ == "INTENT_COMPLETED_WITH_RESULTS":
+        # 结果回写是一条事件：Evidence/Fact 插入和 Intent 状态迁移必须同生共死。
+        # 拆成多条事件时，中途崩溃会留下「证据已写、Intent 仍 claimed」的半成品。
+        intent = _find(state, "intents", "intent_id", payload.get("intent_id"))
+        if intent.get("status") != "claimed":
+            raise BoardEventError("STATE_MISMATCH",
+                                  f"Intent 当前是 {intent.get('status')}，不能回写结果",
+                                  "intent.status")
+        worker = payload.get("worker")
+        if intent.get("worker") != worker:
+            raise BoardEventError("WORKER_MISMATCH",
+                                  "回写 worker 与领取者不一致", "intent.worker")
+        attempt = payload.get("attempt")
+        if attempt is not None and attempt != intent.get("attempts"):
+            raise BoardEventError("ATTEMPT_MISMATCH",
+                                  "回写 attempt 与 Intent attempts 不一致",
+                                  "intent.attempts")
+        result = payload.get("result") or {}
+        evidence_rows = result.get("evidence") or []
+        fact_rows = result.get("facts") or []
+        ev_ids = [row.get("evidence_id") for row in evidence_rows
+                  if isinstance(row, dict)]
+        fact_ids = [row.get("fact_id") for row in fact_rows
+                    if isinstance(row, dict)]
+        if len(set(ev_ids)) != len(ev_ids) or len(set(fact_ids)) != len(fact_ids):
+            raise BoardEventError("DUPLICATE_ID",
+                                  "结果内 Evidence/Fact ID 重复", "result")
+        existing_ev = {e.get("evidence_id") for e in state.get("evidence") or []}
+        existing_fact = {f.get("fact_id") for f in state.get("facts") or []}
+        conflict = [i for i in ev_ids if i in existing_ev]
+        conflict += [i for i in fact_ids if i in existing_fact]
+        if conflict:
+            raise BoardEventError("ID_CONFLICT",
+                                  f"结果中的 ID 已存在于黑板：{conflict}", "result")
+        known_ev = existing_ev | set(ev_ids)
+        for row in fact_rows:
+            for ref in (row or {}).get("evidence_refs") or []:
+                if ref not in known_ev:
+                    raise BoardEventError("DANGLING_EVIDENCE",
+                                          f"事实引用了不存在的证据 {ref!r}",
+                                          "result.facts.evidence_refs")
+        for row in evidence_rows:
+            _add(state, "evidence", "evidence_id", _bind(row, state), "evidence")
+        state["counters"]["evidence"] = len(state["evidence"])
+        for row in fact_rows:
+            _add(state, "facts", "fact_id", _bind(row, state), "fact")
+        state["counters"]["facts"] = len(state["facts"])
+        refs = [str(i) for i in ev_ids] + [str(i) for i in fact_ids]
+        _merge_result_refs(state, intent, refs)
+        status = result.get("status")
+        done_map = {"SUCCESS": "success", "PARTIAL": "partial",
+                    "NOT_APPLICABLE": "not_applicable"}
+        failure_map = {"FAILED": "failed", "BLOCKED": "blocked",
+                       "TIMED_OUT": "timed_out"}
+        if status in done_map:
+            intent["outcome"] = done_map[status]
+            intent["status"] = "done"
+            intent["concluded_at"] = event.get("ts")
+        else:
+            failure = dict(result.get("failure") or {})
+            failure.setdefault("at", event.get("ts"))
+            retryable = bool(failure.get("retryable"))
+            attempts = intent.get("attempts")
+            if not isinstance(attempts, int):
+                attempts = 1
+            max_retries = intent.get("max_retries")
+            if not isinstance(max_retries, int):
+                max_retries = 0
+            intent["last_failure"] = failure
+            if retryable and attempts <= max_retries:
+                intent["worker"] = None
+                intent["status"] = "open"
+            else:
+                intent["outcome"] = failure_map.get(status, "failed")
+                intent["status"] = "failed"
+                intent["concluded_at"] = event.get("ts")
     elif typ == "CANDIDATE_TRANSITIONED":
         cid = payload.get("candidate_id")
         cand = _find(state, "candidates", "id", cid)

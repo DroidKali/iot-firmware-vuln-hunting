@@ -96,7 +96,7 @@ uv run script.py                         # 用项目环境跑
 - `--only` / `--profile` 只统计本次选中的工具，所以同一个能力在不同调用里可能显示不同状态。局部索引不能当作全量环境结论。
 - 缺失时先看 `fallback.tools` 与 `fallback.impact`：能替代就替代，并在报告里写明降级；没有替代路径时再按 `docs` 安装，或向用户说明该能力不可用。
 - `--require` 用在「已经确定必须用某个实现」之后；不要在侦察前把整张推荐表都设成硬门槛。
-- 注册表（41 个工具）在 `assets/tool-registry.json`（`tool-registry/1.0`），与本文件 §2 的能力映射必须同步维护；新增/删除实现时只改该 JSON 的工具/能力条目与本节，不改 Python。`tool_index.py` 只做加载、校验、探测与渲染，注册表缺文件/坏 JSON/未知字段/悬空引用会退出 2；selftest 第 27 组校验索引产物契约与注册表 fail-closed。
+- 注册表（41 个工具）在 `assets/tool-registry.json`（`tool-registry/1.0`），与本文件 §2 的能力映射必须同步维护；新增/删除实现时只改该 JSON 的工具/能力条目与本节，不改 Python。`tool_index.py` 只做加载、校验、探测与渲染，注册表缺文件/坏 JSON/未知字段/悬空引用会退出 2；selftest 第 28 组（工具索引部分自第 27 组起，现整体为 28 组）校验索引产物契约与注册表 fail-closed。
 
 **环境矩阵**（决定用哪条执行通道）：
 
@@ -498,6 +498,7 @@ semgrep -e 'system(...)' --lang php --json webs/x.php        # 单模式检索
 - semgrep 扫大目录时**文件定位阶段会显著变慢**（上万文件级达分钟级）。**只对 T1/T2 的脚本与 web 目录运行**，不要全量扫 rootfs；必要时用 `--max-target-bytes` 限单文件大小。
 - 两个引擎的规则语法**互不兼容**：ast-grep 是「模式即代码」，semgrep 是 YAML + 专用模式语法。**不要试图共用一套规则文件**。
 - 引擎可执行文件通过 `--ast-grep-bin` / `--semgrep-bin` 指定；`engine_status.engines` 会记录实际解析到的路径。
+- **隔离（A06）**：`sink_scan.py` 默认 `--analyzer-mode none`，不把固件字节交给外部分析器。`sandbox` 模式经 `sandbox_run.py` 在容器内运行 ast-grep / semgrep（`--network none`、固件只读、资源上限），需要 `--analyzer-image`；`host` 模式必须显式 `--i-understand-analyzer-host-risk`，且 `engine_status.isolation.host_execution=explicit-opt-in` 会被门禁记为 `analyzer-host` 硬缺口（`LAYER1_ANALYZER_HOST`）。`isolation` 同时记录 mode / image / network / firmware_mount / last_run。
 - 新增规则必须先用 `--only-rule <id>` 跑通再进流水线。
 
 ---
