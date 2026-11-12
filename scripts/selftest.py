@@ -1564,6 +1564,222 @@ def main() -> int:
               rr.returncode == 3 and db.get("regression") is True,
               f"rc={rr.returncode} reasons={db.get('regression_reasons')}")
 
+        # P1-02：匹配必须同时看定位、类型（类别+CWE）与证据；相邻行
+        # 不同 CWE、同位置不同类别都不得计 TP；一个 finding 只能贡献一个 TP。
+        p102_findings = os.path.join(bd, "findings-cwe.json")
+        with open(p102_findings, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump({
+                "schema": "layer1-sinks/1.3",
+                "tool": "sink_scan",
+                "findings": [
+                    {"rule_id": "R1", "category": "command-injection", "cwe": "CWE-78",
+                     "file": "samples/B-001/usr/sbin/httpd", "line": 16,
+                     "symbol": "system", "match": "system(cmd);"},
+                    {"rule_id": "R2", "category": "command-injection", "cwe": "CWE-89",
+                     "file": "samples/B-001/usr/sbin/httpd", "line": 17,
+                     "symbol": "system", "match": "system(cmd2);"},
+                    {"rule_id": "R3", "category": "path-traversal", "cwe": "CWE-22",
+                     "file": "samples/B-001/usr/sbin/httpd", "line": 16,
+                     "symbol": "system", "match": "system(cmd);"},
+                    {"rule_id": "R4", "category": "buffer-overflow", "cwe": "CWE-121",
+                     "file": "samples/B-002/usr/sbin/upnpd", "line": 17,
+                     "symbol": "strcpy", "match": "strcpy(dst, src);"},
+                    {"rule_id": "R5", "category": "buffer-overflow", "cwe": "CWE-121",
+                     "file": "samples/B-002/usr/sbin/upnpd", "line": 17,
+                     "symbol": "strcpy", "match": "strcpy(dst2, src);"},
+                ],
+            }, fh, ensure_ascii=False, indent=2)
+        p102_json = os.path.join(bd, "bench-cwe.json")
+        p102_md = os.path.join(bd, "bench-cwe.md")
+        rr = run([BENCH, "--manifest", bench_manifest, "--findings", p102_findings,
+                  "--json", p102_json, "--md", p102_md, "--quiet"])
+        try:
+            dc = json.load(open(p102_json, encoding="utf-8"))
+        except (OSError, ValueError):
+            dc = {}
+        cm = dc.get("confusion_matrix") or {}
+        check("bench：CWE/类别不兼容不得靠相邻行计 TP（2 TP / 2 FP / 2 FN）",
+              rr.returncode == 0 and cm.get("tp") == 2 and cm.get("fp") == 2
+              and cm.get("fn") == 2,
+              json.dumps(cm, ensure_ascii=False))
+        matching = dc.get("matching") or {}
+        mstats = matching.get("stats") or {}
+        decisions = (matching.get("decisions") or {}).get("items") or []
+        by_pair = {(row.get("label_id"), row.get("finding_index")): row for row in decisions}
+        adj = by_pair.get(("L-001", 1)) or {}
+        check("bench：相邻行不同 CWE 被类型阶段拒绝，并披露 unrelated",
+              mstats.get("pairs") == 5 and mstats.get("rejected_by_type") == 2
+              and adj.get("type_ok") is False and adj.get("cwe_relation") == "unrelated"
+              and "CWE" in str(adj.get("reason")),
+              json.dumps(adj, ensure_ascii=False)[:240])
+        same_pos = by_pair.get(("L-001", 2)) or {}
+        check("bench：同位置不同类别被类型阶段拒绝",
+              same_pos.get("type_ok") is False
+              and same_pos.get("category_relation") == "different",
+              json.dumps(same_pos, ensure_ascii=False)[:240])
+        child = by_pair.get(("L-002", 3)) or {}
+        check("bench：CWE-120 标签接受更具体的 CWE-121（父子关系）",
+              child.get("matched") is True and child.get("cwe_relation") == "finding-child",
+              json.dumps(child, ensure_ascii=False)[:240])
+        dups = (dc.get("details") or {}).get("duplicate_reviewed_matches") or {}
+        check("bench：同一标签多个候选只计 1 TP，其余进 duplicate 不进 FP",
+              (dups.get("count") or 0) >= 1 and not any(
+                  row.get("index") == 4 for row in
+                  ((dc.get("details") or {}).get("false_positives") or {}).get("items") or []
+              ),
+              f"duplicates={dups.get('count')}")
+        fns = (dc.get("details") or {}).get("false_negatives") or {}
+        fn_reasons = {row.get("label_id"): row.get("reason") for row in fns.get("items") or []}
+        check("bench：FN 原因说明无同文件候选，不笼统写“未命中”",
+              "没有 finding 候选" in str(fn_reasons.get("L-003")),
+              str(fn_reasons.get("L-003"))[:160])
+        try:
+            report_text = open(p102_md, encoding="utf-8").read()
+        except OSError:
+            report_text = ""
+        check("bench：报告披露匹配策略、决策与类型拒绝原因",
+              "匹配策略与未匹配原因" in report_text
+              and "类型不兼容" in report_text
+              and "CWE 采用等价或父子关系兼容" in report_text)
+        # P1-03：真实基准必须逐样本登记来源、授权、哈希、解包清单和标签依据；
+        # 合成集可以留空，但 --require-real 下缺项必须拒绝。这里构造一个最小
+        # 合规真实集（1 漏洞 + 1 安全 + 1 困难负样本），再做缺项负测。
+        p103_root = os.path.join(bd, "real-bench")
+        p103_samples = os.path.join(p103_root, "samples")
+        os.makedirs(p103_samples, exist_ok=True)
+        p103_specs = [
+            ("R-VULN", "vuln", b"system(cmd);\n"),
+            ("R-SAFE", "safe", b"int main(void){return 0;}\n"),
+            ("R-HARD", "hard-negative", b"int main(void){return 1;}\n"),
+        ]
+        p103_manifest = {
+            "schema": "bench-manifest/1.0",
+            "rule_version": "test-1",
+            "tool_version": "test-1",
+            "dataset": {
+                "name": "real-fixture",
+                "version": "1.0",
+                "created": "2026-11-01",
+                "kind": "real",
+                "license": "authorized-test-only",
+                "description": "P1-03 合规性负测夹具",
+                "real_firmware": "Acme/AC-1200@1.0.0",
+                "curation": {
+                    "custodian": "Acme PSIRT",
+                    "review_process": "two-person independent review",
+                    "reviewed_at": "2026-11-01",
+                },
+            },
+            "splits": {"dev": ["R-VULN", "R-SAFE"], "holdout": ["R-HARD"]},
+            "samples": [],
+        }
+        for sid, kind, payload in p103_specs:
+            sdir = os.path.join(p103_samples, sid)
+            os.makedirs(sdir, exist_ok=True)
+            fpath = os.path.join(sdir, "fw.bin")
+            with open(fpath, "wb") as fh:
+                fh.write(payload)
+            digest = hashlib.sha256(payload).hexdigest()
+            sample = {
+                "id": sid,
+                "path": f"samples/{sid}/fw.bin",
+                "sha256": digest,
+                "size": len(payload),
+                "files": [{"path": "fw.bin", "sha256": digest, "size": len(payload)}],
+                "arch": "mips",
+                "kind": kind,
+                "source": "https://example.invalid/firmware/AC-1200-1.0.0.bin",
+                "license": "authorized-test-only",
+                "authorization": "written lab authorization 2026-10-01",
+                "acquired_at": "2026-10-02",
+                "vendor": "Acme",
+                "model": "AC-1200",
+                "hardware": "rev B",
+                "firmware_version": "1.0.0",
+                "filesystem": "squashfs",
+                "distribution": {"allowed": False, "terms": "internal test only"},
+                "unpack": {"method": "manual", "rootfs": ".", "key_files": ["fw.bin"]},
+                "notes": "P1-03 fixture",
+                "labels": [],
+            }
+            if kind in ("safe", "hard-negative"):
+                sample["negative_evidence"] = "reviewed all endpoints; no sink reachable"
+            if kind == "vuln":
+                sample["labels"] = [{
+                    "id": "L-R-VULN",
+                    "category": "command-injection",
+                    "cwe": "CWE-78",
+                    "file": "fw.bin",
+                    "line": 1,
+                    "symbol": "system",
+                    "severity": "high",
+                    "evidence": "system(cmd);",
+                    "review": "reviewed",
+                    "reviewer": "bob",
+                    "labeler": "alice",
+                    "reviewed_at": "2026-10-20",
+                    "basis": "manual source review plus CWE-78 mapping",
+                }]
+            p103_manifest["samples"].append(sample)
+        p103_path = os.path.join(p103_root, "manifest.json")
+        with open(p103_path, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(p103_manifest, fh, ensure_ascii=False, indent=2)
+
+        def _p103_run(doc, name):
+            path = os.path.join(p103_root, name)
+            with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                json.dump(doc, fh, ensure_ascii=False, indent=2)
+            return run([BENCH, "validate", "--manifest", path, "--require-real"])
+
+        rr = _p103_run(p103_manifest, "manifest-ok.json")
+        check("bench：合规真实基准通过 --require-real", rr.returncode == 0,
+              (rr.stdout + rr.stderr)[-400:])
+        bad = json.loads(json.dumps(p103_manifest))
+        bad["samples"][0].pop("vendor", None)
+        rr = _p103_run(bad, "manifest-no-vendor.json")
+        check("bench：真实样本缺厂商登记被拒", rr.returncode == 1 and "vendor" in (rr.stdout + rr.stderr),
+              (rr.stdout + rr.stderr)[-300:])
+        bad = json.loads(json.dumps(p103_manifest))
+        bad["samples"][0]["labels"][0].pop("basis", None)
+        rr = _p103_run(bad, "manifest-no-basis.json")
+        check("bench：真实标签缺依据被拒", rr.returncode == 1 and "basis" in (rr.stdout + rr.stderr),
+              (rr.stdout + rr.stderr)[-300:])
+        bad = json.loads(json.dumps(p103_manifest))
+        bad["samples"][0]["labels"][0]["reviewer"] = "alice"
+        rr = _p103_run(bad, "manifest-self-review.json")
+        check("bench：复核人与标注人相同被拒", rr.returncode == 1 and "reviewer" in (rr.stdout + rr.stderr),
+              (rr.stdout + rr.stderr)[-300:])
+        bad = json.loads(json.dumps(p103_manifest))
+        bad["samples"][1].pop("negative_evidence", None)
+        rr = _p103_run(bad, "manifest-no-negative.json")
+        check("bench：负样本缺分析证据被拒", rr.returncode == 1 and "negative_evidence" in (rr.stdout + rr.stderr),
+              (rr.stdout + rr.stderr)[-300:])
+
+        p103_findings = os.path.join(p103_root, "findings-empty.json")
+        with open(p103_findings, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump({"schema": "layer1-sinks/1.3", "findings": []}, fh)
+        p103_json = os.path.join(p103_root, "result.json")
+        p103_md = os.path.join(p103_root, "report.md")
+        rr = run([BENCH, "evaluate", "--manifest", p103_path,
+                  "--findings", p103_findings, "--require-real",
+                  "--json", p103_json, "--md", p103_md, "--quiet"])
+        try:
+            d103 = json.load(open(p103_json, encoding="utf-8"))
+        except (OSError, ValueError):
+            d103 = {}
+        check("bench：真实集结果 synthetic=false 且保留数据集类型",
+              rr.returncode == 0 and d103.get("synthetic") is False
+              and (d103.get("dataset") or {}).get("kind") == "real",
+              f"rc={rr.returncode} kind={(d103.get('dataset') or {}).get('kind')}")
+        try:
+            p103_md_text = open(p103_md, encoding="utf-8").read()
+        except OSError:
+            p103_md_text = ""
+        check("bench：真实集报告按文件系统/厂商分层并声明自报边界",
+              "真实固件" in p103_md_text and "按文件系统" in p103_md_text
+              and "按厂商/来源" in p103_md_text
+              and "自报元数据" in p103_md_text,
+              p103_md_text[:160])
     # ── 21. 黑板：契约 / 事件日志 / 快照恢复 / 状态机 ────────────────────────
     print("\n[21/28] board_* — 黑板契约、事件日志、快照恢复与状态转换")
     BOARD = os.path.join(HERE, "board_store.py")
@@ -1675,6 +1891,63 @@ def main() -> int:
           rr.returncode == 0 and dup.get("duplicate") is True,
           f"rc={rr.returncode}")
 
+    chain_json = os.path.join(b21, "chain.json")
+    rr = run([BEV, "verify", "--events", ev_path, "--json", chain_json])
+    chain = _rj(chain_json)
+    check("board_events：事件日志带完整哈希链（hash_chain=complete）",
+          rr.returncode == 0 and chain.get("hash_chain") == "complete"
+          and len(str(chain.get("last_hash") or "")) == 64,
+          f"rc={rr.returncode} chain={chain.get('hash_chain')}")
+
+    with open(ev_path, encoding="utf-8") as fh:
+        ev_lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+    tampered = os.path.join(b21, "tampered.jsonl")
+    with open(tampered, "w", encoding="utf-8", newline="\n") as fh:
+        for i, line in enumerate(ev_lines):
+            obj = json.loads(line)
+            if i == 0:
+                obj["payload"]["phase"] = "P1"
+            fh.write(json.dumps(obj, ensure_ascii=False,
+                                separators=(",", ":")) + "\n")
+    rr = run([BEV, "verify", "--events", tampered])
+    check("board_events：篡改历史事件 → HASH_MISMATCH",
+          rr.returncode == 1 and "HASH_MISMATCH" in (rr.stdout + rr.stderr),
+          f"rc={rr.returncode}")
+
+    torn_ws = os.path.join(b21, "torn")
+    os.makedirs(torn_ws, exist_ok=True)
+    torn_ev = os.path.join(torn_ws, "audit-events.jsonl")
+    shutil.copy2(ev_path, torn_ev)
+    with open(torn_ev, "a", encoding="utf-8", newline="\n") as fh:
+        fh.write('{"schema": "board-event/1.0", "seq":')
+    rr = run([BOARD, "show", "--workspace", torn_ws])
+    check("崩溃恢复：不完整尾行可回放完整前缀",
+          rr.returncode == 0, f"rc={rr.returncode}")
+    cand_torn = _wj("candidate-torn.json", {
+        "id": "C-TORN", "status": "hypothesis", "type": "command-injection",
+        "file": "usr/sbin/httpd", "run_id": RUN21, "firmware_sha256": FW21,
+        "target_sha256": TGT21})
+    rr = run([BOARD, "add", "--workspace", torn_ws, "--kind", "candidate",
+              "--file", cand_torn])
+    torn_files = [n for n in os.listdir(torn_ws) if ".torn-" in n]
+    rr2 = run([BEV, "verify", "--events", torn_ev])
+    check("崩溃恢复：append 前隔离不完整尾行并截断",
+          rr.returncode == 0 and bool(torn_files) and rr2.returncode == 0,
+          f"rc={rr.returncode} torn={len(torn_files)} verify={rr2.returncode}")
+
+    corrupt_ws = os.path.join(b21, "corrupt")
+    os.makedirs(corrupt_ws, exist_ok=True)
+    corrupt_ev = os.path.join(corrupt_ws, "audit-events.jsonl")
+    with open(corrupt_ev, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(ev_lines[0] + "\n")
+        fh.write("{not-json}\n")
+        for line in ev_lines[1:]:
+            fh.write(line + "\n")
+    rr = run([BOARD, "show", "--workspace", corrupt_ws])
+    check("崩溃恢复：中间损坏拒绝静默跳过（EVENTS_CORRUPT）",
+          rr.returncode == 1 and "EVENTS_CORRUPT" in rr.stderr,
+          f"rc={rr.returncode}")
+
     rr = run([BOARD, "transition", "--workspace", ws21, "--candidate", "C-21",
               "--to", "validated", "--reason", "直接跳"])
     check("状态机：hypothesis → validated 被拒绝",
@@ -1692,7 +1965,14 @@ def main() -> int:
         "firmware_sha256": FW21, "target_sha256": TGT21, "type": "emulation",
         "observed_at": "2026-01-01T00:00:00Z", "status": "parsed",
         "source": {"type": "emulation", "tool": "qiling"},
-        "event": {"type": "execve", "trigger": True}})
+        "event": {"type": "execve", "trigger": True},
+        "supports": [
+            {"criterion": "sink_reachable", "kind": "call-path",
+             "details": {"path": ["/cgi-bin/upnp", "execve"]}},
+            {"criterion": "user_controlled_input", "kind": "input-origin",
+             "details": {"origin": "HTTP query", "field": "cmd"}},
+            {"criterion": "command_execution", "kind": "sink-execution",
+             "details": {"sink": "execve", "argv": ["/bin/sh", "-c", "id"]}}]})
     check("board_store：记录证据",
           run([BOARD, "add", "--workspace", ws21, "--kind", "evidence",
                "--file", ev21]).returncode == 0)
@@ -1775,7 +2055,14 @@ def main() -> int:
         "firmware_sha256": FW21, "target_sha256": TGT21, "type": "emulation",
         "observed_at": "2026-01-01T00:00:00Z", "status": "parsed",
         "source": {"type": "emulation", "tool": "qiling"},
-        "event": {"type": "open"}})
+        "event": {"type": "open"},
+        "supports": [
+            {"criterion": "sink_reachable", "kind": "call-path",
+             "details": {"path": ["/cgi-bin/upnp", "execve"]}},
+            {"criterion": "user_controlled_input", "kind": "input-origin",
+             "details": {"origin": "HTTP query", "field": "cmd"}},
+            {"criterion": "command_execution", "kind": "sink-execution",
+             "details": {"sink": "execve", "argv": ["/bin/sh", "-c", "id"]}}]})
     cand_poc = _wj("cand-confirm-poc.json", {
         "id": "C-CONF-POC", "status": "validated", "type": "command-injection",
         "run_id": RUN21, "firmware_sha256": FW21, "target_sha256": TGT21,
@@ -1794,6 +2081,48 @@ def main() -> int:
     r = _rj(out_conf_poc)
     check("A02 confirmed 不接受候选自带 poc 兜底 → MISSING_TRIGGER_CONTEXT",
           r.get("code") == "MISSING_TRIGGER_CONTEXT", r.get("code", ""))
+
+    # P1-01：引用存在不等于语义支持。没有 supports → UNSUPPORTED；supports 里
+    # 只有 sink-execution 却声称输入可控 → SEMANTICS。两者都必须拒绝。
+    ev_sem_none = _wj("evidence-sem-none.json", {
+        "schema": "evidence/1.1", "evidence_id": "E-SEM-NONE", "run_id": RUN21,
+        "firmware_sha256": FW21, "target_sha256": TGT21, "type": "emulation",
+        "observed_at": "2026-01-01T00:00:00Z", "status": "parsed",
+        "source": {"type": "emulation", "tool": "qiling"},
+        "event": {"type": "execve", "trigger": True}})
+    ev_sem_wrong = _wj("evidence-sem-wrong.json", {
+        "schema": "evidence/1.1", "evidence_id": "E-SEM-WRONG", "run_id": RUN21,
+        "firmware_sha256": FW21, "target_sha256": TGT21, "type": "emulation",
+        "observed_at": "2026-01-01T00:00:00Z", "status": "parsed",
+        "source": {"type": "emulation", "tool": "qiling"},
+        "event": {"type": "execve", "trigger": True},
+        "supports": [
+            {"criterion": "sink_reachable", "kind": "call-path",
+             "details": {"path": ["/cgi-bin/upnp", "execve"]}},
+            {"criterion": "user_controlled_input", "kind": "sink-execution",
+             "details": {"sink": "execve", "argv": ["/bin/sh"]}},
+            {"criterion": "command_execution", "kind": "sink-execution",
+             "details": {"sink": "execve", "argv": ["/bin/sh"]}}]})
+    cand_sem = _wj("cand-sem.json", {
+        "id": "C-CONF-SEM", "status": "validated", "type": "command-injection",
+        "run_id": RUN21, "firmware_sha256": FW21, "target_sha256": TGT21})
+    for tag, evp, eid, expected in (
+            ("none", ev_sem_none, "E-SEM-NONE", "CONFIRM_CRITERION_UNSUPPORTED"),
+            ("wrong", ev_sem_wrong, "E-SEM-WRONG", "CONFIRM_CRITERION_SEMANTICS")):
+        pol = _wj(f"policy-sem-{tag}.json", {
+            "vuln_type": "command-injection", "target_sha256": TGT21,
+            "criteria": {"sink_reachable": True, "user_controlled_input": True,
+                         "command_execution": True},
+            "criterion_evidence": {"sink_reachable": [eid],
+                                   "user_controlled_input": [eid],
+                                   "command_execution": [eid]}})
+        out = os.path.join(b21, f"confirm-sem-{tag}.json")
+        run([BTR, "check", "--candidate", cand_sem, "--to", "confirmed",
+             "--evidence", evp, "--policy", pol, "--run-id", RUN21,
+             "--firmware-sha256", FW21, "--json", out, "--quiet"])
+        rr = _rj(out)
+        check(f"A02/P1-01 判据语义不足（{tag}）→ {expected}",
+              rr.get("code") == expected, rr.get("code", ""))
 
     rr = run([BOARD, "transition", "--workspace", ws21, "--candidate", "C-21",
               "--to", "validated", "--reason", "重开"])
@@ -3389,6 +3718,93 @@ sys.exit(0)
           rr_skip26.returncode == 1 and "NOT_AN_ADVANCE" in rr_skip26.stderr
           and st_skip26.get("phase") == "P0",
           f"rc={rr_skip26.returncode} phase={st_skip26.get('phase')}")
+
+    # P2-03：领取租约、心跳、过期拒绝与回收
+    ws_lease = os.path.join(s26, "lease")
+    run([BOARD, "init", "--workspace", ws_lease, "--run-id", "RUN-LEASE26",
+         "--firmware-sha256", FW26])
+    ev_lease = _w26("lease-ev.json", {
+        "schema": "evidence/1.1", "evidence_id": "E-LEASE", "run_id": "RUN-LEASE26",
+        "firmware_sha256": FW26, "type": "static",
+        "observed_at": "2026-11-05T00:00:00Z", "status": "parsed",
+        "source": {"type": "static", "tool": "selftest", "path": "etc/httpd.conf"}})
+    fact_lease = _w26("lease-fact.json", {
+        "schema": "fact/1.0", "fact_id": "F-LEASE", "run_id": "RUN-LEASE26",
+        "firmware_sha256": FW26, "type": "service",
+        "value": {"name": "httpd", "port": 8080}, "evidence_refs": ["E-LEASE"],
+        "source": {"type": "static", "tool": "selftest"},
+        "observed_at": "2026-11-05T00:00:00Z"})
+    run([BOARD, "add", "--workspace", ws_lease, "--kind", "evidence",
+         "--file", ev_lease])
+    run([BOARD, "add", "--workspace", ws_lease, "--kind", "fact",
+         "--file", fact_lease])
+    rr_plan_lease, plan_lease = _s26("plan", "--workspace", ws_lease,
+                                     "--rules", rules26, "--write")
+    iid_lease = (plan_lease.get("created") or [{}])[0].get("intent_id")
+    rr_claim_lease, claim_lease = _s26("claim", "--workspace", ws_lease,
+                                       "--intent", iid_lease, "--worker", "lease-w1",
+                                       "--lease-seconds", "1")
+    check("scheduler：claim 写入租约（expires_at/ttl）且 attempts=1",
+          rr_claim_lease.returncode == 0
+          and (claim_lease.get("lease") or {}).get("ttl_seconds") == 1
+          and (claim_lease.get("lease") or {}).get("worker") == "lease-w1"
+          and claim_lease.get("attempts") == 1,
+          f"rc={rr_claim_lease.returncode} lease={claim_lease.get('lease')}")
+
+    rr_hb_wrong, hb_wrong = _s26("heartbeat", "--workspace", ws_lease,
+                                 "--intent", iid_lease, "--worker", "lease-w2")
+    check("scheduler：非持有者不能续租（WORKER_MISMATCH）",
+          rr_hb_wrong.returncode == 1 and hb_wrong.get("code") == "WORKER_MISMATCH",
+          f"rc={rr_hb_wrong.returncode} code={hb_wrong.get('code')}")
+    rr_hb, hb = _s26("heartbeat", "--workspace", ws_lease, "--intent", iid_lease,
+                     "--worker", "lease-w1", "--lease-seconds", "60")
+    check("scheduler：heartbeat 续租并刷新租约时长",
+          rr_hb.returncode == 0
+          and (hb.get("lease") or {}).get("ttl_seconds") == 60
+          and hb.get("attempts") == 1,
+          f"rc={rr_hb.returncode} lease={hb.get('lease')}")
+    _s26("heartbeat", "--workspace", ws_lease, "--intent", iid_lease,
+         "--worker", "lease-w1", "--lease-seconds", "1")
+    time.sleep(2.2)
+
+    expired_result = _w26("lease-result.json", {
+        "schema": "scheduler-result/1.0", "intent_id": iid_lease,
+        "run_id": "RUN-LEASE26", "firmware_sha256": FW26, "status": "FAILED",
+        "finished_at": "2026-11-05T00:10:00Z", "worker": "lease-w1",
+        "attempt": 1,
+        "failure": {"code": "timeout", "message": "租约过期",
+                    "category": "timeout", "retryable": False}})
+    rr_exp, exp = _s26("complete", "--workspace", ws_lease, "--intent", iid_lease,
+                       "--result", expired_result)
+    st_exp = _r26(os.path.join(ws_lease, "audit-board.json"))
+    exp_row = next(i for i in st_exp["intents"] if i.get("intent_id") == iid_lease)
+    check("scheduler：租约过期后回写被拒（LEASE_EXPIRED，Intent 仍 claimed）",
+          rr_exp.returncode == 1 and exp.get("code") == "LEASE_EXPIRED"
+          and exp_row.get("status") == "claimed",
+          f"rc={rr_exp.returncode} code={exp.get('code')}")
+
+    rr_rec_dry, rec_dry = _s26("reclaim", "--workspace", ws_lease, "--dry-run")
+    st_dry = _r26(os.path.join(ws_lease, "audit-board.json"))
+    dry_row = next(i for i in st_dry["intents"] if i.get("intent_id") == iid_lease)
+    check("scheduler：reclaim --dry-run 只报告、不改状态",
+          rr_rec_dry.returncode == 0 and rec_dry.get("count") == 1
+          and dry_row.get("status") == "claimed",
+          f"rc={rr_rec_dry.returncode} count={rec_dry.get('count')}")
+    rr_rec, rec = _s26("reclaim", "--workspace", ws_lease)
+    st_rec = _r26(os.path.join(ws_lease, "audit-board.json"))
+    rec_row = next(i for i in st_rec["intents"] if i.get("intent_id") == iid_lease)
+    check("scheduler：reclaim 把过期 claimed 回收为 open 并清空租约",
+          rr_rec.returncode == 0 and rec.get("count") == 1
+          and rec_row.get("status") == "open" and "lease" not in rec_row
+          and rec_row.get("worker") in (None, ""),
+          f"rc={rr_rec.returncode} status={rec_row.get('status')}")
+    rr_reclaim_claim, reclaim_claim = _s26(
+        "claim", "--workspace", ws_lease, "--intent", iid_lease,
+        "--worker", "lease-w2", "--lease-seconds", "60")
+    check("scheduler：回收后可由新 worker 领取，attempts 递增且新租约生效",
+          rr_reclaim_claim.returncode == 0 and reclaim_claim.get("attempts") == 2
+          and (reclaim_claim.get("lease") or {}).get("worker") == "lease-w2",
+          f"rc={rr_reclaim_claim.returncode} attempts={reclaim_claim.get('attempts')}")
 
     rr_v26 = run([BOARD, "verify", "--workspace", ws26])
     check("黑板：M7 全流程后 verify 通过（事件链与快照一致）",

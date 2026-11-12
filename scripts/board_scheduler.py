@@ -14,8 +14,12 @@
   不允许把超时或阻断折叠成「没有发现」。
 * 资源准入先于领取：claim 调用 resource_manager.check_request；执行阶段
   仍必须经 sandbox_run.py，调度器不是执行器。
+* 领取带租约：claim 写入 lease（expires_at），执行中的 worker 必须 heartbeat
+  续租；租约过期的 claimed 可以被 reclaim 回收为 open，旧 worker 的结果会被
+  拒绝（LEASE_EXPIRED / WORKER_MISMATCH），避免两个 worker 同时写同一任务。
 
-子命令：plan / next / claim / complete / backtrack / status / rules。
+子命令：plan / next / claim / heartbeat / reclaim / complete / backtrack /
+status / rules。
 
 退出码：0 成功；1 拒绝/校验失败；2 用法或 IO 错误；5 资源准入拒绝。
 纯标准库，Python 3.10+。
@@ -23,6 +27,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -531,6 +536,66 @@ def _get_intent_state(state: Dict[str, Any], intent_id: str) -> Dict[str, Any]:
     raise SchedulerError("INTENT_NOT_FOUND", f"Intent 不存在：{intent_id}")
 
 
+DEFAULT_LEASE_SECONDS = 900
+MAX_LEASE_SECONDS = 86400
+
+
+def _utc_now() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _format_ts(value: datetime.datetime) -> str:
+    return value.astimezone(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_ts(value: Any) -> Optional[datetime.datetime]:
+    if not isinstance(value, str) or not value:
+        return None
+    text = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def _lease_seconds(value: Any) -> int:
+    if value is None:
+        return DEFAULT_LEASE_SECONDS
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise SchedulerError("LEASE_INVALID", "--lease-seconds 必须是整数", 2)
+    if value < 1 or value > MAX_LEASE_SECONDS:
+        raise SchedulerError(
+            "LEASE_INVALID",
+            f"--lease-seconds 必须在 1..{MAX_LEASE_SECONDS} 之间，收到 {value}", 2)
+    return value
+
+
+def _make_lease(worker: str, ttl: int,
+                now: Optional[datetime.datetime] = None) -> Dict[str, Any]:
+    current = now or _utc_now()
+    return {"worker": worker,
+            "acquired_at": _format_ts(current),
+            "heartbeat_at": _format_ts(current),
+            "expires_at": _format_ts(current + datetime.timedelta(seconds=ttl)),
+            "ttl_seconds": ttl}
+
+
+def _lease_expired(intent: Dict[str, Any],
+                   now: Optional[datetime.datetime] = None) -> bool:
+    """没有 lease 的旧式 claimed 视为未过期（向后兼容）；lease 非法则视为过期。"""
+    lease = intent.get("lease")
+    if not isinstance(lease, dict):
+        return False
+    expires = _parse_ts(lease.get("expires_at"))
+    if expires is None:
+        return True
+    return (now or _utc_now()) >= expires
+
+
 def cmd_claim(args: argparse.Namespace) -> Dict[str, Any]:
     store = BoardStore.load(args.workspace)
     intent = _get_intent(store, args.intent)
@@ -552,11 +617,13 @@ def cmd_claim(args: argparse.Namespace) -> Dict[str, Any]:
     if denied:
         raise SchedulerError("RESOURCE_DENIED", "资源准入拒绝，Intent 保持 open",
                              5, denied)
+    ttl = _lease_seconds(getattr(args, "lease_seconds", None))
+    lease = _make_lease(args.worker, ttl)
     try:
         # expected_status 让「检查 open」与「写 claimed」在同一把黑板锁内完成：
         # 两个 worker 同时 claim 时，后到的那个会看到 claimed 并失败。
         res = store.set_intent_status(args.intent, "claimed", args.worker,
-                                      expected_status="open")
+                                      lease=lease, expected_status="open")
     except StoreError as exc:
         raise SchedulerError(exc.code, exc.message)
     updated = _get_intent(store, args.intent)
@@ -565,7 +632,57 @@ def cmd_claim(args: argparse.Namespace) -> Dict[str, Any]:
             "intent_id": args.intent, "worker": args.worker,
             "attempts": updated.get("attempts"),
             "max_retries": updated.get("max_retries") or 0,
+            "lease": updated.get("lease"),
             "policy_sha256": policy_sha, "policy_source": source}
+
+
+def cmd_heartbeat(args: argparse.Namespace) -> Dict[str, Any]:
+    store = BoardStore.load(args.workspace)
+    _get_intent(store, args.intent)
+    ttl = _lease_seconds(getattr(args, "lease_seconds", None))
+    lease = _make_lease(args.worker, ttl)
+    try:
+        res = store.renew_lease(args.intent, args.worker, lease)
+    except StoreError as exc:
+        raise SchedulerError(exc.code, exc.message)
+    updated = _get_intent_state(res.get("state") or store.state, args.intent)
+    return {"schema": SCHEMA, "ok": True,
+            "duplicate": bool(res.get("duplicate")),
+            "intent_id": args.intent, "worker": args.worker,
+            "attempts": updated.get("attempts"),
+            "lease": updated.get("lease")}
+
+
+def cmd_reclaim(args: argparse.Namespace) -> Dict[str, Any]:
+    """把租约过期的 claimed 回收为 open；这是崩溃恢复，不是重试扣减。"""
+    store = BoardStore.load(args.workspace)
+    now = _utc_now()
+    reclaimed: List[Dict[str, Any]] = []
+    for intent in store.state.get("intents") or []:
+        if not isinstance(intent, dict) or intent.get("status") != "claimed":
+            continue
+        if not _lease_expired(intent, now):
+            continue
+        row = {"intent_id": intent.get("intent_id"),
+               "worker": intent.get("worker"),
+               "attempts": intent.get("attempts"),
+               "lease": intent.get("lease")}
+        if getattr(args, "dry_run", False):
+            reclaimed.append(row)
+            continue
+        try:
+            store.set_intent_status(
+                intent.get("intent_id"), "open",
+                worker=intent.get("worker"),
+                reason="lease_expired",
+                expected_status="claimed")
+        except StoreError as exc:
+            raise SchedulerError(exc.code, exc.message)
+        row["status"] = "open"
+        reclaimed.append(row)
+    return {"schema": SCHEMA, "ok": True,
+            "dry_run": bool(getattr(args, "dry_run", False)),
+            "reclaimed": reclaimed, "count": len(reclaimed)}
 
 
 def _record_result_rows(store: BoardStore,
@@ -611,6 +728,11 @@ def cmd_complete(args: argparse.Namespace) -> Dict[str, Any]:
     if str(result.get("firmware_sha256", "")).lower() != \
             str(store.state.get("firmware_sha256", "")).lower():
         raise SchedulerError("FIRMWARE_MISMATCH", "结果的固件哈希与黑板不一致")
+    if intent.get("status") == "claimed" and _lease_expired(intent):
+        raise SchedulerError(
+            "LEASE_EXPIRED",
+            f"Intent {args.intent} 的租约已过期；先 heartbeat 续租，"
+            "或用 reclaim 回收后再重试")
     if intent.get("status") != "claimed":
         if intent.get("status") in ("done", "failed"):
             prev = set(intent.get("result_refs") or [])
@@ -729,6 +851,17 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--intent", required=True)
     q.add_argument("--worker", required=True)
     q.add_argument("--policy")
+    q.add_argument("--lease-seconds", type=int, dest="lease_seconds")
+
+    q = sub.add_parser("heartbeat", help="续租 claimed Intent")
+    q.add_argument("--workspace", required=True)
+    q.add_argument("--intent", required=True)
+    q.add_argument("--worker", required=True)
+    q.add_argument("--lease-seconds", type=int, dest="lease_seconds")
+
+    q = sub.add_parser("reclaim", help="回收租约过期的 claimed Intent")
+    q.add_argument("--workspace", required=True)
+    q.add_argument("--dry-run", action="store_true", dest="dry_run")
 
     q = sub.add_parser("complete", help="回写 SchedulerResult")
     q.add_argument("--workspace", required=True)
@@ -761,6 +894,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             out = cmd_next(args)
         elif args.command == "claim":
             out = cmd_claim(args)
+        elif args.command == "heartbeat":
+            out = cmd_heartbeat(args)
+        elif args.command == "reclaim":
+            out = cmd_reclaim(args)
         elif args.command == "complete":
             out = cmd_complete(args)
         elif args.command == "backtrack":

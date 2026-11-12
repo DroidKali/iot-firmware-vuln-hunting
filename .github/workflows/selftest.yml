@@ -1,0 +1,123 @@
+name: selftest
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: linux-py${{ matrix.python }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run selftest (POSIX lock, fsync, docs/CLI check)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python scripts/selftest.py
+
+  windows:
+    name: windows-py3.12
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run selftest (msvcrt lock, Windows path/ACL branches)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python scripts/selftest.py
+
+  macos:
+    name: macos-py3.12
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run selftest (fcntl lock, POSIX filesystem semantics)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python scripts/selftest.py
+
+  sandbox-docker:
+    name: sandbox-docker
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Require a working container runtime (never skip as pass)
+        run: |
+          set -euo pipefail
+          python scripts/sandbox_run.py --check --json sandbox-check.json
+          python - <<'PY'
+          import json
+          doc = json.load(open('sandbox-check.json', encoding='utf-8'))
+          assert doc['runtime']['available'] is True, doc['runtime']
+          assert doc['host_fallback'] is False, doc
+          print('runtime:', doc['runtime']['name'], doc['runtime']['version'])
+          PY
+      - name: Pull the minimal image used by the smoke test
+        run: docker pull debian:bookworm-slim
+      - name: Execute only inside the sandbox (fail-closed path)
+        run: |
+          set -euo pipefail
+          rm -rf ci-fw ci-out && mkdir -p ci-fw ci-out
+          printf 'ci-firmware' > ci-fw/fw.bin
+          python scripts/sandbox_run.py --mode sandbox --image debian:bookworm-slim \
+            --firmware ci-fw --out ci-out --json sandbox-run.json \
+            --cmd 'test -f /firmware/fw.bin && echo ci-ok > /out/ci.txt'
+          test "$(cat ci-out/ci.txt)" = 'ci-ok'
+          python - <<'PY'
+          import json
+          doc = json.load(open('sandbox-run.json', encoding='utf-8'))
+          assert doc['mode'] == 'sandbox', doc['mode']
+          assert doc['host_fallback'] is False, doc
+          assert doc['exit_code'] == 0, doc['exit_code']
+          assert doc['policy']['network'] == 'none', doc['policy']
+          assert doc['policy']['host_execution'] == 'forbidden', doc['policy']
+          print('sandbox ok:', doc['runtime']['name'], doc['image'])
+          PY
+
+  sandbox-check:
+    name: sandbox-fail-closed
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Without a runtime the tool must refuse, not fall back to host
+        run: |
+          set -euo pipefail
+          set +e
+          PATH="$(dirname "$(command -v python)")" python scripts/sandbox_run.py --check --json sandbox-none.json
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          python - <<'PY'
+          import json
+          doc = json.load(open('sandbox-none.json', encoding='utf-8'))
+          assert doc['runtime']['available'] is False, doc['runtime']
+          assert doc['host_fallback'] is False, doc
+          assert doc['mode'] == 'fail-closed', doc['mode']
+          PY

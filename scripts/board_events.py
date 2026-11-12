@@ -47,9 +47,11 @@ except Exception:  # pragma: no cover
     validate_intent_transition = None
     validate_transition = None
 
-VERSION = "1.0"
+VERSION = "1.1"
 EVENT_RE = re.compile(r"^EV-(\d{6})$")
 PHASES = ("P0", "P1", "P2", "P3", "P4", "P5")
+HASH_PREFIX = "board-event-hash/1.0\n"
+HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class BoardEventError(Exception):
@@ -81,13 +83,25 @@ def make_dedupe_key(event_type: str, payload: Dict[str, Any]) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
+def event_hash(event: Dict[str, Any]) -> str:
+    """事件内容的 sha256；hash 字段本身不参与计算，避免自引用。"""
+    body = {k: v for k, v in event.items() if k != "hash"}
+    return hashlib.sha256(
+        (HASH_PREFIX + canonical_json(body)).encode("utf-8")).hexdigest()
+
+
 def make_event(run_id: str, seq: int, event_type: str, payload: Dict[str, Any],
                ts: Optional[str] = None, event_id: Optional[str] = None,
-               dedupe_key: Optional[str] = None) -> Dict[str, Any]:
-    """构造一行事件；seq/event_id 由调用方保证连续，便于日志可审计。"""
+               dedupe_key: Optional[str] = None,
+               prev_hash: Optional[str] = None) -> Dict[str, Any]:
+    """构造一行事件；seq/event_id 由调用方保证连续，便于日志可审计。
+
+    prev_hash 为 None 时保持 1.0 的无链格式；给空字符串表示新链的第一条。
+    只要给了 prev_hash，就同时写入 hash，后续 verify 会强制整条链完整。
+    """
     if not isinstance(seq, int) or seq < 1:
         raise BoardEventError("BAD_SEQ", "seq 必须是 >=1 的整数")
-    return {
+    event = {
         "schema": "board-event/1.0",
         "event_id": event_id or f"EV-{seq:06d}",
         "run_id": run_id,
@@ -97,6 +111,13 @@ def make_event(run_id: str, seq: int, event_type: str, payload: Dict[str, Any],
         "dedupe_key": dedupe_key or make_dedupe_key(event_type, payload),
         "payload": payload or {},
     }
+    if prev_hash is not None:
+        if prev_hash and not HEX64_RE.match(prev_hash):
+            raise BoardEventError("BAD_PREV_HASH",
+                                  "prev_hash 必须是 64 位小写十六进制或空字符串")
+        event["prev_hash"] = prev_hash
+        event["hash"] = event_hash(event)
+    return event
 
 
 def validate_event(event: Any) -> List[Dict[str, str]]:
@@ -320,6 +341,7 @@ def apply_event(state: Optional[Dict[str, Any]], event: Dict[str, Any],
         state["counters"]["facts"] = len(state["facts"])
         refs = [str(i) for i in ev_ids] + [str(i) for i in fact_ids]
         _merge_result_refs(state, intent, refs)
+        intent.pop("lease", None)
         status = result.get("status")
         done_map = {"SUCCESS": "success", "PARTIAL": "partial",
                     "NOT_APPLICABLE": "not_applicable"}
@@ -415,7 +437,11 @@ def apply_event(state: Optional[Dict[str, Any]], event: Dict[str, Any],
             intent["attempts"] = given
             intent["worker"] = payload.get("worker")
             intent["claimed_at"] = event.get("ts")
+            lease = payload.get("lease")
+            if isinstance(lease, dict):
+                intent["lease"] = dict(lease)
         elif target in ("done", "failed", "cancelled"):
+            intent.pop("lease", None)
             if versioned:
                 outcome = payload.get("outcome")
                 if target == "done" and outcome not in (
@@ -445,6 +471,7 @@ def apply_event(state: Optional[Dict[str, Any]], event: Dict[str, Any],
             intent["concluded_at"] = event.get("ts")
         elif target == "open":
             intent["worker"] = None
+            intent.pop("lease", None)
             _merge_result_refs(state, intent, payload.get("result_refs"))
             if versioned and isinstance(payload.get("last_failure"), dict):
                 intent["last_failure"] = dict(payload["last_failure"])
@@ -452,6 +479,34 @@ def apply_event(state: Optional[Dict[str, Any]], event: Dict[str, Any],
         # 状态必须在所有字段校验通过后才落盘；否则事件声称切换了状态，
         # 重放出来的 Intent 却还停在旧状态。
         intent["status"] = target
+    elif typ == "INTENT_LEASE_RENEWED":
+        intent = _find(state, "intents", "intent_id", payload.get("intent_id"))
+        if intent.get("status") != "claimed":
+            raise BoardEventError("STATE_MISMATCH",
+                                  f"Intent 当前是 {intent.get('status')}，不能续租",
+                                  "intent.status")
+        if intent.get("worker") != payload.get("worker"):
+            raise BoardEventError("WORKER_MISMATCH",
+                                  "续租 worker 与领取者不一致", "intent.worker")
+        lease = payload.get("lease")
+        if not isinstance(lease, dict):
+            raise BoardEventError("LEASE_INVALID", "续租必须带 lease 对象",
+                                  "intent.lease")
+        for key in ("worker", "acquired_at", "heartbeat_at", "expires_at"):
+            if not isinstance(lease.get(key), str) or not lease[key]:
+                raise BoardEventError("LEASE_INVALID",
+                                      f"lease.{key} 必须是非空字符串",
+                                      f"intent.lease.{key}")
+        if lease["worker"] != intent.get("worker"):
+            raise BoardEventError("LEASE_INVALID",
+                                  "lease.worker 与 Intent worker 不一致",
+                                  "intent.lease.worker")
+        ttl = lease.get("ttl_seconds")
+        if not isinstance(ttl, int) or isinstance(ttl, bool) or ttl < 1:
+            raise BoardEventError("LEASE_INVALID",
+                                  "lease.ttl_seconds 必须是 >=1 的整数",
+                                  "intent.lease.ttl_seconds")
+        intent["lease"] = dict(lease)
     elif typ == "PHASE_ADVANCED":
         frm, to = payload.get("from_phase"), payload.get("to_phase")
         if frm not in PHASES or to not in PHASES:
@@ -522,37 +577,63 @@ def replay(events: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def read_events(path: str) -> Dict[str, Any]:
-    """逐行读取 JSONL；空行容忍，非法行必须带行号报错。"""
-    out: Dict[str, Any] = {"events": [], "errors": [], "blank": 0, "lines": 0}
+    """逐行读取 JSONL；空行容忍，非法行必须带行号报错。
+
+    只允许「最后一行没有换行符且 JSON 不完整」这一种可恢复截断：记入
+    truncated_tail，回放时跳过，append 前由 quarantine_tail 保留现场并截断。
+    文件中间任何非法行都是硬错误，不能静默跳过。
+    """
+    out: Dict[str, Any] = {"events": [], "errors": [], "blank": 0, "lines": 0,
+                           "truncated_tail": None, "ok": False}
     if not os.path.exists(path):
         out["errors"].append({"path": path, "code": "MISSING",
                               "message": "事件日志不存在"})
         return out
-    with open(path, "r", encoding="utf-8") as fh:
-        for lineno, line in enumerate(fh, 1):
-            out["lines"] += 1
-            s = line.strip()
-            if not s:
-                out["blank"] += 1
+    with open(path, "r", encoding="utf-8", newline="") as fh:
+        raw = fh.read()
+    ends_nl = raw.endswith("\n")
+    lines = raw.split("\n")
+    if ends_nl:
+        lines.pop()
+    for idx, line in enumerate(lines):
+        lineno = idx + 1
+        out["lines"] += 1
+        s = line.strip()
+        if not s:
+            out["blank"] += 1
+            continue
+        try:
+            event = json.loads(s)
+        except json.JSONDecodeError as exc:
+            last = idx == len(lines) - 1
+            if last and not ends_nl:
+                out["truncated_tail"] = {
+                    "line": lineno,
+                    "bytes": len(line.encode("utf-8")),
+                    "sample": s[:120],
+                    "message": f"最后一行不完整：{exc.msg}",
+                }
                 continue
-            try:
-                event = json.loads(s)
-            except json.JSONDecodeError as exc:
-                out["errors"].append({"path": f"line {lineno}", "code": "PARSE_ERROR",
-                                      "message": f"非法 JSON：{exc.msg}"})
-                continue
-            out["events"].append(event)
+            out["errors"].append({"path": f"line {lineno}", "code": "PARSE_ERROR",
+                                  "message": f"非法 JSON：{exc.msg}",
+                                  "sample": s[:120]})
+            continue
+        out["events"].append(event)
+    out["ok"] = not out["errors"]
     return out
 
 
 def verify_events(events: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-    """链级校验：seq 连续、event_id 唯一、dedupe_key 不重复、结构合法。"""
+    """链级校验：seq 连续、event_id 唯一、dedupe_key 不重复、哈希链完整。"""
     errors: List[Dict[str, str]] = []
     ids: set = set()
     keys: set = set()
     duplicates = 0
     expect = 1
     run_id: Optional[str] = None
+    hash_started = False
+    hash_chain = "absent"
+    prev_hash: Optional[str] = None
     for i, event in enumerate(events):
         path = f"events[{i}]"
         for err in validate_event(event):
@@ -582,12 +663,112 @@ def verify_events(events: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         elif rid != run_id:
             errors.append({"path": f"{path}.run_id", "code": "RUN_MISMATCH",
                            "message": "同一日志不能混入多个 run"})
+
+        has_hash = isinstance(event.get("hash"), str)
+        has_prev = "prev_hash" in event
+        if not has_hash and not has_prev:
+            if hash_started:
+                errors.append({"path": path, "code": "HASH_CHAIN_PARTIAL",
+                               "message": "哈希链已开始，后续事件不能缺少 hash/prev_hash"})
+            continue
+        if not hash_started:
+            hash_started = True
+            hash_chain = "legacy-prefix" if i > 0 else "complete"
+            if not has_hash or not has_prev:
+                errors.append({"path": path, "code": "HASH_CHAIN_PARTIAL",
+                               "message": "hash 与 prev_hash 必须同时出现"})
+                prev_hash = event.get("hash") if has_hash else None
+                continue
+            want = event.get("prev_hash")
+            if want not in ("", None):
+                errors.append({"path": f"{path}.prev_hash", "code": "HASH_CHAIN_BROKEN",
+                               "message": f"链首 prev_hash 必须为空，实际 {want!r}"})
+        elif not has_hash or not has_prev:
+            errors.append({"path": path, "code": "HASH_CHAIN_PARTIAL",
+                           "message": "hash 与 prev_hash 必须同时出现"})
+        else:
+            want = event.get("prev_hash")
+            if want != (prev_hash or ""):
+                errors.append({"path": f"{path}.prev_hash", "code": "HASH_CHAIN_BROKEN",
+                               "message": f"prev_hash 与上一条 hash 不一致：期望 "
+                                          f"{(prev_hash or '')!r}，实际 {want!r}"})
+        got = event.get("hash")
+        if isinstance(got, str):
+            calc = event_hash(event)
+            if got != calc:
+                errors.append({"path": f"{path}.hash", "code": "HASH_MISMATCH",
+                               "message": f"事件内容被修改：记录 {got[:12]}…，"
+                                          f"重算 {calc[:12]}…"})
+            if not HEX64_RE.match(got):
+                errors.append({"path": f"{path}.hash", "code": "HASH_INVALID",
+                               "message": "hash 必须是 64 位小写十六进制"})
+            prev_hash = got
     return {"ok": not errors, "events": len(events), "errors": errors,
-            "duplicates": duplicates, "last_seq": expect - 1}
+            "duplicates": duplicates, "last_seq": expect - 1,
+            "hash_chain": hash_chain, "last_hash": prev_hash or ""}
+
+
+def fsync_dir(path: str) -> None:
+    """尽力同步目录项；Windows 不允许打开目录，跳过后由文件自身 fsync 保证。"""
+    if os.name == "nt":
+        return
+    fd = None
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def quarantine_tail(path: str, info: Dict[str, Any]) -> Optional[str]:
+    """把不完整的尾行另存为 .torn 文件，再截断到最后一条完整记录。
+
+    保留现场是为了事后分析崩溃点；截断是唯一的写操作，失败就抛
+    TAIL_REPAIR_FAILED，绝不在坏尾行后面继续追加。
+    """
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        raise BoardEventError("TAIL_READ_FAILED", f"无法读取事件日志：{exc}") from exc
+    cut = raw.rfind(b"\n")
+    keep = cut + 1
+    tail = raw[keep:]
+    if not tail:
+        return None
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup = f"{path}.torn-{ts}"
+    n = 1
+    while os.path.exists(backup):
+        backup = f"{path}.torn-{ts}-{n}"
+        n += 1
+    try:
+        with open(backup, "wb") as fh:
+            fh.write(tail)
+            fh.flush()
+            os.fsync(fh.fileno())
+        with open(path, "r+b") as fh:
+            fh.truncate(keep)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError as exc:
+        raise BoardEventError("TAIL_REPAIR_FAILED",
+                              f"无法隔离/截断不完整尾行：{exc}") from exc
+    return backup
 
 
 def append_event(path: str, event: Dict[str, Any]) -> None:
-    """原子追加一行；先做结构校验，校验失败不落盘。"""
+    """原子追加一行；先做结构校验，校验失败不落盘。
+
+    写入顺序：校验 -> 隔离不完整尾行 -> 写一行 -> fsync 文件 -> fsync 目录。
+    中间损坏的日志直接拒绝，不能在坏行后面继续追加。
+    """
     errors = validate_event(event)
     if errors:
         first = errors[0]
@@ -595,11 +776,23 @@ def append_event(path: str, event: Dict[str, Any]) -> None:
                               f"{first['path']}: {first['message']}", first["path"])
     parent = os.path.dirname(os.path.abspath(path))
     os.makedirs(parent, exist_ok=True)
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        doc = read_events(path)
+        if doc["errors"]:
+            first = doc["errors"][0]
+            raise BoardEventError("LOG_CORRUPT",
+                                  f"{first['path']}: {first['message']}",
+                                  first["path"])
+        if doc.get("truncated_tail"):
+            quarantine_tail(path, doc["truncated_tail"])
+    if "prev_hash" in event:
+        event["hash"] = event_hash(event)
     line = canonical_json(event) + "\n"
     with open(path, "a", encoding="utf-8", newline="\n") as fh:
         fh.write(line)
         fh.flush()
         os.fsync(fh.fileno())
+    fsync_dir(parent)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -624,7 +817,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         errors.extend(chain["errors"])
         report.update({"ok": not errors, "events": chain["events"],
                        "duplicates": chain["duplicates"],
-                       "last_seq": chain["last_seq"], "blank": doc["blank"]})
+                       "last_seq": chain["last_seq"], "blank": doc["blank"],
+                       "hash_chain": chain.get("hash_chain"),
+                       "last_hash": chain.get("last_hash"),
+                       "truncated_tail": doc.get("truncated_tail")})
         print(json.dumps(report, ensure_ascii=False, indent=2)
               if args.json_out is None else "[ok] 事件链校验通过")
         if args.json_out:

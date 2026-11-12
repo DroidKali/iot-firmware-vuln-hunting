@@ -162,8 +162,30 @@ class WorkspaceLock:
             self.fd = None
 
 
+def _fsync_dir(path: str) -> None:
+    """尽力同步目录项；Windows 不能打开目录，跳过不报错。"""
+    if os.name == "nt":
+        return
+    fd = None
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
 def _atomic_json(path: str, obj: Any) -> None:
-    """同目录临时文件 + os.replace，避免快照写一半。"""
+    """同目录临时文件 + fsync + os.replace + fsync 目录。
+
+    提交顺序固定为：事件日志先 fsync，快照后替换。快照只是加速器，即使
+    replace 后掉电，日志仍能重建；反过来先换快照会让读者看到超前状态。
+    """
     parent = os.path.dirname(os.path.abspath(path))
     os.makedirs(parent, exist_ok=True)
     tmp = f"{path}.tmp.{os.getpid()}"
@@ -173,6 +195,7 @@ def _atomic_json(path: str, obj: Any) -> None:
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, path)
+    _fsync_dir(parent)
 
 
 def file_sha256(path: str) -> str:
@@ -244,7 +267,7 @@ class BoardStore:
             event = make_event(run_id, 1, "BOARD_INITIALIZED",
                                {"firmware_sha256": firmware_sha256.lower(),
                                 "manifest_id": manifest_id,
-                                "phase": phase}, ts=ts)
+                                "phase": phase}, ts=ts, prev_hash="")
             state = apply_event(None, event)
             append_event(events, event)
             _atomic_json(board, state)
@@ -266,7 +289,7 @@ class BoardStore:
         except BoardEventError as exc:
             raise StoreError(exc.code, exc.message) from exc
 
-        recovered = False
+        recovered = bool(doc.get("truncated_tail"))
         if os.path.exists(board):
             try:
                 snap = _read_json(board)
@@ -323,13 +346,22 @@ class BoardStore:
             if not isinstance(payload, dict):
                 raise StoreError("BAD_PAYLOAD", "事件 payload 必须是 JSON 对象")
             key = dedupe_key or make_dedupe_key(event_type, payload)
-            seen = self._seen_keys()
+            doc = read_events(self.events_path)
+            events = [e for e in doc["events"] if isinstance(e, dict)]
+            seen = {e.get("dedupe_key"): e for e in events
+                    if isinstance(e.get("dedupe_key"), str)}
             if key in seen:
                 return {"ok": True, "duplicate": True, "event": seen[key],
                         "state": self.state}
             seq = int(self.state.get("event_count") or 0) + 1
+            last = events[-1] if events else None
+            prev_hash = None
+            if last is None:
+                prev_hash = ""
+            elif isinstance(last.get("hash"), str):
+                prev_hash = last["hash"]
             event = make_event(self.state["run_id"], seq, event_type, payload,
-                               ts=ts, dedupe_key=key)
+                               ts=ts, dedupe_key=key, prev_hash=prev_hash)
             try:
                 candidate = apply_event(self.state, event)
             except BoardEventError as exc:
@@ -454,6 +486,7 @@ class BoardStore:
                           result_refs: Optional[Sequence[str]] = None,
                           last_failure: Optional[Dict[str, Any]] = None,
                           reason: Optional[str] = None,
+                          lease: Optional[Dict[str, Any]] = None,
                           ts: Optional[str] = None,
                           expected_status: Optional[str] = None) -> Dict[str, Any]:
         """在锁内读取最新状态并写入；expected_status 实现领取/回写的 CAS。"""
@@ -469,12 +502,32 @@ class BoardStore:
                        "to_status": to_status, "worker": worker}
             for key, value in (("attempts", attempts), ("outcome", outcome),
                                ("result_refs", list(result_refs) if result_refs is not None else None),
-                               ("last_failure", last_failure), ("reason", reason)):
+                               ("last_failure", last_failure), ("reason", reason),
+                               ("lease", lease)):
                 if value is not None:
                     payload[key] = value
             return payload
 
         return self.append("INTENT_STATUS_CHANGED", {}, ts=ts, prepare=build)
+
+    def renew_lease(self, intent_id: str, worker: str, lease: Dict[str, Any],
+                    ts: Optional[str] = None) -> Dict[str, Any]:
+        """续租不改变 Intent 状态；事件里同时记录旧/新到期时间便于审计。"""
+        def build(state: Dict[str, Any]) -> Dict[str, Any]:
+            intent = self._find_in(state, "intents", "intent_id", intent_id)
+            if intent.get("status") != "claimed":
+                raise StoreError("INTENT_NOT_CLAIMED",
+                                 f"Intent {intent_id} 当前是 {intent.get('status')}，"
+                                 "只有 claimed 才能续租")
+            if intent.get("worker") != worker:
+                raise StoreError("WORKER_MISMATCH",
+                                 f"Intent 由 {intent.get('worker')!r} 持有，"
+                                 f"不是 {worker!r}")
+            old = intent.get("lease") if isinstance(intent.get("lease"), dict) else {}
+            return {"intent_id": intent_id, "worker": worker,
+                    "lease": dict(lease),
+                    "previous_expires_at": old.get("expires_at")}
+        return self.append("INTENT_LEASE_RENEWED", {}, ts=ts, prepare=build)
 
     def advance_phase(self, to_phase: str, reason: str,
                       evidence_refs: Optional[Sequence[str]] = None,

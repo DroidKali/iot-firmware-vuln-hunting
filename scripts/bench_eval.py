@@ -73,6 +73,43 @@ MAX_DETAILS = 200
 MAX_PRINT_ISSUES = 80
 HEX_RE = re.compile(r"^0[xX][0-9a-fA-F]+$")
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+CWE_RE = re.compile(r"^(?:CWE[-_ ]?)?([0-9]{1,5})$", re.IGNORECASE)
+
+# CWE 父子关系只登记本评测实际会遇到的常见族。父级列表是直接父级，
+# 查询时会递归展开；未登记的 CWE 只做相等比较，不猜测关系。
+CWE_PARENTS = {
+    "CWE-78": ("CWE-77",),
+    "CWE-77": ("CWE-74",),
+    "CWE-74": (),
+    "CWE-89": ("CWE-74",),
+    "CWE-79": ("CWE-74",),
+    "CWE-94": ("CWE-74",),
+    "CWE-120": ("CWE-119",),
+    "CWE-121": ("CWE-120", "CWE-787"),
+    "CWE-122": ("CWE-120", "CWE-787"),
+    "CWE-125": ("CWE-119",),
+    "CWE-787": ("CWE-119",),
+    "CWE-119": (),
+    "CWE-22": ("CWE-20",),
+    "CWE-23": ("CWE-22",),
+    "CWE-36": ("CWE-22",),
+    "CWE-98": ("CWE-22",),
+    "CWE-20": (),
+    "CWE-798": ("CWE-522",),
+    "CWE-259": ("CWE-798",),
+    "CWE-321": ("CWE-798",),
+    "CWE-522": (),
+    "CWE-287": ("CWE-284",),
+    "CWE-306": ("CWE-287", "CWE-284"),
+    "CWE-862": ("CWE-284",),
+    "CWE-284": (),
+    "CWE-918": ("CWE-441",),
+    "CWE-441": (),
+    "CWE-502": ("CWE-913",),
+    "CWE-913": (),
+}
+CWE_POLICY = "same-or-ancestor-descendant"
+CATEGORY_POLICY = "normalized-category-equal"
 
 CATEGORY_ALIASES = {
     "cmd-exec": "command-injection",
@@ -145,6 +182,15 @@ class Sample:
     notes: str
     split: str
     dir: Path
+    # 真实基准登记字段；合成集允许留空，--require-real 时逐项强制。
+    vendor: str = ""
+    model: str = ""
+    hardware: str = ""
+    firmware_version: str = ""
+    filesystem: str = ""
+    distribution: dict[str, Any] = field(default_factory=dict)
+    unpack: dict[str, Any] = field(default_factory=dict)
+    curation: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -173,6 +219,7 @@ class Finding:
     category: str
     rule_id: str
     title: str
+    cwe: str = ""
     symbol: str = ""
     priority: str = ""
     engine: str = ""
@@ -295,6 +342,70 @@ def norm_symbol(value: Any) -> str:
     text = re.sub(r"\(.*$", "", text)
     text = re.sub(r"[^a-z0-9_]+", "", text)
     return text
+
+
+def normalize_cwe(value: Any) -> str:
+    """把 CWE-78、cwe_78、78 统一成 CWE-78；无法识别返回空字符串。"""
+    if value is None:
+        return ""
+    text = str(value).strip()
+    match = CWE_RE.fullmatch(text)
+    if not match:
+        return ""
+    number = int(match.group(1))
+    if number <= 0 or number > 99999:
+        return ""
+    return f"CWE-{number}"
+
+
+def cwe_ancestors(value: str) -> set[str]:
+    """返回直接和间接父级；未登记的 CWE 只返回自身。"""
+    start = normalize_cwe(value)
+    result: set[str] = set()
+    pending = [start] if start else []
+    while pending:
+        current = pending.pop()
+        for parent in CWE_PARENTS.get(current, ()):
+            if parent not in result:
+                result.add(parent)
+                pending.append(parent)
+    return result
+
+
+def cwe_relation(label_cwe: str, finding_cwe: str) -> tuple[bool, str]:
+    """判断标签 CWE 与 finding CWE 是否兼容。
+
+    策略：相等，或任一方向存在祖先/后代关系时兼容。这样 CWE-120 标签可以
+    接受更具体的 CWE-121 finding，也允许更宽泛的父级 finding；两者都必须
+    与标签类别一致。未登记的关系一律不兼容。任一侧缺失时只按类别匹配，
+    并在决策里标记 missing，避免把缺失当成等价。
+    """
+    left = normalize_cwe(label_cwe)
+    right = normalize_cwe(finding_cwe)
+    if not left and not right:
+        return True, "both-missing"
+    if not left:
+        return True, "label-missing"
+    if not right:
+        return True, "finding-missing"
+    if left == right:
+        return True, "same"
+    if left in cwe_ancestors(right):
+        return True, "finding-child"
+    if right in cwe_ancestors(left):
+        return True, "label-child"
+    return False, "unrelated"
+
+
+def category_relation(label_category: str, finding_category: str) -> tuple[bool, str]:
+    """类别必须规范化后相等；未知/缺失类别只记录，不冒充已验证。"""
+    left = normalize_category(label_category) if label_category else "unknown"
+    right = normalize_category(finding_category) if finding_category else "unknown"
+    if left == right:
+        return True, "same"
+    if left == "unknown" or right == "unknown":
+        return True, "category-missing"
+    return False, "different"
 
 
 def category_sort_key(value: str) -> tuple[int, str]:
@@ -466,6 +577,102 @@ def validate_labels(
     return labels
 
 
+REAL_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+
+
+def _real_str(raw: dict[str, Any], key: str, ctx: str, issues: list[str]) -> str:
+    value = nonempty_str(raw.get(key))
+    if not value:
+        issues.append(f"{ctx}.{key} 必须是非空字符串（真实基准登记）")
+        return ""
+    return value
+
+
+def _real_date(raw: dict[str, Any], key: str, ctx: str, issues: list[str]) -> str:
+    value = _real_str(raw, key, ctx, issues)
+    if not value:
+        return ""
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        issues.append(f"{ctx}.{key} 必须是 ISO 日期（YYYY-MM-DD），实际 {value!r}")
+        return ""
+    return value
+
+
+def validate_real_sample(
+    raw: dict[str, Any],
+    sid: str,
+    sample_dir: Path,
+    declared: set[str],
+    labels: list[Label],
+    issues: list[str],
+) -> None:
+    """校验真实样本的登记信息；只在 --require-real 时调用。
+
+    这些字段是自报元数据，不能证明来源真实；它们的作用是让缺项无法进入
+    正式 real 基准，并让复核者能逐项追溯到来源、哈希、解包结果和标签依据。
+    """
+    ctx = f"[real] 样本 {sid}"
+    for key in ("vendor", "model", "hardware", "firmware_version", "filesystem"):
+        _real_str(raw, key, ctx, issues)
+
+    kind = nonempty_str(raw.get("kind")) or ""
+    if kind in NEGATIVE_KINDS:
+        _real_str(raw, "negative_evidence", ctx, issues)
+    source = _real_str(raw, "source", ctx, issues)
+    if source and not REAL_URL_RE.match(source):
+        issues.append(f"{ctx}.source 必须是 http(s) 来源 URL，实际 {source!r}")
+    _real_date(raw, "acquired_at", ctx, issues)
+    _real_str(raw, "authorization", ctx, issues)
+
+    dist = raw.get("distribution")
+    if not isinstance(dist, dict):
+        issues.append(f"{ctx}.distribution 必须是 object（allowed/terms）")
+        dist = {}
+    if not isinstance(dist.get("allowed"), bool):
+        issues.append(f"{ctx}.distribution.allowed 必须是布尔值")
+    _real_str(dist, "terms", f"{ctx}.distribution", issues)
+
+    unpack = raw.get("unpack")
+    if not isinstance(unpack, dict):
+        issues.append(f"{ctx}.unpack 必须是 object（method/rootfs/key_files）")
+        unpack = {}
+    _real_str(unpack, "method", f"{ctx}.unpack", issues)
+    rootfs = _real_str(unpack, "rootfs", f"{ctx}.unpack", issues)
+    key_files = unpack.get("key_files")
+    if not isinstance(key_files, list) or not key_files:
+        issues.append(f"{ctx}.unpack.key_files 必须是非空字符串数组")
+        key_files = []
+    clean_files: list[str] = []
+    for idx, item in enumerate(key_files):
+        if not isinstance(item, str) or not is_plain_rel(item):
+            issues.append(f"{ctx}.unpack.key_files[{idx}] 必须是不含 .. 的相对路径")
+            continue
+        rel = norm_path(item)
+        clean_files.append(rel)
+        if rel not in declared:
+            issues.append(f"{ctx}.unpack.key_files[{idx}] 未出现在 files[] 中: {rel}")
+        if not (sample_dir / rel).is_file():
+            issues.append(f"{ctx}.unpack.key_files[{idx}] 文件不存在: {rel}")
+    if rootfs and not (sample_dir / rootfs).exists():
+        issues.append(f"{ctx}.unpack.rootfs 不存在: {rootfs}")
+    if not clean_files:
+        issues.append(f"{ctx}.unpack.key_files 至少需要一个有效文件")
+
+    for label in labels:
+        lctx = f"{ctx} 标签 {label.id}"
+        _real_str(label.raw, "basis", lctx, issues)
+        _real_str(label.raw, "labeler", lctx, issues)
+        if label.review != "reviewed":
+            continue
+        reviewer = _real_str(label.raw, "reviewer", lctx, issues)
+        _real_date(label.raw, "reviewed_at", lctx, issues)
+        labeler = nonempty_str(label.raw.get("labeler")) or ""
+        if reviewer and labeler and reviewer == labeler:
+            issues.append(f"{lctx}.reviewer 不能与 labeler 相同（复核必须独立）")
+
+
 def validate_manifest(manifest_path: Path, require_real: bool = False) -> Bench:
     manifest_path = manifest_path.resolve()
     root = manifest_path.parent
@@ -523,6 +730,23 @@ def validate_manifest(manifest_path: Path, require_real: bool = False) -> Bench:
                     "[dataset] --require-real：dataset.real_firmware 仍为占位值 "
                     f"{real_firmware!r}；真实固件基准尚未建立"
                 )
+            curation = dataset.get("curation")
+            if not isinstance(curation, dict):
+                issues.append("[dataset] --require-real：dataset.curation 必须是 object")
+            else:
+                for key in ("custodian", "review_process"):
+                    if not nonempty_str(curation.get(key)):
+                        issues.append(
+                            f"[dataset] --require-real：dataset.curation.{key} 必须是非空字符串"
+                        )
+                reviewed_at = curation.get("reviewed_at")
+                if reviewed_at:
+                    try:
+                        date.fromisoformat(str(reviewed_at))
+                    except ValueError:
+                        issues.append(
+                            "[dataset] --require-real：dataset.curation.reviewed_at 必须是 ISO 日期"
+                        )
     for key in ("rule_version", "tool_version"):
         value = data.get(key)
         if not isinstance(value, str) or not value.strip():
@@ -734,6 +958,8 @@ def validate_manifest(manifest_path: Path, require_real: bool = False) -> Bench:
             warnings.append(f"[labels] 漏洞样本 {sid} 没有 reviewed 标签")
         if kind in NEGATIVE_KINDS and labels:
             warnings.append(f"[labels] 负样本 {sid} 含标签，评测时按证据匹配，需人工确认语义")
+        if require_real and dataset.get("kind") == "real":
+            validate_real_sample(raw, sid, sample_dir, set(declared), labels, issues)
 
         sample = Sample(
             id=sid,
@@ -749,9 +975,29 @@ def validate_manifest(manifest_path: Path, require_real: bool = False) -> Bench:
             notes=notes,
             split="",
             dir=sample_dir,
+            vendor=nonempty_str(raw.get("vendor")) or "",
+            model=nonempty_str(raw.get("model")) or "",
+            hardware=nonempty_str(raw.get("hardware")) or "",
+            firmware_version=nonempty_str(raw.get("firmware_version")) or "",
+            filesystem=nonempty_str(raw.get("filesystem")) or "",
+            distribution=raw.get("distribution") if isinstance(raw.get("distribution"), dict) else {},
+            unpack=raw.get("unpack") if isinstance(raw.get("unpack"), dict) else {},
+            curation=dataset.get("curation") if isinstance(dataset.get("curation"), dict) else {},
         )
         samples.append(sample)
         by_id[sid] = sample
+
+    if require_real and dataset.get("kind") == "real":
+        for required_kind in KIND_ORDER:
+            if not any(sample.kind == required_kind for sample in samples):
+                issues.append(
+                    f"[dataset] --require-real：正式基准缺少 {required_kind} 样本"
+                )
+        for sample in samples:
+            if sample.kind == "vuln" and not any(label.reviewed for label in sample.labels):
+                issues.append(
+                    f"[dataset] --require-real：漏洞样本 {sample.id} 没有 reviewed 标签"
+                )
 
     split_of: dict[str, str] = {}
     for name in SPLIT_ORDER:
@@ -999,6 +1245,9 @@ def normalize_findings(
         category = normalize_category(
             raw.get("category") if raw.get("category") is not None else raw.get("type")
         )
+        cwe = normalize_cwe(
+            raw.get("cwe") if raw.get("cwe") is not None else raw.get("cwe_id")
+        )
         priority = nonempty_str(raw.get("priority")) or ""
         engine = nonempty_str(raw.get("engine")) or ""
         # pattern/evidence 是匹配依据；context/snippet 是扫描器给出的源码证据。
@@ -1028,6 +1277,7 @@ def normalize_findings(
                 category=category,
                 rule_id=rule_id,
                 title=title,
+                cwe=cwe,
                 symbol=symbol,
                 priority=priority,
                 engine=engine,
@@ -1055,49 +1305,164 @@ def get_text_lines(
     return cache[key]
 
 
-def finding_matches_label(
-    finding: Finding, label: Label, label_lines: list[str]
-) -> bool:
-    if finding.sample.id != label.sample_id:
-        return False
-    if finding.file != label.file:
-        return False
-    if label_lines and label.line > 0:
-        if any(abs(number - label.line) <= 3 for number in finding.lines):
-            return True
+def evaluate_match(finding: Finding, label: Label) -> dict[str, Any]:
+    """按定位、类型、证据三阶段判定一个 label/finding 对。
+
+    定位：同一文件且 finding 行号与标签行号相差不超过 3 行。
+    类型：规范化类别相等，且 CWE 相等或存在已登记的父子关系。
+    证据：符号名相等，或标签符号出现在 finding 的 pattern/evidence/text 中。
+
+    匹配条件为：同一样本/文件，类型通过，且定位或证据至少一项通过。
+    缺 CWE 或类别只记录为 missing，不会被当成“已验证等价”。
+    """
+    result: dict[str, Any] = {
+        "label_id": label.id,
+        "sample_id": label.sample_id,
+        "finding_index": finding.index,
+        "file": label.file,
+        "label_line": label.line,
+        "finding_line": finding.line,
+        "label_category": normalize_category(label.category),
+        "finding_category": normalize_category(finding.category),
+        "label_cwe": normalize_cwe(label.cwe),
+        "finding_cwe": normalize_cwe(finding.cwe),
+        "line_distance": None,
+        "location_ok": False,
+        "symbol_ok": False,
+        "text_ok": False,
+        "evidence_ok": False,
+        "category_ok": False,
+        "category_relation": "not-compared",
+        "cwe_ok": False,
+        "cwe_relation": "not-compared",
+        "type_ok": False,
+        "matched": False,
+        "reason": "",
+    }
+    if finding.sample.id != label.sample_id or finding.file != label.file:
+        result["reason"] = "样本或文件不一致"
+        return result
+
+    if label.line > 0 and finding.lines:
+        distance = min(abs(number - label.line) for number in finding.lines)
+        result["line_distance"] = distance
+        result["location_ok"] = distance <= 3
+
     fsym = norm_symbol(finding.symbol)
     lsym = norm_symbol(label.symbol)
-    if fsym and lsym and fsym == lsym:
-        return True
-    if lsym:
-        if lsym in norm_symbol(finding.pattern):
-            return True
-        if lsym in norm_symbol(finding.text):
-            return True
-    return False
+    result["symbol_ok"] = bool(fsym and lsym and fsym == lsym)
+    result["text_ok"] = bool(
+        lsym and (lsym in norm_symbol(finding.pattern) or lsym in norm_symbol(finding.text))
+    )
+    result["evidence_ok"] = result["symbol_ok"] or result["text_ok"]
+
+    result["category_ok"], result["category_relation"] = category_relation(
+        label.category, finding.category
+    )
+    result["cwe_ok"], result["cwe_relation"] = cwe_relation(label.cwe, finding.cwe)
+    result["type_ok"] = result["category_ok"] and result["cwe_ok"]
+
+    if not result["category_ok"]:
+        result["reason"] = (
+            f"类型不兼容：类别 {normalize_category(label.category)} != "
+            f"{normalize_category(finding.category)}"
+        )
+    elif not result["cwe_ok"]:
+        result["reason"] = (
+            f"类型不兼容：CWE {normalize_cwe(label.cwe) or '缺失'} 与 "
+            f"{normalize_cwe(finding.cwe) or '缺失'} 无等价/父子关系"
+        )
+    elif not (result["location_ok"] or result["evidence_ok"]):
+        result["reason"] = (
+            f"定位与符号证据均不匹配（行差 {result['line_distance']}，"
+            f"符号 {label.symbol or '缺失'!r}）"
+        )
+    else:
+        result["matched"] = True
+        stages = []
+        if result["location_ok"]:
+            stages.append("定位")
+        if result["evidence_ok"]:
+            stages.append("证据")
+        result["reason"] = "匹配通过：" + "+".join(stages) + "；类型通过"
+    return result
+
+
+def finding_matches_label(
+    finding: Finding, label: Label, label_lines: Optional[list[str]] = None
+) -> bool:
+    """兼容旧调用：返回三阶段判定的最终布尔结果。"""
+    return bool(evaluate_match(finding, label)["matched"])
+
+
+def _candidate_rank(label: Label, decision: dict[str, Any]) -> tuple[Any, ...]:
+    """同一标签多个候选时按确定性顺序选：定位优先、符号优先、行差小、索引小。"""
+    distance = decision.get("line_distance")
+    if not isinstance(distance, int):
+        distance = 10**9
+    return (
+        0 if decision.get("location_ok") else 1,
+        0 if decision.get("symbol_ok") else 1,
+        0 if decision.get("text_ok") else 1,
+        distance,
+        decision.get("finding_index"),
+    )
 
 
 def match_labels(
     bench: Bench, findings: list[Finding], labels: list[Label]
-) -> dict[tuple[str, str], list[Finding]]:
+) -> tuple[dict[tuple[str, str], list[Finding]], dict[tuple[str, str], list[dict[str, Any]]]]:
+    """返回接受匹配和每个标签的全部同文件判定，供报告披露未匹配原因。"""
     text_cache: dict[tuple[str, str], list[str]] = {}
     byte_cache: dict[tuple[str, str], Optional[bytes]] = {}
-    finding_lines: dict[int, list[int]] = {}
     for finding in findings:
         lines, _derived = finding_line_numbers(finding, byte_cache)
         finding.lines = lines
-        finding_lines[finding.index] = lines
     matches: dict[tuple[str, str], list[Finding]] = {}
+    decisions: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for label in labels:
         key = (label.sample_id, label.id)
         matches[key] = []
-        lines = get_text_lines(bench, label.sample_id, label.file, text_cache)
+        decisions[key] = []
+        get_text_lines(bench, label.sample_id, label.file, text_cache)
         for finding in findings:
             if finding.sample.id != label.sample_id or finding.file != label.file:
                 continue
-            if finding_matches_label(finding, label, lines):
+            decision = evaluate_match(finding, label)
+            decisions[key].append(decision)
+            if decision["matched"]:
                 matches[key].append(finding)
-    return matches
+        matches[key].sort(
+            key=lambda item: _candidate_rank(
+                label,
+                next(
+                    decision
+                    for decision in decisions[key]
+                    if decision["finding_index"] == item.index
+                ),
+            )
+        )
+    return matches, decisions
+
+
+def explain_unmatched(
+    label: Label, decisions: list[dict[str, Any]], candidate_count: int
+) -> str:
+    """为 FN 生成可审计原因：无候选、类型拒绝、定位/证据不足或被占用。"""
+    if not decisions:
+        return "同一文件没有 finding 候选"
+    if candidate_count:
+        return "存在候选 finding，但候选已被其他标签占用（同一 finding 最多贡献一个 TP）"
+    type_rejected = [decision for decision in decisions if not decision["type_ok"]]
+    if type_rejected:
+        first = type_rejected[0]
+        return (
+            f"{len(type_rejected)}/{len(decisions)} 条候选类型不兼容；首条："
+            + str(first.get("reason") or "类型不兼容")
+        )
+    return (
+        f"{len(decisions)} 条候选类型通过，但定位（行差>3）与符号/文本证据均不足"
+    )
 
 
 def build_cases(
@@ -1107,13 +1472,13 @@ def build_cases(
 ) -> tuple[list[dict[str, Any]], set[int]]:
     cases: list[dict[str, Any]] = []
     tp_ids: set[int] = set()
-    for label in labels:
+    # 标签顺序固定为 sample/file/line/id；候选顺序由 match_labels 的确定性
+    # 排序给出。这样同一 finding 被多个标签竞争时，TP 归属不依赖输入顺序。
+    for label in sorted(labels, key=lambda item: (item.sample_id, item.file, item.line, item.id)):
         sample = bench.by_id.get(label.sample_id)
         if sample is None:
             continue
-        candidates = sorted(
-            matches.get((label.sample_id, label.id), []), key=lambda item: item.index
-        )
+        candidates = list(matches.get((label.sample_id, label.id), []))
         # 一对一匹配：一个 finding 最多贡献一个 TP，避免两个相邻标签把同一个
         # finding 重复算成两个 TP（那会虚高 recall）。
         chosen = next((item for item in candidates if item.index not in tp_ids), None)
@@ -1313,6 +1678,7 @@ def finding_detail(finding: Finding, **extra: Any) -> dict[str, Any]:
         "offset": finding.offset,
         "pattern": finding.pattern,
         "category": finding.category,
+        "cwe": finding.cwe,
         "rule_id": finding.rule_id,
         "priority": finding.priority,
         "engine": finding.engine,
@@ -1345,7 +1711,19 @@ def evaluate_slice(
     reviewed = [label for label in labels if label.reviewed]
     pending = [label for label in labels if not label.reviewed]
     negatives = [sample for sample in selected_samples if sample.kind in NEGATIVE_KINDS]
-    matches = match_labels(bench, findings, labels)
+    matches, match_decisions = match_labels(bench, findings, labels)
+    match_pairs = [decision for rows in match_decisions.values() for decision in rows]
+    match_stats = {
+        "pairs": len(match_pairs),
+        "matched": sum(1 for decision in match_pairs if decision["matched"]),
+        "rejected_by_type": sum(
+            1 for decision in match_pairs if not decision["type_ok"]
+        ),
+        "rejected_by_location_evidence": sum(
+            1 for decision in match_pairs
+            if decision["type_ok"] and not decision["matched"]
+        ),
+    }
 
     cases, tp_ids = build_cases(bench, reviewed, matches)
     # 所有标签（含未复核）命中的 finding 都已有标签证据；重复命中不能被
@@ -1384,6 +1762,24 @@ def evaluate_slice(
         fp_key_func=lambda case: case["sample"].split,
         negative_key_func=lambda sample: sample.split,
     )
+    by_filesystem = group_metrics(
+        cases,
+        fp_cases,
+        negatives,
+        lambda case: case["sample"].filesystem or "unknown",
+        str,
+        fp_key_func=lambda case: case["sample"].filesystem or "unknown",
+        negative_key_func=lambda sample: sample.filesystem or "unknown",
+    )
+    by_vendor = group_metrics(
+        cases,
+        fp_cases,
+        negatives,
+        lambda case: case["sample"].vendor or "unknown",
+        str,
+        fp_key_func=lambda case: case["sample"].vendor or "unknown",
+        negative_key_func=lambda sample: sample.vendor or "unknown",
+    )
     macro = macro_metrics(by_category)
 
     tp_details: list[dict[str, Any]] = []
@@ -1406,12 +1802,11 @@ def evaluate_slice(
                 )
             )
         else:
-            reason = "line±3 / symbol / pattern / evidence 均未命中"
-            if case["candidate_count"]:
-                reason = (
-                    "存在候选 finding，但候选已被其他标签占用"
-                    "（同一 finding 最多贡献一个 TP）"
-                )
+            reason = explain_unmatched(
+                label,
+                match_decisions.get((label.sample_id, label.id), []),
+                case["candidate_count"],
+            )
             fn_details.append(
                 label_detail(
                     label,
@@ -1504,6 +1899,8 @@ def evaluate_slice(
         "by_category": by_category,
         "by_arch": by_arch,
         "by_split": by_split,
+        "by_filesystem": by_filesystem,
+        "by_vendor": by_vendor,
         "provisional": provisional,
         "details": {
             "true_positives": detail_block(tp_details),
@@ -1512,6 +1909,20 @@ def evaluate_slice(
             "unmatched_vulnerable_findings": detail_block(unmatched_details),
             "duplicate_reviewed_matches": detail_block(duplicate_details),
             "not_evaluable": detail_block(pending_details),
+        },
+        "matching": {
+            "policy": {
+                "location": "同一文件，行号相差不超过 3",
+                "type": "规范化类别相等；CWE 相等或已登记父子关系",
+                "evidence": "符号名相等，或标签符号出现在 finding 证据文本中",
+                "accept": "类型通过，且定位或证据至少一项通过",
+                "category_policy": CATEGORY_POLICY,
+                "cwe_policy": CWE_POLICY,
+                "assignment": "按定位/符号/行差/索引确定性排序，一 finding 最多一个 TP",
+                "missing": "CWE 或类别缺失时按剩余维度匹配，并标记 missing，不视为已验证等价",
+            },
+            "stats": match_stats,
+            "decisions": detail_block(match_pairs),
         },
     }
 
@@ -1617,6 +2028,8 @@ def collect_dataset_info(bench: Bench) -> dict[str, Any]:
     dataset = bench.data.get("dataset", {}) if isinstance(bench.data, dict) else {}
     kind_counts = {kind: 0 for kind in KIND_ORDER}
     arch_counts = {arch: 0 for arch in ARCH_ORDER}
+    filesystem_counts: dict[str, int] = {}
+    vendor_counts: dict[str, int] = {}
     label_total = 0
     reviewed = 0
     pending = 0
@@ -1624,6 +2037,10 @@ def collect_dataset_info(bench: Bench) -> dict[str, Any]:
     for sample in bench.samples:
         kind_counts[sample.kind] = kind_counts.get(sample.kind, 0) + 1
         arch_counts[sample.arch] = arch_counts.get(sample.arch, 0) + 1
+        fs = sample.filesystem or "unknown"
+        filesystem_counts[fs] = filesystem_counts.get(fs, 0) + 1
+        vendor = sample.vendor or "unknown"
+        vendor_counts[vendor] = vendor_counts.get(vendor, 0) + 1
         for label in sample.labels:
             label_total += 1
             if label.reviewed:
@@ -1647,6 +2064,14 @@ def collect_dataset_info(bench: Bench) -> dict[str, Any]:
         "split_ids": {name: list(bench.splits.get(name, [])) for name in SPLIT_ORDER},
         "arch_counts": {key: arch_counts.get(key, 0) for key in ARCH_ORDER},
         "kind_counts": {key: kind_counts.get(key, 0) for key in KIND_ORDER},
+        "filesystem_counts": {
+            key: filesystem_counts[key] for key in sorted(filesystem_counts)
+        },
+        "vendor_counts": {key: vendor_counts[key] for key in sorted(vendor_counts)},
+        "curation": dataset.get("curation"),
+        "distribution": {
+            sample.id: sample.distribution for sample in bench.samples
+        },
         "label_counts": {
             "total": label_total,
             "reviewed": reviewed,
@@ -1713,16 +2138,18 @@ def build_result(
     regression = baseline_result["regression"] if baseline_result else None
     reasons = baseline_result["reasons"] if baseline_result else []
     not_evaluable = slice_result["details"]["not_evaluable"]
+    dataset_info = collect_dataset_info(bench)
     result = {
         "schema": SCHEMA_RESULT,
         "tool": TOOL_NAME,
         "tool_version": TOOL_VERSION,
         "status": "regression" if regression else "ok",
-        "synthetic": True,
+        # 合成集与真实集不得混在一个指标里；这里由 manifest.dataset.kind 决定。
+        "synthetic": dataset_info.get("kind") != "real",
         "regression": regression,
         "regression_reasons": reasons,
         "generated_at": generated_at,
-        "dataset": collect_dataset_info(bench),
+        "dataset": dataset_info,
         "parameters": parameters,
         "validation": {
             "status": "ok",
@@ -1738,6 +2165,8 @@ def build_result(
             "by_category": slice_result["by_category"],
             "by_arch": slice_result["by_arch"],
             "by_split": slice_result["by_split"],
+            "by_filesystem": slice_result["by_filesystem"],
+            "by_vendor": slice_result["by_vendor"],
         },
         "provisional": slice_result["provisional"],
         "not_evaluable": not_evaluable,
@@ -1755,6 +2184,7 @@ def build_result(
             "deduplicated": deduplicated,
         },
         "details": slice_result["details"],
+        "matching": slice_result["matching"],
         "reproducibility": collect_reproducibility(
             bench,
             findings_path,
@@ -1771,6 +2201,8 @@ def build_result(
             "FP 以 finding 为单位，FN 以 reviewed 标签为单位，TN 为未误报负样本数；"
             "同一 finding 最多贡献一个 TP，同一标签只计一次 TP。",
             "findings 按 file+line+pattern 去重后再评测；out_of_scope 与 split 外 finding 不进入指标。",
+            "匹配按定位（行差<=3）、类型（类别+CWE）、证据（符号/文本）三阶段；类型不通过不能靠行号命中。",
+            "CWE 采用相等或已登记父子关系；CWE/类别缺失时只按剩余维度匹配并标记 missing。",
             "类别行的 FPR 分母为全部负样本，FP 按 finding.category 归组；架构/划分行按样本归组。",
         ],
     }
@@ -1828,22 +2260,38 @@ def render_report(result: dict[str, Any]) -> str:
     confusion = result["confusion_matrix"]
     parameters = result["parameters"]
     details = result["details"]
+    matching = result.get("matching", {})
+    is_real = dataset.get("kind") == "real"
     lines: list[str] = []
-    lines.append("# IoT 固件漏洞检测基准报告（合成集）")
+    lines.append(
+        "# IoT 固件漏洞检测基准报告（真实固件）"
+        if is_real
+        else "# IoT 固件漏洞检测基准报告（合成集）"
+    )
     lines.append("")
     lines.append(f"生成时间：{result['generated_at']}")
     lines.append("")
-    lines.append(
-        "> **边界声明**：本报告使用 100% 手工构造的合成 rootfs 片段，"
-        "不是真实固件评测。它可以证明校验、匹配、指标和基线门禁可复现，"
-        "但不能推断真实设备上的 precision/recall/FPR。"
-    )
+    if is_real:
+        lines.append(
+            "> **边界声明**：本报告的样本登记、来源、授权和标签依据来自 manifest，"
+            "属于自报元数据，不等同于第三方鉴证或独立复现。指标只覆盖已登记样本，"
+            "不能外推到未登记的厂商、型号或固件版本。"
+        )
+    else:
+        lines.append(
+            "> **边界声明**：本报告使用 100% 手工构造的合成 rootfs 片段，"
+            "不是真实固件评测。它可以证明校验、匹配、指标和基线门禁可复现，"
+            "但不能推断真实设备上的 precision/recall/FPR。"
+        )
     lines.append("")
     lines.append("## 数据集简介")
     lines.append("")
     lines.append(f"- 名称：{md_cell(dataset.get('name'))}")
     lines.append(f"- 版本：{md_cell(dataset.get('version'))}")
-    lines.append(f"- 类型：{md_cell(dataset.get('kind'))}（合成集）")
+    lines.append(
+        f"- 类型：{md_cell(dataset.get('kind'))}"
+        + ("（真实固件基准）" if is_real else "（合成集）")
+    )
     lines.append(f"- 创建日期：{md_cell(dataset.get('created'))}")
     lines.append(f"- 许可证：{md_cell(dataset.get('license'))}")
     lines.append(f"- 真实固件：{md_cell(dataset.get('real_firmware'))}")
@@ -1858,6 +2306,19 @@ def render_report(result: dict[str, Any]) -> str:
         "- 架构分布："
         + "，".join(
             f"{key}={value}" for key, value in dataset.get("arch_counts", {}).items()
+        )
+    )
+    lines.append(
+        "- 文件系统分布："
+        + "，".join(
+            f"{key}={value}"
+            for key, value in (dataset.get("filesystem_counts") or {}).items()
+        )
+    )
+    lines.append(
+        "- 厂商/来源分布："
+        + "，".join(
+            f"{key}={value}" for key, value in (dataset.get("vendor_counts") or {}).items()
         )
     )
     lines.append(
@@ -1880,6 +2341,14 @@ def render_report(result: dict[str, Any]) -> str:
             f"{key}={value}" for key, value in dataset.get("label_categories", {}).items()
         )
     )
+    curation = dataset.get("curation")
+    if isinstance(curation, dict) and curation:
+        lines.append(
+            "- 复核流程："
+            + "，".join(f"{key}={md_cell(value)}" for key, value in curation.items())
+        )
+    else:
+        lines.append("- 复核流程：未登记（合成集不要求；真实基准必须登记）")
     lines.append(f"- manifest SHA-256：{dataset.get('manifest_sha256')}")
     lines.append(f"- manifest 规则/工具版本：{dataset.get('rule_version')} / {dataset.get('tool_version')}")
     lines.append("")
@@ -1935,6 +2404,8 @@ def render_report(result: dict[str, Any]) -> str:
     lines.append("")
     lines.extend(render_group_table("按类别", metrics.get("by_category", [])))
     lines.extend(render_group_table("按架构", metrics.get("by_arch", [])))
+    lines.extend(render_group_table("按文件系统", metrics.get("by_filesystem", [])))
+    lines.extend(render_group_table("按厂商/来源", metrics.get("by_vendor", [])))
     lines.extend(render_group_table("按划分", metrics.get("by_split", [])))
     lines.append("### 聚合")
     lines.append("")
@@ -1962,6 +2433,54 @@ def render_report(result: dict[str, Any]) -> str:
         "无 TP/FP 的类别其 precision/F1 未定义、按 0 计入。"
         "类别行的 FPR 分母为全部负样本，FP 按 finding.category 归组；"
         "架构和划分行的 FPR 按对应样本归组。"
+    )
+    lines.append("")
+    lines.append("## 匹配策略与未匹配原因")
+    lines.append("")
+    policy = matching.get("policy", {})
+    lines.append("| 阶段 | 规则 |")
+    lines.append("| --- | --- |")
+    lines.append(f"| 定位 | {md_cell(policy.get('location', '未提供'))} |")
+    lines.append(f"| 类型 | {md_cell(policy.get('type', '未提供'))} |")
+    lines.append(f"| 证据 | {md_cell(policy.get('evidence', '未提供'))} |")
+    lines.append(f"| 接受 | {md_cell(policy.get('accept', '未提供'))} |")
+    lines.append(f"| 一对多 | {md_cell(policy.get('assignment', '未提供'))} |")
+    lines.append(f"| 缺失值 | {md_cell(policy.get('missing', '未提供'))} |")
+    lines.append("")
+    lines.append(
+        "CWE 采用等价或父子关系兼容；未登记的 CWE 只按相等匹配。"
+        "CWE 或类别缺失时只按剩余维度匹配，并在决策中标记 missing，不视为已验证等价。"
+    )
+    mstats = matching.get("stats", {})
+    if mstats:
+        lines.append(
+            "同文件候选对 {} 个：接受 {}，类型拒绝 {}，定位/证据不足 {}。".format(
+                mstats.get("pairs", 0),
+                mstats.get("matched", 0),
+                mstats.get("rejected_by_type", 0),
+                mstats.get("rejected_by_location_evidence", 0),
+            )
+        )
+        lines.append("")
+    decision_items = matching.get("decisions", {}).get("items", [])
+    if decision_items:
+        lines.append("### 决策样例（前 10 对）")
+        lines.append("")
+        for decision in decision_items[:10]:
+            lines.append(
+                "- 标签 {} ↔ finding {}：定位 {}，类型 {}，证据 {}；{}".format(
+                    decision.get("label_id"),
+                    decision.get("finding_index"),
+                    "通过" if decision.get("location_ok") else "不通过",
+                    "通过" if decision.get("type_ok") else "不通过",
+                    "通过" if decision.get("evidence_ok") else "不通过",
+                    decision.get("reason"),
+                )
+            )
+        lines.append("")
+    lines.append(
+        "未匹配原因按标签写入 false_negatives.reason；命中但被其他标签占用的 finding "
+        "写入 duplicate_reviewed_matches，不计为 FP。"
     )
     lines.append("")
     if result.get("provisional"):

@@ -91,7 +91,7 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 
 ## 5. Finding（`findings/1.0`）
 
-报告 ④ 区块的机器可读形态。每条漏洞固定 9 字段（与 `references/reporting.md` 一致），缺一即不合格。
+报告 ④ 区块的机器可读形态。每条漏洞有 9 个必填字段（与 `references/reporting.md` 一致），缺一即不合格；`candidate_id` 与 `cwe` 是可选追溯/匹配字段，不计入这 9 个必填字段。
 
 | 字段 | 类型 | 必需 | 说明 |
 |---|---|---|---|
@@ -105,6 +105,7 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 | `evidence` | array | ✅ | 证据 ID，至少一条 |
 | `remediation` | string | ✅ | 可执行修复建议 |
 | `candidate_id` | string | — | 回指 Candidate，便于追溯处置率 |
+| `cwe` | string | — | 可选 CWE 编号；接受 `CWE-78` / `cwe_78` / `78`，基准评测统一归一化为 `CWE-78`（见 §9.2） |
 
 `confidence=HYPOTHESIS` 时必须在 `missing_step` 里写明「缺哪一步验证」，否则报告不合格。
 
@@ -149,9 +150,31 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 | `hook` | object | — | `{mechanism: syscall|api|libc|other, name}`；`system()` 是 libc/api Hook，`execve` 才是 syscall Hook |
 | `filter` | object | — | `{rule_id, rule_version}`，事件过滤规则留痕 |
 | `event` | object | 动态/仿真必需 | `{type, trigger?: bool, args?: object}`；`trigger` 表示这次观察是否真触发 |
+| `supports` | array | — | 判据语义声明；提供时必须是非空数组，每项 `{criterion, kind, details?}`。`criterion` 与 `kind` 必须是非空字符串，`details` 必须是对象；`details.path` / `details.argv` 若出现必须是非空字符串数组 |
 | `limitations` | array | 非 `parsed` 必需 | 字符串数组 |
 
 约束：`dynamic` / `emulation` 证据必须带 `event`；`static` 证据必须带 `source.path` 或 `artifact`。这些约束由 `contracts.py --kind evidence` 直接执行，避免「只写一句我跑过了」当证据。
+
+**判据语义绑定（`supports`）**：`evidence_id` 只证明这条证据存在，不证明它支持某个 `required_criterion`。`confirmed` 的 `policy.criterion_evidence` 把判据映射到 Evidence ID 后，校验收紧为「ID 在该判据的语义声明里也必须成立」：
+
+- Evidence 的 `type` 不在该判据允许类型内 → `CONFIRM_CRITERION_TYPE`；
+- Evidence 没有 `supports`，或其中没有 `criterion` 等于该判据的条目 → `CONFIRM_CRITERION_UNSUPPORTED`；
+- 有条目但 `kind` 不在允许种类、缺必需 `details` 键、`details.path` 少于该判据要求的长度、`sink` 不在白名单、`argv` 不是非空字符串数组、或 `any_of` 无一成立 → `CONFIRM_CRITERION_SEMANTICS`。
+
+`criterion_evidence` 引用一个本轮未选中的 Evidence ID 仍是 `CONFIRM_EVIDENCE_REF_NOT_FOUND`，判据本身没有绑定仍是 `CONFIRM_CRITERION_UNBOUND`；两者与上述语义错误分开报，不能用「证据存在」掩盖「语义不成立」。
+
+同一条 Evidence 可以支持多个判据，但每个判据都必须在 `supports` 中单独给出自己的 `kind` 与 `details`；不禁止共用，禁止的是一条观察被复述成多个不同判据。例如一条动态证据可以同时声明调用链与 sink 执行，但两件事必须分别可核对：
+
+```json
+{"evidence_id": "E-EXEC", "type": "dynamic", "supports": [
+  {"criterion": "sink_reachable", "kind": "call-path",
+   "details": {"path": ["main", "do_ping", "system"]}},
+  {"criterion": "command_execution", "kind": "sink-execution",
+   "details": {"sink": "system", "argv": ["ping", "-c", "1"]}}
+]}
+```
+
+`confirmed` 成功时结果新增 `criterion_sources`（判据 → 实际使用的 Evidence ID 列表）与 `shared_evidence`（被两个以上判据引用的 Evidence ID 排序列表）。`shared_evidence` 只做披露，不是拒绝理由；是否成立仍由每个判据各自的 `supports` 条目决定。各漏洞类型的判据矩阵见 §16。
 
 **升级时的额外要求（M6）**：`contracts.py` 仍接受无 schema 的 `evidence/1.0` 历史轻量形态以兼容旧产物，但 `board_transitions.validate_transition` 只接受 `evidence/1.1`；无 schema → `EVIDENCE_SCHEMA_REQUIRED`，其他 schema → `EVIDENCE_SCHEMA_UNSUPPORTED`。因此「能导入黑板」不等于「能用于升级候选」。
 
@@ -239,13 +262,71 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 
 检测质量评估的输入与输出，由 `scripts/bench_eval.py` 消费与产出。
 
-**BenchManifest**：`dataset`（名称、版本、kind、license、`real_firmware`）、`splits`（`dev` / `holdout`）、`samples[]`（`id` / `path` / `sha256` / `size` / `files[]` 每个文件的哈希 / `arch` / `kind` / `labels[]`）。每条 label 带 `category`、`file`、`line`、`review`（`reviewed` / `pending`）等；`pending` 标签不参与计分。
+**BenchManifest**：`dataset`（名称、版本、kind、license、`real_firmware`、`curation`）、`splits`（`dev` / `holdout`）、`samples[]`（`id` / `path` / `sha256` / `size` / `files[]` 每个文件的哈希 / `arch` / `kind` / `vendor` / `model` / `hardware` / `firmware_version` / `filesystem` / `source` / `acquired_at` / `authorization` / `distribution` / `unpack` / `negative_evidence` / `labels[]`）。每条 label 带 `id`、`category`、`file`、`line`、`cwe`、`symbol`、`review`（`reviewed` / `pending` 等）、`basis`、`labeler`、`reviewer`、`reviewed_at`；`pending` 标签不参与计分。
 
-**BenchResult**：`schema` / `tool` / `status` / `synthetic` / `generated_at`、`dataset`、`parameters`、`validation`（`status` / `warnings`）、`scope`（`split`、`samples`、`samples_by_split`、`findings_in_scope`、`findings_total`、`labels_total`、`labels_reviewed`、`labels_not_evaluable`）、`confusion_matrix`（`tp`/`fp`/`fn`/`tn`）、`metrics`（`micro` / `macro` / `by_category` / `by_arch` / `by_split`，每项含 precision/recall/F1/FPR/FNR）、`provisional`（`authoritative=false`、`reason`、`labels_included`、`metrics`；标签未复核或存在 `not_evaluable` 样本时必须给出）、`not_evaluable`、`out_of_scope`、`details`（TP/FP/FN 明细）、`baseline`、`exit_code`。**不存在顶层 `split` / `counts` / `micro`**——split 在 `scope.split`，计数在 `confusion_matrix`，指标在 `metrics.micro`。
+### 9.1 真实基准门禁（`--require-real`）
+
+`evaluate` 与 `validate` 都接受 `--require-real`。它把「真实基准」从愿望变成逐样本门禁，缺项直接校验失败（退出 **1**），合成集仍可用于契约回归，但不能冒充真实检测质量。
+
+| 对象 | 要求 |
+|---|---|
+| `dataset` | `kind` 必须为 `real`；`real_firmware` 非空且不得是 `pending` / `unknown` / `tbd` / `none` / `n/a` 等占位值；`curation` 是对象，`custodian`、`review_process` 非空，`reviewed_at` 可选但须为 ISO 日期 |
+| 样本标识 | `vendor`、`model`、`hardware`、`firmware_version`、`filesystem` 均为非空字符串 |
+| 来源 | `source` 是 `http` / `https` URL；`acquired_at` 是 ISO 日期（`YYYY-MM-DD`）；`authorization` 非空 |
+| 分发 | `distribution` 是对象，`allowed` 必须是布尔值，`terms` 非空 |
+| 解包 | `unpack` 是对象，`method` 非空，`rootfs` 非空且相对样本目录存在；`key_files` 是非空数组，每项为不含 `..` 的相对路径，必须同时出现在 `files[]` 中且磁盘上真实存在 |
+| 负样本 | `kind` 为 `safe` 或 `hard-negative` 时，`negative_evidence` 非空 |
+| 标签 | 每条 label 的 `basis`、`labeler` 非空；`review=reviewed` 时还必须有非空 `reviewer` 与 ISO 日期 `reviewed_at`，且 `reviewer != labeler` |
+| 集合覆盖 | 样本必须同时包含 `vuln`、`safe`、`hard-negative` 三类；每个 `vuln` 样本至少有一个 `reviewed` 标签 |
+
+满足门禁后，结果顶层 `synthetic=false`，`metrics` 增加 `by_filesystem` 与 `by_vendor` 两个分组。这些字段都是**自报元数据**，不是第三方鉴证：门禁只能阻止缺项进入正式基准、便于复核，不能证明固件来源或授权真实。
+
+### 9.2 CWE 归一化与三阶段匹配
+
+Finding 与 Label 的 `cwe` 都接受 `CWE-78`、`cwe_78`、`78` 等写法，比较前统一规范化为 `CWE-78`；`0`、超过五位或无法识别的值归一化为空串。匹配策略固定为 `same-or-ancestor-descendant`：CWE 相等，或两侧已登记的祖先/后代关系（双向兼容）。未登记的编号只做相等，不猜关系。
+
+同一条 label 与 finding 的判定分三步，前一步不通过就没有后一步：
+
+| 阶段 | 通过条件 |
+|---|---|
+| 位置 | `sample` 与 `file` 相同，且 `label.line > 0`、`finding.lines` 非空时最小行距 ≤ 3 |
+| 类型 | 规范化 `category` 相等或任一侧为 `unknown`；且 CWE 相等或已登记父子关系 |
+| 证据 | `symbol` 规范化后相等，或 label 的 `symbol` 出现在 finding 的 `pattern` / `text` 中 |
+
+`matched = type_ok and (location_ok or evidence_ok)`：类型必须通过，定位与符号/文本证据至少一项通过。任一侧缺 CWE 或类别时，按剩余维度判定并标记 `missing`；`missing` 表示「未验证等价」，不能当作已证相等。
+
+分配是一对一的：一个 finding 最多贡献一个 TP，一条 label 最多贡献一个 TP。已被占用的候选不会再把另一条 label 计成 TP，重复命中进入 `details.duplicate_reviewed_matches`，**不计 FP**。FN 的 `reason` 由 `explain_unmatched` 生成，区分「同文件无候选」「候选已被其他标签占用」「候选类型不兼容」「类型通过但定位与证据均不足」四种情况，不做笼统归因。
+
+结果顶层 `matching` 记录本次策略与实际判定。`decisions` 是 `detail_block`：`{count, limit, truncated, items[]}`，`items` 逐项给出 `label_id` / `sample_id` / `finding_index` / `file` / 行号 / 类别 / CWE / `line_distance` / 各阶段布尔值 / `matched` / `reason`，不是按 label ID 直接映射的单个对象。
+
+```json
+{"matching": {
+  "policy": {"location": "同一文件，行号相差不超过 3",
+             "type": "规范化类别相等；CWE 相等或已登记父子关系",
+             "evidence": "符号名相等，或标签符号出现在 finding 证据文本中",
+             "accept": "类型通过，且定位或证据至少一项通过",
+             "category_policy": "normalized-category-equal",
+             "cwe_policy": "same-or-ancestor-descendant",
+             "assignment": "按定位/符号/行差/索引确定性排序，一 finding 最多一个 TP",
+             "missing": "CWE 或类别缺失时按剩余维度匹配，并标记 missing，不视为已验证等价"},
+  "stats": {"pairs": 42, "matched": 17,
+            "rejected_by_type": 19, "rejected_by_location_evidence": 6},
+  "decisions": {"count": 42, "limit": 200, "truncated": false,
+    "items": [{"label_id": "L-001", "sample_id": "S-01", "finding_index": 3,
+               "file": "bin/httpd", "label_line": 42, "finding_line": 40,
+               "label_category": "command-injection", "finding_category": "command-injection",
+               "label_cwe": "CWE-78", "finding_cwe": "CWE-78", "line_distance": 2,
+               "location_ok": true, "symbol_ok": false, "text_ok": true,
+               "evidence_ok": true, "category_ok": true, "category_relation": "same",
+               "cwe_ok": true, "cwe_relation": "same", "type_ok": true,
+               "matched": true, "reason": "匹配通过：定位+证据；类型通过"}]}}
+```
+
+### 9.3 BenchResult
+
+`BenchResult`：`schema` / `tool` / `status` / `synthetic` / `generated_at`、`dataset`、`parameters`、`validation`（`status` / `warnings`）、`scope`（`split`、`samples`、`samples_by_split`、`findings_in_scope`、`findings_total`、`labels_total`、`labels_reviewed`、`labels_not_evaluable`）、`confusion_matrix`（`tp`/`fp`/`fn`/`tn`）、`metrics`（`micro` / `macro` / `by_category` / `by_arch` / `by_split` / `by_filesystem` / `by_vendor`，每项含 precision/recall/F1/FPR/FNR）、`matching`（上节）、`provisional`（`authoritative=false`、`reason`、`labels_included`、`metrics`；标签未复核或存在 `not_evaluable` 样本时必须给出）、`not_evaluable`、`out_of_scope`、`details`（`true_positives` / `false_negatives` / `false_positives` / `unmatched_vulnerable_findings` / `duplicate_reviewed_matches` / `not_evaluable`）、`baseline`、`exit_code`。**不存在顶层 `split` / `counts` / `micro`**——split 在 `scope.split`，计数在 `confusion_matrix`，指标在 `metrics.micro`。
 
 基线比较用 `--baseline <bench-result.json>`：recall 下降超过 `--max-recall-drop`（默认 0.05）或 FPR 上升超过 `--max-fpr-rise`（默认 0.02）→ `regression=true` 且退出码 **3**（不是 1）。`--strict` 不计算 `provisional`（字段为 null），但仍以 reviewed 标签计分。
-
-`--require-real`（`evaluate` / `validate` 均可）把「真实基准」从愿望变成门禁：`dataset.kind != "real"`，或 `dataset.real_firmware` 仍是 `pending` / `unknown` / `tbd` / `none` / `n/a` 等占位值时，直接判校验失败（退出 **1**），错误信息明确写「真实固件基准尚未建立」。合成集仍可用于契约回归，但不能冒充真实检测质量。
 
 ## 10. 兼容模式边界（重要）
 
@@ -293,6 +374,8 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 | `ts` | string | ✅ | ISO 8601 带时区；`ts` 不参与去重键 |
 | `dedupe_key` | string | ✅ | `sha256("board-event/1.0\n" + type + "\n" + canonical_json(payload))` |
 | `payload` | object | ✅ | 事件载荷 |
+| `prev_hash` | string | — | 前一条事件的 `hash`；链首为 `""`，成链后必填 |
+| `hash` | string | — | 本事件哈希，64 位小写 hex；随 `prev_hash` 一起出现 |
 
 | `type` | `payload` 必填 |
 |---|---|
@@ -304,24 +387,40 @@ uv run scripts/contracts.py --kind audit-stages --file 30-stages.json --json 30-
 | `HINT_RECORDED` | `hint`（完整 `hint/1.0` 对象） |
 | `EMULATION_RECORDED` | `result`（完整 `emulation-result/1.0` 对象） |
 | `CANDIDATE_TRANSITIONED` | `candidate_id` / `from_state` / `to_state` / `reason` / `evidence_refs`；`policy` 可选 |
-| `INTENT_STATUS_CHANGED` | `intent_id` / `from_status` / `to_status`；`worker` / `attempts` / `outcome` / `result_refs` / `last_failure` / `reason` 可选 |
+| `INTENT_STATUS_CHANGED` | `intent_id` / `from_status` / `to_status`；`worker` / `attempts` / `lease` / `outcome` / `result_refs` / `last_failure` / `reason` 可选 |
+| `INTENT_LEASE_RENEWED` | `intent_id` / `worker` / `lease`；`previous_expires_at` 可选 |
 | `INTENT_COMPLETED_WITH_RESULTS` | `intent_id` / `worker` / `result`（完整 `scheduler-result/1.0`）；`attempt` 可选 |
 | `PHASE_ADVANCED` | `from_phase` / `to_phase` / `reason` / `evidence_refs`；`advanced_by` 可选 |
 | `BACKTRACK` | `from_phase` / `to_phase` / `reason` / `evidence_refs`；`approved_by` 可选 |
 
 语义与失败模式：
 
-- 只追加：写入后 `flush` + `fsync`。重复 `dedupe_key` 返回 `duplicate=true` 且不再落盘；回放时同样跳过并计数。
+- 只追加：每条事件一行，写入后 `flush` + `fsync` 文件，并对父目录 `fsync`（Windows 跳过目录 fsync）。重复 `dedupe_key` 返回 `duplicate=true` 且不再落盘；回放时同样跳过并计数。
 - **跨进程事务**（`board_store.py` 1.1）：所有写操作先抢 `audit.lock`（Windows `msvcrt.locking` / POSIX `fcntl.flock`，默认 10 秒超时，超时报 `LOCK_TIMEOUT`）。锁内重新加载事件日志，再执行去重、`seq` 分配、`apply_event`、追加事件与原子快照；`append(prepare=)` 的 `prepare(state)` 在锁内用最新状态构造载荷，因此 `set_intent_status(expected_status=...)` 是 CAS，`transition` / `backtrack` / `advance_phase` 也都在同一事务里重新取当前状态。进程崩溃时由 OS 释放锁；锁只保护同一工作区，不提供跨机器互斥。
 - `seq` 必须从 1 连续；`event_id` 唯一；同一日志出现多个 `run_id` 即 `RUN_MISMATCH`。
-- 空行可以容忍（计入 `blank`），但**非法 JSON 行必须报 `PARSE_ERROR` 并非零退出**，不得静默跳过。
+- 空行可以容忍（计入 `blank`）。**中间非法 JSON 行**必须报 `PARSE_ERROR` 并非零退出，不得静默跳过；只有最后一行「没有换行且 JSON 不完整」才记为 `truncated_tail`，读取时跳过。`append_event` 遇中间损坏抛 `LOG_CORRUPT` 且不追加；遇 torn tail 先把该尾段隔离到 `<events>.torn-<UTC>`（重名加 `-N`），截断后再追加，不把半行留在真相源里。
 - 快照的 `revision` / `event_count` / `last_event_id` 与日志不一致时，`load` 会重建并标记 `recovered=true`；快照缺失也能从日志恢复。
 - 重复初始化报 `ALREADY_INITIALIZED`（除非显式 `--force`）；`BACKTRACK` 的 `from_phase` 不是当前阶段报 `PHASE_MISMATCH`，方向不是回退报 `NOT_A_BACKTRACK`。
-- `INTENT_STATUS_CHANGED` 的 `worker` / `attempts` / `outcome` / `result_refs` / `last_failure` 全部校验通过后才写入 `intent.status`；否则事件声称切换了状态，重放却停在旧状态。`claimed` 的 `attempts` 必须等于旧值加一，跳号或重放报 `ATTEMPT_MISMATCH`；`done` 必须带成功类 `outcome`，`failed` 必须带失败类 `outcome` 与 `last_failure`（`OUTCOME_REQUIRED` / `FAILURE_REQUIRED`）；`result_refs` 指向的对象必须已在黑板，否则 `RESULT_REF_NOT_FOUND`；重试回到 `open` 时本轮结果引用**追加**到 `result_refs`，不能覆盖上一轮，否则失败尝试的 Evidence/Fact 会脱离 Intent、审计链断裂。
+- `INTENT_STATUS_CHANGED` 的 `worker` / `attempts` / `outcome` / `result_refs` / `last_failure` 全部校验通过后才写入 `intent.status`；否则事件声称切换了状态，重放却停在旧状态。`claimed` 的 `attempts` 必须等于旧值加一，跳号或重放报 `ATTEMPT_MISMATCH`；`done` 必须带成功类 `outcome`，`failed` 必须带失败类 `outcome` 与 `last_failure`（`OUTCOME_REQUIRED` / `FAILURE_REQUIRED`）；`result_refs` 指向的对象必须已在黑板，否则 `RESULT_REF_NOT_FOUND`；重试回到 `open` 时本轮结果引用**追加**到 `result_refs`，不能覆盖上一轮，否则失败尝试的 Evidence/Fact 会脱离 Intent、审计链断裂。转到 `claimed` 时同时写入 `lease`（`payload.lease` 为对象时复制）；`done` / `failed` / `cancelled` 与回到 `open` 都清除 `lease`，`open` 还把 `worker` 置空。
+- `INTENT_LEASE_RENEWED` 只在 Intent 为 `claimed` 时合法（否则 `STATE_MISMATCH`），`payload.worker` 必须等于当前持有者（否则 `WORKER_MISMATCH`）；`lease` 必须含 `worker` / `acquired_at` / `heartbeat_at` / `expires_at` 非空字符串与不小于 1 的 `ttl_seconds`，`lease.worker` 与事件 `worker`、`intent.worker` 一致，校验通过后整份替换 `intent.lease`。`previous_expires_at` 只作审计记录，不参与状态判定。
 - `INTENT_COMPLETED_WITH_RESULTS` 是**结果回写的唯一原子入口**：`result` 必须是完整 `scheduler-result/1.0`，且 `result.intent_id` / `run_id` / `firmware_sha256` 与黑板一致。事件在一次 `apply_event` 中校验 worker / `attempt`、结果内 ID 重复与黑板冲突、`fact.evidence_refs` 是否悬空，然后**同时**插入 Evidence / Fact、累加 `result_refs` 并更新 Intent 状态；任一项失败整笔拒绝，不落半份证据（`DUPLICATE_ID` / `ID_CONFLICT` / `DANGLING_EVIDENCE` / `ATTEMPT_MISMATCH`）。成功类结果转 `done`，可重试失败在 `max_retries` 内回 `open`，否则转 `failed`。
 - `PHASE_ADVANCED` 的 `from_phase` 必须等于当前阶段（`PHASE_MISMATCH`），`to_phase` 必须是下一阶段（`NOT_AN_ADVANCE`），`reason` 非空（`REASON_REQUIRED`），`evidence_refs` 必须存在（`EVIDENCE_REF_INVALID` / `EVIDENCE_REF_NOT_FOUND`）。前进用 `PHASE_ADVANCED`，回退只能用 `BACKTRACK`，不能用前进事件倒着写。
 - 事件载荷内的对象若 `run_id` 与事件不一致，报 `RUN_MISMATCH`；引用不存在的证据 / 来源 / Intent，报 `DANGLING_EVIDENCE` / `DANGLING_REF`。
 - 回放遇到状态的 `from_state` 与快照当前状态不一致，报 `STATE_MISMATCH`；未知事件类型报 `UNKNOWN_EVENT`。
+
+**事件哈希链（可选）**：事件可带 `prev_hash` / `hash`，用于发现日志被改写或拼接；没有这两个字段的旧日志仍可读。
+
+```text
+hash = sha256("board-event-hash/1.0\n" + canonical_json(去掉 hash 字段的事件))
+```
+
+`canonical_json` 使用键排序、紧凑分隔与不转义的非 ASCII 文本。链首 `prev_hash=""`；之后每条 `prev_hash` 等于前一条的 `hash`。若前一条没有 `hash`，`board_store` 追加时保持无链，不会凭空起链。因此旧日志要么完全无链（`hash_chain=absent`），要么是开头无 hash、之后才起链的 legacy 前缀（`legacy-prefix`）。`verify` 的 `hash_chain` 取 `absent` / `legacy-prefix` / `complete`，并给出 `last_hash`；成链后缺字段报 `HASH_CHAIN_PARTIAL`，链首 `prev_hash` 非空或后续不指向前一条报 `HASH_CHAIN_BROKEN`，重算不符报 `HASH_MISMATCH`，格式不是 64 位小写 hex 报 `HASH_INVALID`。
+
+`truncated_tail` 不是哈希错误，也不计入 `errors`：`verify` 只报告它，退出码仍由 `errors` 决定；下一次 append 会先隔离再修复。报告同时给出 `ok`、`events`、`duplicates`、`last_seq`、`blank`、`hash_chain`、`last_hash` 与 `truncated_tail`。
+
+```bash
+python scripts/board_events.py verify --events work/audit-events.jsonl --json work/audit-events-report.json
+```
 
 ## 13. Fact（`fact/1.0`）
 
@@ -371,10 +470,18 @@ Intent 是**尚未执行的方向**：必须由已有事实/候选/证据/Intent
 | `preconditions` / `stop_conditions` / `expected_outputs` | array | — | 字符串数组；`stop_conditions` 是执行者必须遵守的停止判据，不是装饰 |
 | `worker` | string/null | — | 认领者 |
 | `claimed_at` / `concluded_at` | string | 条件 | `claimed` 必须有 `worker`+`claimed_at`；`done`/`failed`/`cancelled` 必须有 `concluded_at` |
+| `lease` | object | 条件 | 租约；`worker` / `acquired_at` / `heartbeat_at` / `expires_at` 为非空字符串，`ttl_seconds` 为 ≥1 整数；`lease.worker` 必须等于 `worker`；仅 `claimed` 时存在 |
 
 Intent 状态机：`open → claimed | cancelled`；`claimed → done | failed | cancelled | open`（释放）；`done` / `failed` / `cancelled` 为终态。认领必须带 `worker`，否则 `MISSING_WORKER`；非法转换报 `ILLEGAL_TRANSITION`。
 
 `intent/1.1` 额外约束：`claimed` 必须带 `attempts>=1`；`failed` 必须带 `last_failure` 且 `outcome∈{failed,blocked,timed_out}`；`done` 必须带 `outcome∈{success,partial,not_applicable}`。`partial` 不能被折叠成 `success`，`timed_out` / `blocked` 也不能被写成「没有发现」。失败重试由 `max_retries` 与 `attempts` 共同决定，超出上限即 `failed`，不得无限重试。
+
+**租约（`lease`）**：`claim` 在写入 `claimed` 的同一事务里写入 `lease`。`acquired_at` / `heartbeat_at` 取领取时刻，`expires_at = 当前时间 + ttl_seconds`；`ttl_seconds` 默认 900，允许 1..86400，越界报 `LEASE_INVALID`。`heartbeat` 只有当前持有者能续租：Intent 非 `claimed` 时报 `INTENT_NOT_CLAIMED`，`worker` 与当前持有者不一致时报 `WORKER_MISMATCH`；续租重新计算 `expires_at` 与 `heartbeat_at`，`previous_expires_at` 只作审计。
+
+- 清除时机：`done` / `failed` / `cancelled` 与回到 `open` 都删除 `lease`；回到 `open` 同时清空 `worker`，下一次认领重新计时并令 `attempts+1`。
+- `LEASE_EXPIRED`：`complete` 时 Intent 仍是 `claimed` 但租约已过期，拒绝回写，Intent 保持 `claimed`，不会因一次迟到结果自动转 `open` 或 `done`。
+- `WORKER_MISMATCH`：非持有者发 `heartbeat`，或回写结果的 `worker` 与当前持有者不一致。
+- `reclaim` 把过期 `claimed` 转回 `open`，`reason=lease_expired`，保留 `attempts` 与既有 `result_refs`，不删除任何 Evidence / Fact；旧式没有 `lease` 的 `claimed` 不视为过期，不能被 `reclaim` 回收。
 
 Hint 是人工判断或提示，**不是证据**，不得用来替代 Fact / Evidence。
 
@@ -462,10 +569,23 @@ BoardState 是快照文件的结构，所有条目都必须绑定同一个 `run_
   | `other` | `dynamic` / `emulation` / `manual` |
 
   没有一条命中 → `CONFIRM_EVIDENCE_REQUIRED`。
-- `policy.criteria` 必须覆盖该类型的 `required_criteria` 且全为 true；缺失 → `VALIDATION_CRITERIA_NOT_MET`。`confirmed` 还必须提供 `policy.criterion_evidence`：对象，每个 `required_criteria` 对应非空 Evidence ID 字符串（或字符串数组），且这些 ID 必须在本轮选中的证据里；缺对象 → `CONFIRM_CRITERIA_EVIDENCE_REQUIRED`，判据未绑定 → `CONFIRM_CRITERION_UNBOUND`，值非法 → `CONFIRM_EVIDENCE_REF_INVALID`，引用不在本轮证据 → `CONFIRM_EVIDENCE_REF_NOT_FOUND`。
+- `policy.criteria` 必须覆盖该类型的 `required_criteria` 且全为 true；缺失 → `VALIDATION_CRITERIA_NOT_MET`。`confirmed` 还必须提供 `policy.criterion_evidence`：对象，每个 `required_criteria` 对应非空 Evidence ID 字符串（或字符串数组），且这些 ID 必须在本轮选中的证据里；缺对象 → `CONFIRM_CRITERIA_EVIDENCE_REQUIRED`，判据未绑定 → `CONFIRM_CRITERION_UNBOUND`，值非法 → `CONFIRM_EVIDENCE_REF_INVALID`，引用不在本轮证据 → `CONFIRM_EVIDENCE_REF_NOT_FOUND`。每条引用的证据还必须通过该判据的语义检查（`supports`，见 §6.1）：类型不符 → `CONFIRM_CRITERION_TYPE`，缺 `supports` 或缺该 `criterion` 条目 → `CONFIRM_CRITERION_UNSUPPORTED`，`kind` / 必填 `details` / `path` 长度 / `sink` / `argv` / `any_of` 不符 → `CONFIRM_CRITERION_SEMANTICS`。成功结果带 `criterion_sources` 与 `shared_evidence`；同一 Evidence 支持多个判据时，每个判据都要有自己的 `supports` 条目。
 - 需要触发上下文的类型（命令注入、缓冲区溢出、路径穿越、认证绕过、SSRF、反序列化）必须有 `event.trigger=true` 或匹配的触发事件；`validated` 还可由候选自带 `trigger` / `poc` / `poc_path` 兜底，**`confirmed` 不接受候选自证**，否则 `MISSING_TRIGGER_CONTEXT`。
 - `policy.expected` 与 `policy.actual` 要么都给且相等，要么都不给；只给一方 → `EXPECTED_ACTUAL_NOT_SUPPORTED`。
 - 其余失败码：`BAD_CANDIDATE` / `BAD_STATE` / `ILLEGAL_TRANSITION` / `TYPE_RULE_MISSING` / `CANDIDATE_TYPE_MISMATCH` / `EVIDENCE_REQUIRED` / `EVIDENCE_INVALID`；成功为 `OK`。
+
+**判据语义矩阵（`CRITERION_SUPPORT`）**：`supports[].kind` 必须命中下表允许种类，`details` 必须包含「必需键」；`path` 类数组还要求长度为 `min_path`（默认 2）且元素为非空字符串。允许的 Evidence 类型见末列。
+
+| 漏洞类型 | `criterion` → `kind` / 必需 `details` | 允许的 Evidence `type` |
+|---|---|---|
+| `command-injection` | `sink_reachable` → `call-path` / `path`（≥2）；`user_controlled_input` → `input-origin` / `origin`、`field`；`command_execution` → `sink-execution` / `sink`、`argv`，`sink` ∈ `execve`/`system`/`popen`/`posix_spawn` | 前者 `static`/`dynamic`/`emulation`；后两者 `dynamic`/`emulation`/`fuzzing` |
+| `buffer-overflow` | `input_length_unbounded` → `input-length` / `length`；`memory_write` → `memory-write` / `address`；`crash_or_control` → `crash` 或 `control` / `any_of` 中至少一个：`signal`、`pc`、`control` | `dynamic`/`emulation`/`fuzzing` |
+| `path-traversal` | `user_controlled_path` → `path-input` / `path`（≥2）、`origin`；`traversal_reaches_file` → `path-traversal` / `requested`、`resolved`；`file_access` → `file-access` / `path` | 前者 `static`/`dynamic`/`emulation`；后两者 `dynamic`/`emulation` |
+| `hardcoded-credential` | `credential_present` → `credential` / `location`、`value_sha256`；`credential_effective` → `credential-effective` / `mechanism`；`not_placeholder` → `credential-quality` / `reason` | 前两者 `static`/`manual`（`credential_effective` 另接受 `dynamic`/`emulation`）；后者 `static`/`manual` |
+| `auth-bypass` | `protected_endpoint_reachable` → `endpoint` / `endpoint`；`check_bypassed` → `auth-bypass` / `expected`、`observed`；`unauthorized_access` → `unauthorized-access` / `resource` | 前者 `static`/`dynamic`/`emulation`；后两者 `dynamic`/`emulation` |
+| `ssrf` | `url_controlled` → `input-origin` / `origin`、`field`；`request_issued` → `request` / `target`；`target_reachable` → `connect` / `target` | 前者 `static`/`dynamic`/`emulation`；后两者 `dynamic`/`emulation` |
+| `deserialization` | `untrusted_data_reaches_parser` → `parser-input` / `parser`、`origin`；`gadget_or_type_confusion` → `gadget` / `gadget`；`code_execution` → `sink-execution` / `sink`，`sink` ∈ `execve`/`dlopen`/`malloc` | 前者 `static`/`dynamic`/`emulation`；后两者 `dynamic`/`emulation` |
+| `other` | `evidence_supports_claim` → `claim` / `claim`；`scope_matched` → `scope` / `scope` | `static`/`dynamic`/`emulation`/`fuzzing`/`manual` |
 
 **风险处置不是状态**：`accepted` / `mitigated` / `transferred` / `avoided` / `pending` 是独立字段；`ACCEPTED_WITH_RISK` 只能作为风险处置，写进 `candidate.status` 会被拒绝（`RISK_AS_STATUS`）。接受风险不改变漏洞是否真实存在。
 
@@ -641,7 +761,7 @@ Qiling 分支用于「目标二进制明确、依赖可构建、可用受控输�
 - **退出码**：`0` 正常、`1` 解析失败/FAILED、`2` 用法、`3` 计划阻断或 BLOCKED、`4` 策略拒绝、`5` 资源准入拒绝、`124` 超时。
 
 
-**当前验证边界（不得省略）**：2026-11-02 / 2026-11-03 已在 Ubuntu 24.04.5 + Docker 29.9.2 上真实执行 `qiling_runner.py`。Qiling 1.4.6 的静态 MIPS 受控目标 `qltest-static` 产出 1 条 sink-hit、`SUCCESS` 结果、3 条 evidence / 3 条 fact，并导入黑板（evidence 4 / facts 4 / intents 1 / emulation_results 1，`verify` 通过），记录见 `assets/qiling/real-run-static/README.md`。Qiling 1.4.11 的固件动态 MIPS/musl `busybox cat /etc/QLTEST` 成功，guest 退出码 0，4 条事件中 `open("/etc/QLTEST")` 命中 sink，产出 1 条 sink-hit、`SUCCESS`、3 条 evidence / 3 条 fact，黑板计数相同，记录见 `assets/qiling/real-run-busybox-sink/README.md`；`qiling_runner.py` 已兼容 1.4.11 把 `INTEGER` 改名为 `INT`。Qiling 1.4.6 对动态 musl `busybox` 的 `FAILED / memory-error / UC_ERR_WRITE_UNMAPPED` 只能说明该版本/该镜像的加载问题，不能概括为 Qiling 不支持 musl；旧动态失败产物已删除。动态记录只覆盖 `cat /etc/QLTEST` 一个 applet，不覆盖网络、服务、多 applet 或厂商内核，`SUCCESS` / `sink-hit` 都不是漏洞结论。第 25 组仍使用合成 MIPS ELF 与假 sandbox，只证明计划、过滤、归一化、状态分类、Hook 安装边界与黑板导入，不替代真实执行。另有一个已知边界：blocked 计划若缺 `firmware_sha256`，`qiling-import` 仍要求 64 位哈希，会把该计划判为契约失败。
+**当前验证边界（不得省略）**：2026-11-02 / 2026-11-03 已在 Ubuntu 24.04.5 + Docker 29.9.2 上真实执行 `qiling_runner.py`。Qiling 1.4.6 的静态 MIPS 受控目标 `qltest-static` 产出 1 条 sink-hit、`SUCCESS` 结果、3 条 evidence / 3 条 fact，并导入黑板（evidence 4 / facts 4 / intents 1 / emulation_results 1，`verify` 通过），记录见 `assets/qiling/real-run-static/README.md`。Qiling 1.4.11 的固件动态 MIPS/musl `busybox cat /etc/QLTEST` 成功，guest 退出码 0，4 条事件中 `open("/etc/QLTEST")` 命中 sink，产出 1 条 sink-hit、`SUCCESS`、3 条 evidence / 3 条 fact，黑板计数相同，记录见 `assets/qiling/real-run-busybox-sink/README.md`；`qiling_runner.py` 已兼容 1.4.11 把 `INTEGER` 改名为 `INT`。Qiling 1.4.6 对动态 musl `busybox` 的 `FAILED / memory-error / UC_ERR_WRITE_UNMAPPED` 只能说明该版本/该镜像的加载问题，不能概括为 Qiling 不支持 musl；旧动态失败产物已删除。动态记录只覆盖 `cat /etc/QLTEST` 一个 applet，不覆盖网络、服务、多 applet 或厂商内核，`SUCCESS` / `sink-hit` 都不是漏洞结论。对应自检仍使用合成 MIPS ELF 与假 sandbox，只证明计划、过滤、归一化、状态分类、Hook 安装边界与黑板导入，不替代真实执行。另有一个已知边界：blocked 计划若缺 `firmware_sha256`，`qiling-import` 仍要求 64 位哈希，会把该计划判为契约失败。
 
 ## 20. SchedulerRules / SchedulerResult（`scheduler-rules/1.0` / `scheduler-result/1.0`）
 
@@ -757,8 +877,10 @@ Qiling 分支用于「目标二进制明确、依赖可构建、可用受控输�
 |---|---|---|
 | `plan` | 按规则拓扑顺序评估 Fact；只对 `--write` 落盘；重复评估由 `dedupe_key` 去重 | `DEPENDENCY_MISSING` / `DEPENDENCY_CYCLE` / `RULE_INVALID` |
 | `next` | 只列 `READY` 的 Intent，按 `-priority`、`created_at`、`intent_id` 排序 | — |
-| `claim` | 校验 READY、`open`、`worker`；用 `check_request` 对拍策略，拒绝时 exit 5 且 Intent 保持 `open` | `RESOURCE_DENIED` / `INTENT_NOT_READY` / `INTENT_NOT_OPEN` |
-| `complete` | 校验 result 与 Intent/worker/attempt；先写 Evidence/Fact，再改 Intent 状态 | `RESULT_INVALID` / `INTENT_NOT_CLAIMED` / `WORKER_MISMATCH` / `ATTEMPT_MISMATCH` |
+| `claim` | 校验 READY、`open`、`worker`；用 `check_request` 对拍策略，拒绝时 exit 5 且 Intent 保持 `open`；同时按 `--lease-seconds` 写租约（默认 900，范围 1..86400） | `RESOURCE_DENIED` / `INTENT_NOT_READY` / `INTENT_NOT_OPEN` / `LEASE_INVALID` |
+| `heartbeat` | 仅当前持有者可续租；要求 `claimed` 且 `worker` 一致，重算 `expires_at` 并写 `INTENT_LEASE_RENEWED` | `INTENT_NOT_CLAIMED` / `WORKER_MISMATCH` / `LEASE_INVALID` |
+| `reclaim` | 把租约过期的 `claimed` 转回 `open`，`reason=lease_expired`，保留 `attempts` 与结果引用；`--dry-run` 只报告 | `STATE_MISMATCH` / `ILLEGAL_TRANSITION` |
+| `complete` | 校验 result 与 Intent/worker/attempt 及租约；先写 Evidence/Fact，再改 Intent 状态；租约过期拒绝回写 | `RESULT_INVALID` / `INTENT_NOT_CLAIMED` / `WORKER_MISMATCH` / `ATTEMPT_MISMATCH` / `LEASE_EXPIRED` |
 | `backtrack` | 从当前阶段显式回退，证据必须存在 | `PHASE_MISMATCH` / `NOT_A_BACKTRACK` / `REASON_REQUIRED` |
 
 `claim` 只做准入检查，不长期占用并发槽位；真正的槽位、预算与超时由 `sandbox_run.py` 在启动时获取。这样不会出现「调度器领了任务但不执行，槽位被空占」的情况。`complete` 先写结果再改状态，保证不会出现 Intent 已 `done` 却查不到对应证据的窗口；状态事件失败时证据仍在，可按 `result_refs` 审计并人工修复。
@@ -767,12 +889,20 @@ Qiling 分支用于「目标二进制明确、依赖可构建、可用受控输�
 
 阶段前进与回退都写入事件日志：`PHASE_ADVANCED` 只能逐阶段前进，`BACKTRACK` 只能从当前阶段回退；两者都必须带原因，`BACKTRACK` 还必须带触发证据。事件日志是唯一真相源，快照丢失可从日志重放。
 
+**租约与回收**：`claim` 写入 `lease={worker, acquired_at, heartbeat_at, expires_at, ttl_seconds}`，默认 900 秒，最大 86400 秒；`--lease-seconds` 越界或不是整数报 `LEASE_INVALID`，退出 **2**。`heartbeat` 只有持有者可调用，续租时重新计算 `expires_at` 与 `heartbeat_at`；即使租约已过期，只要 Intent 仍是 `claimed` 且 `worker` 一致，仍可续租恢复。
+
+`reclaim` 只处理租约已过期的 `claimed`：没有 `lease` 的旧式 `claimed` 视为未过期，不回收；`lease` 不是对象也不回收；`expires_at` 缺失或非法则按过期处理。回收把状态改回 `open`、`reason=lease_expired`，保留 `attempts` 与既有 `result_refs`，不删除任何 Evidence / Fact；下一次 `claim` 令 `attempts+1`，新租约从新的领取时刻重新计算。`--dry-run` 只列出将要回收的 Intent，不写事件。
+
+`complete` 在 Intent 为 `claimed` 且租约过期时报 `LEASE_EXPIRED` 并拒绝回写，Intent 保持 `claimed`；此时应先 `heartbeat` 续租，或 `reclaim` 后重新领取。资源准入仍只在 `claim` 执行：拒绝时退出 **5** 且 Intent 保持 `open`；`heartbeat` / `reclaim` / `complete` 不重做准入，也不改变退出码 5 的含义。
+
 命令行示例：
 
 ```bash
 python scripts/board_scheduler.py plan --workspace runs/audit --rules scheduler-rules.json --write
 python scripts/board_scheduler.py next --workspace runs/audit --limit 10
-python scripts/board_scheduler.py claim --workspace runs/audit --intent I-7f2416177e61 --worker agent-1 --policy sandbox-policy.json
+python scripts/board_scheduler.py claim --workspace runs/audit --intent I-7f2416177e61 --worker agent-1 --policy sandbox-policy.json --lease-seconds 900
+python scripts/board_scheduler.py heartbeat --workspace runs/audit --intent I-7f2416177e61 --worker agent-1 --lease-seconds 900
+python scripts/board_scheduler.py reclaim --workspace runs/audit --dry-run
 python scripts/board_scheduler.py complete --workspace runs/audit --intent I-7f2416177e61 --result result.json
 python scripts/board_store.py advance --workspace runs/audit --to-phase P2 --reason "进入动态验证" --evidence E-SVC
 python scripts/board_scheduler.py backtrack --workspace runs/audit --from-phase P2 --to-phase P1 --reason "端口证据不足" --evidence E-SVC

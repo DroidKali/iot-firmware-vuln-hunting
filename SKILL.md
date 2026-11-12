@@ -637,7 +637,7 @@ strings -a -t x usr/sbin/httpd | rg -i 'referer|cmd|ping|traceroute'
 
 静态链路完整 ≠ 可利用。固件场景还必须过三关：**能不能跑到这段代码**、**环境依赖（NVRAM/ioctl/硬件）能不能满足**、**有没有运行时防护**。
 
-黑板上对应 `pending_dynamic_validation → validated → confirmed`：`validated` 是静态/仿真链路闭合，`confirmed` 是动态复现后的最终态；两步都要过 `board_transitions.py check` 的类型化证据校验。M6 起，候选必须自带合法 `run_id` 与 `firmware_sha256`，所有参与判定的证据必须是 `evidence/1.1`、同 run / 同固件，并按漏洞类型带 `target_sha256`；撤销、过期、被取代、冲突证据一律拒绝，`contracts.py` 不可导入时 fail-closed。A02 起 `confirmed` 再收紧：命令注入 / 路径遍历 / 认证绕过 / SSRF / 反序列化只接受 `dynamic` 或 `emulation`，缓冲区溢出另接受 `fuzzing`，硬编码凭据可接受静态证据；`verify-policy.json` 的 `criterion_evidence` 必须把每个 `required_criteria` 绑到本轮 Evidence ID，候选自带的 `poc` / `trigger` 不能替代触发证据。状态与事件日志是审计留痕，不替代 `coverage_gate.py` 的门禁判定。
+黑板上对应 `pending_dynamic_validation → validated → confirmed`：`validated` 是静态/仿真链路闭合，`confirmed` 是动态复现后的最终态；两步都要过 `board_transitions.py check` 的类型化证据校验。M6 起，候选必须自带合法 `run_id` 与 `firmware_sha256`，所有参与判定的证据必须是 `evidence/1.1`、同 run / 同固件，并按漏洞类型带 `target_sha256`；撤销、过期、被取代、冲突证据一律拒绝，`contracts.py` 不可导入时 fail-closed。A02 起 `confirmed` 再收紧：命令注入 / 路径遍历 / 认证绕过 / SSRF / 反序列化只接受 `dynamic` 或 `emulation`，缓冲区溢出另接受 `fuzzing`，硬编码凭据可接受静态证据；`verify-policy.json` 的 `criterion_evidence` 必须把每个 `required_criteria` 绑到本轮 Evidence ID，候选自带的 `poc` / `trigger` 不能替代触发证据。仅引用 ID 还不够：每条 Evidence 必须用 `supports` 声明它支撑哪个 criterion、属于哪种 evidence kind，并给出该判据要求的 `details`（例如可达链 `path`、输入来源 `origin`/`field`、sink `sink` 与 `argv`）。同一条 `execve` 证据不能同时冒充“输入可控”和“sink 执行”；类型、kind、必填字段或路径长度不符分别报 `CONFIRM_CRITERION_TYPE` / `CONFIRM_CRITERION_UNSUPPORTED` / `CONFIRM_CRITERION_SEMANTICS`。状态与事件日志是审计留痕，不替代 `coverage_gate.py` 的门禁判定。
 
 #### 前置：执行边界（在选路之前）
 
@@ -788,6 +788,7 @@ Phase 4/5 的「下一步做什么」不再只靠 Agent 记忆：`board_schedule
 - **统一准入与 CAS**：`claim` 只领取 READY 且 `open` 的 Intent，先调 `resource_manager.check_request` 对拍 `sandbox-policy/1.0`；超时/内存/CPU/PID/镜像越界，或策略未允许 host 时退出 **5**，Intent 保持 `open`。状态写入带 `expected_status=open`，两个 worker 竞争时只有一个成功。领取**不占容器槽位**，真正槽位由 `sandbox_run.py` 启动时占用。
 - **结果回写与停止**：`complete` 校验 `scheduler-result/1.0` 后只追加一条 `INTENT_COMPLETED_WITH_RESULTS`，在一次加锁重放中同时插入 Evidence/Fact 并更新 Intent；任一 ID 冲突或悬空引用整笔拒绝，不会留下半份证据；`SUCCESS` / `PARTIAL` / `NOT_APPLICABLE → done`，可重试失败在 `max_retries` 内回 `open` 并保留 `last_failure`，超限转 `failed` 且必须记录 `outcome`。`PARTIAL` 必须列 `limitations`，不能冒充成功；`SUCCESS` 没有任何输出会被 `RESULT_NO_OUTPUT` 拒绝。
 - **阶段前进/回退**：`board_store.py advance` 写 `PHASE_ADVANCED`，`from` 必须是当前阶段、`to` 必须是下一阶段、`reason` 必填，如给出证据则必须已存在；`backtrack` 只能从当前阶段回退，两者都不允许跳阶段或静默改状态。
+- **租约、心跳与回收**：`claim` 默认写 900 秒租约（`--lease-seconds` 可调，上限 86400），记录 holder、获取/心跳/过期时间与 TTL。执行中用 `heartbeat` 续租；非持有者续租报 `WORKER_MISMATCH`。租约过期后 `complete` 报 `LEASE_EXPIRED`；`reclaim` 把过期 `claimed` 转回 `open` 并保留 `attempts`，下一次领取 `attempts+1`，`--dry-run` 只报告。旧式无租约的 `claimed` 不按过期处理。
 
 ```bash
 # 评估规则并写入 Intent；重复执行幂等
@@ -797,7 +798,13 @@ uv run scripts/board_scheduler.py next --workspace fw-audit/$TARGET/board
 
 # 领取前过资源准入；拒绝时退出 5 且 Intent 仍 open
 uv run scripts/board_scheduler.py claim --workspace fw-audit/$TARGET/board \
-    --intent I-... --worker agent-1 --policy sandbox-policy.json
+    --intent I-... --worker agent-1 --policy sandbox-policy.json \
+    --lease-seconds 900
+
+# 执行中续租；过期任务先回收
+uv run scripts/board_scheduler.py heartbeat --workspace fw-audit/$TARGET/board \
+    --intent I-... --worker agent-1 --lease-seconds 900
+uv run scripts/board_scheduler.py reclaim --workspace fw-audit/$TARGET/board
 
 # 回写调度结果；重试/停止由 max_retries 与 result.status 决定
 uv run scripts/board_scheduler.py complete --workspace fw-audit/$TARGET/board \
@@ -1110,6 +1117,7 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 | `references/vuln-taxonomy.md` | 需要按攻击面/漏洞类型逐项核查（后门账号、命令注入、OTA、MQTT、U-Boot…） |
 | `references/vuln-conditions.md` | **Layer 3 / Phase 4**：候选要不要升 `CONFIRMED`？按漏洞类型逐条排除成立条件（固件版判定表） |
 | `references/sink-patterns.md` | 需要扩充或理解静态扫描规则，或手写 grep / YARA |
+| `references/emulation-capability.md` | **仿真能力阶梯 L1–L7**：每级最低判据、运行记录字段、失败分类与晋级规则；shell 不等于服务，未证不得声明 |
 | `references/emulation-methodology.md` | **Phase 4 整机仿真主路径**：P0–P5、架构/QEMU 矩阵、镜像构建、启动阶梯、网络模型、证据与失败分类；不依赖 EMBA |
 | `references/emulation-fuzzing.md` | Phase 4 需要模拟与模糊的具体做法、踩坑与替代方案 |
 | `references/reporting.md` | Phase 5 需要报告字段、工作简报、评分表、脱敏规范 |
@@ -1131,18 +1139,18 @@ CVSS 3.1 基础分不足以反映固件漏洞的实战价值。每条漏洞额�
 | `scripts/board_transitions.py` | M1 / M6 / Phase 3–5：候选状态机——`graph` 列合法转换，`check` 做类型化证据校验（候选自带 run/固件、`evidence/1.1`、同 run/固件/目标哈希、生命周期与冲突、证据类型、判据、触发上下文），contracts 不可导入时 fail-closed；`risk` 校验风险处置而非候选状态 |
 | `scripts/board_events.py` | M1：append-only 事件日志——`verify` 校验结构与 `seq` 连续性，`replay` 从日志重建快照；重复 `dedupe_key` 跳过，非法 JSON 行报错 |
 | `scripts/board_store.py` | M1 / M7：黑板存储与导入——`init` / `import` / `add` / `transition` / `intent` / `advance` / `backtrack` / `replay` / `verify` / `show`；`import --emba` 导入 M3 适配结果、`import --qiling` 导入 M4 Qiling 结果；事件日志是真相源，快照可重建 |
-| `scripts/board_scheduler.py` | M7：确定性调度——`scheduler-rules/1.0` 的 Fact→Intent、去重/优先级/依赖、`claim` 统一资源准入（拒绝退出 5）、`complete` 校验 `scheduler-result/1.0` 并回写、失败重试与停止、阶段回退 |
+| `scripts/board_scheduler.py` | M7：确定性调度——`scheduler-rules/1.0` 的 Fact→Intent、去重/优先级/依赖、`claim` 统一资源准入（拒绝退出 5）与租约、`heartbeat` 续租、`reclaim` 回收过期任务、`complete` 校验 `scheduler-result/1.0` 并回写、失败重试与停止、阶段回退 |
 | `scripts/adapter_emba.py` | M3：EMBA 产物离线解析——F50/P99/S09/L15/L10/S115 → `emba-import/1.0`；三类观察分型（`service` / `runtime-process` / `port-response`）、PE32/ELF 区分、`--require` 显式产物、结构化失败、重复解析字节稳定 |
 | `scripts/ealb_calib.py` | Phase 2：用实测工时样本校准 EALB；样本不足时只报 `heuristic`，达到门槛才标 `calibrated` |
 | `scripts/sandbox_run.py` | Phase 4 / M2：不可信固件的一次性隔离执行（`--network none`、只读根、cap-drop、非 root、内存/CPU/PID 限额）；无隔离运行时 **fail-closed**（退出 3），宿主机执行必须显式授权；`sandbox-run/1.1` 记录资源准入（退出 5） |
 | `scripts/resource_manager.py` | M2：`sandbox-policy/1.0` 策略校验、跨进程文件锁槽位、墙钟预算；`validate` / `defaults`；超限排队而不是先启动 |
 | `scripts/exec_paths.py` | M2：AST 盘点 `scripts/*.py` 的子进程调用并分类（`sandbox-boundary` / `host-static-analyzer` / `trusted-metadata` / `test-harness`）；未分类即退出 1 |
-| `scripts/bench_eval.py` | Phase 5/回归：合成基准集上的 precision / recall / F1 / FPR 评估；`--baseline` 检测召回暴跌与 FPR 上升（退出码 3） |
+| `scripts/bench_eval.py` | Phase 5/回归：基准集 precision / recall / F1 / FPR；匹配按定位/类型/证据三阶段，CWE 支持等价与已登记父子；`--require-real` 要求来源/授权/哈希/解包/标签依据/独立复核，缺项拒绝；`--baseline` 检测召回暴跌与 FPR 上升（退出码 3） |
 | `scripts/emu_plan.py` | M4：只读探测 rootfs/内核/init/镜像，生成 `emulation-plan/1.0`（架构、QEMU argv、blockers、预算）；不执行 QEMU，也不自动构建镜像 |
 | `scripts/emu_run.py` | M4：复核计划、镜像与内核哈希，固定经 `sandbox_run.py --mode sandbox` 执行 QEMU，采串口/退出码并输出 `emulation-result/1.0`；无宿主机回退 |
 | `scripts/adapter_qiling.py` | M4：Qiling 定向仿真——只读计划、经 sandbox 执行、按 trigger marker / sink hook 重算事件并输出 `qiling-import/1.0`；无宿主机回退 |
 | `scripts/qiling_runner.py` | M4：容器内 Qiling runner——安装 syscall / API / libc Hook，写事件 JSONL 与运行报告；不判定漏洞，无宿主模式 |
-| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证其余二十一个脚本的判据，并把**文档示例命令与 CLI 参数表对拍**；覆盖工具注册表、黑板事件/快照/状态机、资源准入、EMBA 适配、整机仿真计划/结果分类、Qiling 定向仿真与 M7 调度闭环（28 组 / 369 条断言，结尾自报总数） |
+| `scripts/selftest.py` | 安装自检：生成合成固件与 rootfs，端到端验证其余二十一个脚本的判据，并把**文档示例命令与 CLI 参数表对拍**；覆盖工具注册表、黑板事件/快照/状态机、资源准入、EMBA 适配、整机仿真计划/结果分类、Qiling 定向仿真、M7 调度闭环与租约回收（28 组 / 397 条断言，结尾自报总数） |
 
 除 `qiling_runner.py`（只在 Qiling 容器镜像内运行）外，脚本都只用 Python 标准库，无第三方依赖，Windows / Linux / macOS 均可运行。用 `uv` 管理环境（`uv run` 自动建临时环境；无 `uv` 时直接 `python scripts/xxx.py` 亦可）。安装后建议先跑一次自检：
 

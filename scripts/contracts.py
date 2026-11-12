@@ -108,7 +108,7 @@ BOARD_EVENT_TYPES = (
     "BOARD_INITIALIZED", "FACT_RECORDED", "CANDIDATE_RECORDED",
     "EVIDENCE_RECORDED", "INTENT_CREATED", "INTENT_STATUS_CHANGED",
     "HINT_RECORDED", "EMULATION_RECORDED", "CANDIDATE_TRANSITIONED", "BACKTRACK",
-    "PHASE_ADVANCED", "INTENT_COMPLETED_WITH_RESULTS",
+    "PHASE_ADVANCED", "INTENT_COMPLETED_WITH_RESULTS", "INTENT_LEASE_RENEWED",
 )
 BOARD_PHASES = ("P0", "P1", "P2", "P3", "P4", "P5")
 
@@ -452,6 +452,29 @@ def validate_evidence_record(obj: Any, path: str = "evidence") -> List[Dict[str,
               ("high", "medium", "low", "unknown"), required=False)
     _opt_hex(out, obj, path, "target_sha256")
     _opt_hex(out, obj, path, "content_sha256")
+    # 判据语义声明：一条证据凭什么支持某个 required_criterion。状态机不能只看
+    # Evidence ID 是否存在；supports 把「调用链 / 输入来源 / sink 执行」拆成
+    # 可检查的观察项，避免同一条 execve 被同时当作可达性、输入可控与命令执行。
+    supports = obj.get("supports")
+    if supports is not None:
+        if not isinstance(supports, list) or not supports:
+            _err(out, f"{path}.supports", "BAD_TYPE", "supports 必须是非空数组")
+        else:
+            for j, item in enumerate(supports):
+                sub = f"{path}.supports[{j}]"
+                if not isinstance(item, dict):
+                    _err(out, sub, "BAD_TYPE", "support 必须是对象")
+                    continue
+                _req(out, item, sub, "criterion", str)
+                _req(out, item, sub, "kind", str)
+                details = item.get("details")
+                if details is not None and not isinstance(details, dict):
+                    _err(out, sub + ".details", "BAD_TYPE", "details 必须是对象")
+                elif isinstance(details, dict):
+                    for key in ("path", "argv"):
+                        if key in details:
+                            _str_list(out, details, sub + ".details", key,
+                                      required=False, allow_empty=False)
     _opt_bool(out, obj, path, "revoked")
     _opt_str(out, obj, path, "revoked_at")
     if obj.get("revoked") is True and not isinstance(obj.get("revoked_at"), str):
@@ -1017,6 +1040,24 @@ def validate_intent(obj: Any) -> List[Dict[str, str]]:
     worker = obj.get("worker")
     if worker is not None and not isinstance(worker, str):
         _err(out, "intent.worker", "BAD_TYPE", "worker 必须是字符串或 null")
+    lease = obj.get("lease")
+    if lease is not None:
+        if not isinstance(lease, dict):
+            _err(out, "intent.lease", "BAD_TYPE", "lease 必须是对象或 null")
+        else:
+            for key in ("worker", "acquired_at", "heartbeat_at", "expires_at"):
+                if key in lease and not isinstance(lease[key], str):
+                    _err(out, f"intent.lease.{key}", "BAD_TYPE",
+                         f"lease.{key} 必须是字符串")
+            if "ttl_seconds" in lease:
+                ttl = lease["ttl_seconds"]
+                if not isinstance(ttl, int) or isinstance(ttl, bool) or ttl < 1:
+                    _err(out, "intent.lease.ttl_seconds", "OUT_OF_RANGE",
+                         "lease.ttl_seconds 必须是 >=1 的整数")
+            if isinstance(worker, str) and isinstance(lease.get("worker"), str) \
+                    and lease["worker"] != worker:
+                _err(out, "intent.lease.worker", "MISMATCH",
+                     "lease.worker 必须与 Intent 的 worker 一致")
     if obj.get("status") == "claimed":
         if not isinstance(worker, str) or not worker.strip():
             _err(out, "intent.worker", "MISSING", "claimed 状态必须记录 worker")
@@ -1827,6 +1868,19 @@ def validate_board_event(obj: Any) -> List[Dict[str, str]]:
                 if "retryable" in lf and not isinstance(lf["retryable"], bool):
                     _err(out, "event.payload.last_failure.retryable", "BAD_TYPE",
                          "retryable 必须是布尔值")
+    elif typ == "INTENT_LEASE_RENEWED":
+        _req(out, payload, "event.payload", "intent_id", str)
+        _req(out, payload, "event.payload", "worker", str)
+        lease = payload.get("lease")
+        if not isinstance(lease, dict):
+            _err(out, "event.payload.lease", "MISSING", "续租必须带 lease 对象")
+        else:
+            for key in ("worker", "acquired_at", "heartbeat_at", "expires_at"):
+                _req(out, lease, "event.payload.lease", key, str)
+            ttl = lease.get("ttl_seconds")
+            if not isinstance(ttl, int) or isinstance(ttl, bool) or ttl < 1:
+                _err(out, "event.payload.lease.ttl_seconds", "OUT_OF_RANGE",
+                     "ttl_seconds 必须是 >=1 的整数")
     elif typ == "INTENT_COMPLETED_WITH_RESULTS":
         _req(out, payload, "event.payload", "intent_id", str)
         _req(out, payload, "event.payload", "worker", str)

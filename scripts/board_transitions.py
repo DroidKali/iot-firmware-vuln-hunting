@@ -170,6 +170,167 @@ for _rule_name, _rule in VERIFICATION_RULES.items():
     _rule["requires_target"] = _rule_name not in ("hardcoded-credential", "other")
     _rule["confirm_evidence_types"] = CONFIRM_EVIDENCE_TYPES[_rule_name]
 
+#: 判据语义：每个 required_criterion 需要哪种观察、哪些 details 字段、允许哪些
+#: Evidence 类型。这里不把 criteria 的 true/false 当作证明；调用方必须在证据里
+#: 给出可核对的观察项（call-path / input-origin / sink-execution 等）。
+CRITERION_SUPPORT: Dict[str, Dict[str, Dict[str, Any]]] = {
+    "command-injection": {
+        "sink_reachable": {
+            "kinds": ("call-path",), "required": ("path",), "min_path": 2,
+            "types": ("static", "dynamic", "emulation"),
+        },
+        "user_controlled_input": {
+            "kinds": ("input-origin",), "required": ("origin", "field"),
+            "types": ("dynamic", "emulation", "fuzzing"),
+        },
+        "command_execution": {
+            "kinds": ("sink-execution",), "required": ("sink", "argv"),
+            "sinks": ("execve", "system", "popen", "posix_spawn"),
+            "types": ("dynamic", "emulation", "fuzzing"),
+        },
+    },
+    "buffer-overflow": {
+        "input_length_unbounded": {
+            "kinds": ("input-length",), "required": ("length",),
+            "types": ("dynamic", "emulation", "fuzzing"),
+        },
+        "memory_write": {
+            "kinds": ("memory-write",), "required": ("address",),
+            "types": ("dynamic", "emulation", "fuzzing"),
+        },
+        "crash_or_control": {
+            "kinds": ("crash", "control"), "required": (),
+            "any_of": ("signal", "pc", "control"),
+            "types": ("dynamic", "emulation", "fuzzing"),
+        },
+    },
+    "path-traversal": {
+        "user_controlled_path": {
+            "kinds": ("path-input",), "required": ("path", "origin"),
+            "types": ("static", "dynamic", "emulation"),
+        },
+        "traversal_reaches_file": {
+            "kinds": ("path-traversal",), "required": ("requested", "resolved"),
+            "types": ("dynamic", "emulation"),
+        },
+        "file_access": {
+            "kinds": ("file-access",), "required": ("path",),
+            "types": ("dynamic", "emulation"),
+        },
+    },
+    "hardcoded-credential": {
+        "credential_present": {
+            "kinds": ("credential",), "required": ("location", "value_sha256"),
+            "types": ("static", "manual"),
+        },
+        "credential_effective": {
+            "kinds": ("credential-effective",), "required": ("mechanism",),
+            "types": ("static", "manual", "dynamic", "emulation"),
+        },
+        "not_placeholder": {
+            "kinds": ("credential-quality",), "required": ("reason",),
+            "types": ("static", "manual"),
+        },
+    },
+    "auth-bypass": {
+        "protected_endpoint_reachable": {
+            "kinds": ("endpoint",), "required": ("endpoint",),
+            "types": ("static", "dynamic", "emulation"),
+        },
+        "check_bypassed": {
+            "kinds": ("auth-bypass",), "required": ("expected", "observed"),
+            "types": ("dynamic", "emulation"),
+        },
+        "unauthorized_access": {
+            "kinds": ("unauthorized-access",), "required": ("resource",),
+            "types": ("dynamic", "emulation"),
+        },
+    },
+    "ssrf": {
+        "url_controlled": {
+            "kinds": ("input-origin",), "required": ("origin", "field"),
+            "types": ("static", "dynamic", "emulation"),
+        },
+        "request_issued": {
+            "kinds": ("request",), "required": ("target",),
+            "types": ("dynamic", "emulation"),
+        },
+        "target_reachable": {
+            "kinds": ("connect",), "required": ("target",),
+            "types": ("dynamic", "emulation"),
+        },
+    },
+    "deserialization": {
+        "untrusted_data_reaches_parser": {
+            "kinds": ("parser-input",), "required": ("parser", "origin"),
+            "types": ("static", "dynamic", "emulation"),
+        },
+        "gadget_or_type_confusion": {
+            "kinds": ("gadget",), "required": ("gadget",),
+            "types": ("static", "dynamic", "emulation"),
+        },
+        "code_execution": {
+            "kinds": ("sink-execution",), "required": ("sink",),
+            "sinks": ("execve", "dlopen", "malloc"),
+            "types": ("dynamic", "emulation"),
+        },
+    },
+    "other": {
+        "evidence_supports_claim": {
+            "kinds": ("claim",), "required": ("claim",),
+            "types": ("static", "dynamic", "emulation", "fuzzing", "manual"),
+        },
+        "scope_matched": {
+            "kinds": ("scope",), "required": ("scope",),
+            "types": ("static", "dynamic", "emulation", "fuzzing", "manual"),
+        },
+    },
+}
+
+#: 判据语义检查的三种结果：OK / TYPE（证据类型不适用）/ SEMANTICS（有声明但
+#: 观察项不匹配）/ UNSUPPORTED（证据根本没有为这个判据声明观察）。
+def _support_status(ev: Dict[str, Any], criterion: str,
+                    spec: Dict[str, Any]) -> str:
+    types = spec.get("types")
+    if types and ev.get("type") not in types:
+        return "TYPE"
+    supports = ev.get("supports")
+    if not isinstance(supports, list) or not supports:
+        return "UNSUPPORTED"
+    entries = [s for s in supports
+               if isinstance(s, dict) and s.get("criterion") == criterion]
+    if not entries:
+        return "UNSUPPORTED"
+    required = tuple(spec.get("required") or ())
+    for item in entries:
+        if item.get("kind") not in tuple(spec.get("kinds") or ()):
+            continue
+        details = item.get("details") if isinstance(item.get("details"), dict) else {}
+        if any(k not in details or details.get(k) in (None, "", [], {})
+               for k in required):
+            continue
+        path = details.get("path")
+        if "path" in required:
+            if not isinstance(path, list) or len(path) < int(spec.get("min_path", 2)):
+                continue
+            if any(not isinstance(x, str) or not x for x in path):
+                continue
+        sink = details.get("sink")
+        if spec.get("sinks") and sink not in tuple(spec["sinks"]):
+            continue
+        argv = details.get("argv")
+        if "argv" in required:
+            if not isinstance(argv, list) or not argv:
+                continue
+            if any(not isinstance(x, str) or not x for x in argv):
+                continue
+        any_of = tuple(spec.get("any_of") or ())
+        if any_of and not any(details.get(k) for k in any_of):
+            continue
+        return "OK"
+    return "SEMANTICS"
+
+
 #: Intent 状态机：open → claimed → done/failed；claim 可以被释放回 open。
 INTENT_TRANSITIONS: Dict[str, tuple] = {
     "open": ("claimed", "cancelled"),
@@ -610,8 +771,10 @@ def validate_transition(candidate: Any, to_state: str,
                        **{"from": frm, "to": to, "vuln_type": vuln_type,
                           "missing_criteria": missing})
 
-    # confirmed 不能只写三个 true：每个判据必须指向本轮已选中的 Evidence ID。
-    # 这样报告里的「已验证」可以逐条回溯到具体证据，而不是调用方自述。
+    # confirmed 不能只写三个 true：每个判据必须指向本轮已选中的 Evidence ID，
+    # 且该证据必须用 supports 明确声明「凭什么」支持这个判据。ID 存在但语义
+    # 不支持（例如只有一条 execve 事件却同时声称输入可控和端到端可达）必须拒绝。
+    criterion_sources: Dict[str, List[str]] = {}
     if to == "confirmed":
         mapping = pol.get("criterion_evidence")
         if not isinstance(mapping, dict):
@@ -620,6 +783,8 @@ def validate_transition(candidate: Any, to_state: str,
                            "给出对应的 Evidence ID",
                            **{"from": frm, "to": to, "vuln_type": vuln_type,
                               "required_criteria": list(rule["required_criteria"])})
+        by_id = {ev.get("evidence_id"): ev for ev in rows}
+        specs = CRITERION_SUPPORT.get(vuln_type) or {}
         for criterion in rule["required_criteria"]:
             refs_raw = mapping.get(criterion)
             if isinstance(refs_raw, str):
@@ -642,6 +807,39 @@ def validate_transition(candidate: Any, to_state: str,
                                f"判据 {criterion} 引用了未选中的证据：{unknown}",
                                **{"from": frm, "to": to, "vuln_type": vuln_type,
                                   "criterion": criterion, "missing": unknown})
+            spec = specs.get(criterion)
+            if not isinstance(spec, dict):
+                return _result(False, "CONFIRM_CRITERION_UNSUPPORTED",
+                               f"类型 {vuln_type} 的判据 {criterion} 没有语义规则；"
+                               "缺少规则时不得把布尔 true 当作证明",
+                               **{"from": frm, "to": to, "vuln_type": vuln_type,
+                                  "criterion": criterion})
+            for ref in refs:
+                ev_row = by_id.get(ref) or {}
+                status = _support_status(ev_row, criterion, spec)
+                base = {"from": frm, "to": to, "vuln_type": vuln_type,
+                        "criterion": criterion, "evidence_id": ref,
+                        "accepted_kinds": list(spec.get("kinds") or ()),
+                        "accepted_types": list(spec.get("types") or accepted_types)}
+                if status == "TYPE":
+                    return _result(False, "CONFIRM_CRITERION_TYPE",
+                                   f"证据 {ref} 的类型 {ev_row.get('type')!r} 不能支持"
+                                   f"判据 {criterion}；需要 "
+                                   f"{list(spec.get('types') or accepted_types)}",
+                                   **base)
+                if status == "UNSUPPORTED":
+                    return _result(False, "CONFIRM_CRITERION_UNSUPPORTED",
+                                   f"证据 {ref} 没有为判据 {criterion} 声明 supports；"
+                                   "仅有 Evidence ID 不足以证明该判据",
+                                   **base)
+                if status == "SEMANTICS":
+                    return _result(False, "CONFIRM_CRITERION_SEMANTICS",
+                                   f"证据 {ref} 的 supports 没有为判据 {criterion} "
+                                   f"提供可核对的观察项；需要 kind="
+                                   f"{list(spec.get('kinds') or ())} 且 details 含 "
+                                   f"{list(spec.get('required') or ())}",
+                                   **base)
+            criterion_sources[criterion] = list(refs)
 
     has_expected = "expected" in pol
     has_actual = "actual" in pol
@@ -665,11 +863,17 @@ def validate_transition(candidate: Any, to_state: str,
                            "验证证据没有触发上下文（event.trigger / 触发事件 / PoC）",
                            **{"from": frm, "to": to, "vuln_type": vuln_type})
 
+    used: Dict[str, int] = {}
+    for refs in criterion_sources.values():
+        for ref in refs:
+            used[ref] = used.get(ref, 0) + 1
     return _result(True, "OK", f"允许 {frm} → {to}（{vuln_type}）",
                    **{"from": frm, "to": to, "vuln_type": vuln_type,
                       "target_sha256": target,
                       "evidence_types": sorted(set(type_hits)),
-                      "criteria": list(rule["required_criteria"])})
+                      "criteria": list(rule["required_criteria"]),
+                      "criterion_sources": criterion_sources,
+                      "shared_evidence": sorted(k for k, n in used.items() if n > 1)})
 
 
 def validate_risk_disposition(row: Any) -> List[Dict[str, str]]:
