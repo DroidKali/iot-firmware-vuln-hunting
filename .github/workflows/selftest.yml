@@ -22,8 +22,8 @@ jobs:
       matrix:
         python: ['3.10', '3.12']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
       - name: Run selftest (POSIX lock, fsync, docs/CLI check)
@@ -35,8 +35,8 @@ jobs:
     name: windows-py3.12
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Run selftest (msvcrt lock, Windows path/ACL branches)
@@ -45,11 +45,12 @@ jobs:
         run: python scripts/selftest.py
 
   macos:
-    name: macos-py3.12
-    runs-on: macos-14
+    name: macos-15-py3.12
+    # macos-14 已于 2026-11 停止支持（报 configuration 'macos-14-arm64-us-default' is not supported）
+    runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Run selftest (fcntl lock, POSIX filesystem semantics)
@@ -61,8 +62,8 @@ jobs:
     name: sandbox-docker
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Require a working container runtime (never skip as pass)
@@ -102,8 +103,8 @@ jobs:
     name: sandbox-fail-closed
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Without a runtime the tool must refuse, not fall back to host
